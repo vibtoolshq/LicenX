@@ -1,0 +1,60 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: 'Segoe UI', sans-serif;
+  --font-mono: 'Segoe UI', sans-serif;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    text-rendering: optimizeLegibility;
+    background-color: #0b0f19;
+    color: #cbd5e1;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    background-color: #0b0f19;
+    color: #cbd5e1;
+    overflow-x: hidden;
+  }
+
+  /* Eye-friendly balanced headings */
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-sans);
+    color: #cbd5e1;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+
+  code, kbd, samp, pre {
+    font-family: var(--font-mono);
+  }
+
+  /* Soft eye-friendly scrollbar */
+  ::-webkit-scrollbar {
+    width: 5px;
+    height: 5px;
+  }
+  ::-webkit-scrollbar-track {
+    background: #0b0f19;
+  }
+  ::-webkit-scrollbar-thumb {
+    background: #1e293b;
+    border-radius: 3px;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    background: #334155;
+  }
+
+  /* Smooth non-glowing selection */
+  ::selection {
+    background: rgba(99, 102, 241, 0.2);
+    color: #e2e8f0;
+  }
+}

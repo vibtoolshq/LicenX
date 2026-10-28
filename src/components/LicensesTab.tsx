@@ -1,0 +1,950 @@
+import {
+  Ban,
+  Check,
+  CheckCircle2,
+  Copy,
+  Download,
+  Edit2,
+  Eye,
+  Laptop,
+  Layers,
+  LogOut,
+  PauseCircle,
+  Plus,
+  RefreshCw,
+  RotateCcw,
+  Search,
+  Settings,
+  Trash2,
+} from 'lucide-react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
+import { useConfirm } from '../context/ConfirmContext';
+import { api } from '../services/apiClient';
+import { AppItem, License } from '../types';
+import { TablePagination } from './TablePagination';
+
+interface LicensesTabProps {
+  onOpenCreate: () => void;
+  onOpenBulk: () => void;
+  onManageDevices: (license: License) => void;
+}
+
+export const LicensesTab: React.FC<LicensesTabProps> = ({
+  onOpenCreate,
+  onOpenBulk,
+  onManageDevices,
+}) => {
+  const confirm = useConfirm();
+  const [licenses, setLicenses] = useState<License[]>([]);
+  const [apps, setApps] = useState<AppItem[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [statusFilter, setStatusFilter] = useState(() => {
+    try {
+      return sessionStorage.getItem('vcon_licenses_status_filter') || 'all';
+    } catch {
+      return 'all';
+    }
+  });
+  const [tierFilter, setTierFilter] = useState(() => {
+    try {
+      return sessionStorage.getItem('vcon_licenses_tier_filter') || 'all';
+    } catch {
+      return 'all';
+    }
+  });
+  const [appFilter, setAppFilter] = useState(() => {
+    try {
+      return sessionStorage.getItem('vcon_licenses_app_filter') || 'all';
+    } catch {
+      return 'all';
+    }
+  });
+  const [selectedIds, setSelectedIds] = useState<string[]>([]);
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
+
+  // Pagination state
+  const [currentPage, setCurrentPage] = useState(() => {
+    try {
+      const p = sessionStorage.getItem('vcon_licenses_page');
+      return p ? parseInt(p, 10) || 1 : 1;
+    } catch {
+      return 1;
+    }
+  });
+  const [pageSize, setPageSize] = useState(20);
+
+  // Persist filter and pagination changes to sessionStorage
+  useEffect(() => {
+    try {
+      sessionStorage.setItem('vcon_licenses_status_filter', statusFilter);
+      sessionStorage.setItem('vcon_licenses_tier_filter', tierFilter);
+      sessionStorage.setItem('vcon_licenses_app_filter', appFilter);
+      sessionStorage.setItem('vcon_licenses_page', String(currentPage));
+    } catch {}
+  }, [statusFilter, tierFilter, appFilter, currentPage]);
+
+  // Settings dropdown state per license
+  const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [menuPos, setMenuPos] = useState<{
+    top?: number;
+    bottom?: number;
+    right: number;
+  } | null>(null);
+
+  // Edit Modal State
+  const [editingLicense, setEditingLicense] = useState<License | null>(null);
+  const [editTier, setEditTier] = useState('');
+  const [editAppId, setEditAppId] = useState<string>('');
+  const [editLimit, setEditLimit] = useState(1);
+  const [editStatus, setEditStatus] = useState<'active' | 'suspended' | 'expired' | 'revoked'>('active');
+  const [editNotes, setEditNotes] = useState('');
+  const [editPin, setEditPin] = useState('');
+  const [editLoading, setEditLoading] = useState(false);
+
+  // Close dropdown on outside click, scroll, or resize
+  useEffect(() => {
+    const handleOutsideClick = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('.license-settings-dropdown') && !target.closest('.license-settings-btn')) {
+        setOpenMenuId(null);
+        setMenuPos(null);
+      }
+    };
+    const handleScrollOrResize = () => {
+      if (openMenuId) {
+        setOpenMenuId(null);
+        setMenuPos(null);
+      }
+    };
+    window.addEventListener('click', handleOutsideClick);
+    window.addEventListener('scroll', handleScrollOrResize, true);
+    window.addEventListener('resize', handleScrollOrResize);
+    return () => {
+      window.removeEventListener('click', handleOutsideClick);
+      window.removeEventListener('scroll', handleScrollOrResize, true);
+      window.removeEventListener('resize', handleScrollOrResize);
+    };
+  }, [openMenuId]);
+
+  const toggleMenu = (e: React.MouseEvent, licId: string) => {
+    e.stopPropagation();
+    if (openMenuId === licId) {
+      setOpenMenuId(null);
+      setMenuPos(null);
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const menuHeight = 220; // safe height for 5-6 dropdown actions
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const openUp = spaceBelow < menuHeight;
+    const right = window.innerWidth - rect.right;
+
+    if (openUp) {
+      setMenuPos({
+        bottom: window.innerHeight - rect.top + 4,
+        right,
+      });
+    } else {
+      setMenuPos({
+        top: rect.bottom + 4,
+        right,
+      });
+    }
+    setOpenMenuId(licId);
+  };
+
+  const activeMenuLic = useMemo(() => {
+    if (!openMenuId) return null;
+    return licenses.find((l) => l.id === openMenuId) || null;
+  }, [openMenuId, licenses]);
+
+  const loadLicenses = async (force = false) => {
+    try {
+      if (licenses.length === 0) setLoading(true);
+      const [licRes, appRes] = await Promise.all([
+        api.getLicenses({
+          search: search.trim() || undefined,
+          status: statusFilter !== 'all' ? statusFilter : undefined,
+          tier: tierFilter !== 'all' ? tierFilter : undefined,
+          app_id: appFilter !== 'all' ? appFilter : undefined,
+          limit: 100,
+        }, force),
+        api.getApps({}, force),
+      ]);
+      const licList = licRes?.licenses || (Array.isArray(licRes) ? (licRes as any) : []);
+      const appList = appRes?.apps || (Array.isArray(appRes) ? (appRes as any) : []);
+      setLicenses(Array.isArray(licList) ? licList : []);
+      setTotal(typeof licRes?.total === 'number' ? licRes.total : (Array.isArray(licList) ? licList.length : 0));
+      setApps(Array.isArray(appList) ? appList : []);
+    } catch {
+      // ignore
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    setCurrentPage(1);
+    loadLicenses();
+  }, [statusFilter, tierFilter, appFilter]);
+
+  const handleSearchSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    setCurrentPage(1);
+    loadLicenses();
+  };
+
+  const handleCopyKey = (lic: License) => {
+    const textToCopy = lic.pin ? `${lic.key} PIN: ${lic.pin}` : lic.key;
+    navigator.clipboard.writeText(textToCopy);
+    setCopiedKey(lic.key);
+    setTimeout(() => setCopiedKey(null), 2000);
+  };
+
+  const formatHalfKey = (key: string) => {
+    if (!key) return '';
+    const parts = key.split('-');
+    if (parts.length >= 4) {
+      return `${parts[0]}-${parts[1]}-••••-••••`;
+    }
+    if (parts.length === 3) {
+      return `${parts[0]}-${parts[1]}-••••`;
+    }
+    if (key.length > 10) {
+      return `${key.slice(0, 9)}••••`;
+    }
+    return key;
+  };
+
+  // Pagination slicing & calculations
+  const totalPages = Math.max(1, Math.ceil(licenses.length / pageSize));
+  const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
+  const paginatedLicenses = useMemo(() => {
+    const start = (safeCurrentPage - 1) * pageSize;
+    return licenses.slice(start, start + pageSize);
+  }, [licenses, safeCurrentPage, pageSize]);
+
+  const isAllPageSelected = paginatedLicenses.length > 0 && paginatedLicenses.every((l) => selectedIds.includes(l.id));
+
+  const toggleSelectAll = () => {
+    if (isAllPageSelected) {
+      const pageIds = new Set(paginatedLicenses.map((l) => l.id));
+      setSelectedIds(selectedIds.filter((id) => !pageIds.has(id)));
+    } else {
+      const newSelected = new Set(selectedIds);
+      paginatedLicenses.forEach((l) => newSelected.add(l.id));
+      setSelectedIds(Array.from(newSelected));
+    }
+  };
+
+  const toggleSelectOne = (id: string) => {
+    if (selectedIds.includes(id)) {
+      setSelectedIds(selectedIds.filter((i) => i !== id));
+    } else {
+      setSelectedIds([...selectedIds, id]);
+    }
+  };
+
+  const handleBulkAction = async (action: string, extendDays?: number) => {
+    if (selectedIds.length === 0) return;
+    if (action === 'delete') {
+      const ok = await confirm(`Delete ${selectedIds.length} licenses?`);
+      if (!ok) return;
+    }
+    if (action === 'reset') {
+      const ok = await confirm(`Reset devices for ${selectedIds.length} licenses? All clients will be logged out and slots cleared.`);
+      if (!ok) return;
+    }
+
+    try {
+      await api.bulkAction({ ids: selectedIds, action, extendDays });
+      setSelectedIds([]);
+      await loadLicenses();
+    } catch (err: any) {
+      alert(err.message || 'Bulk action failed');
+    }
+  };
+
+  const handleDeleteSingle = async (id: string) => {
+    const ok = await confirm('Delete this license key permanently?');
+    if (!ok) return;
+    try {
+      await api.deleteLicense(id);
+      setOpenMenuId(null);
+      await loadLicenses();
+    } catch (err: any) {
+      alert(err.message || 'Failed to delete license');
+    }
+  };
+
+  const handleResetSingle = async (lic: License) => {
+    const ok = await confirm(`Reset all devices for license key "${lic.key}"?\n\nThis will log out all connected client devices, unbind hardware locks, and make the license fresh and ready to use.`);
+    if (!ok) return;
+    try {
+      await api.resetLicenseDevices(lic.id);
+      await loadLicenses();
+    } catch (err: any) {
+      alert(err.message || 'Failed to reset license');
+    }
+  };
+
+  const handleLogoutSingle = async (lic: License) => {
+    const ok = await confirm(`Force logout all client apps bound to license "${lic.key}"?`);
+    if (!ok) return;
+    try {
+      await api.resetLicenseDevices(lic.id);
+      await loadLicenses();
+    } catch (err: any) {
+      alert(err.message || 'Failed to log out client apps');
+    }
+  };
+
+  const handleStatusChange = async (id: string, newStatus: 'active' | 'suspended' | 'revoked') => {
+    try {
+      await api.updateLicense(id, { status: newStatus });
+      setOpenMenuId(null);
+      await loadLicenses();
+    } catch (err: any) {
+      alert(err.message || 'Failed to update status');
+    }
+  };
+
+  const handleOpenEdit = (license: License) => {
+    setOpenMenuId(null);
+    setEditingLicense(license);
+    setEditTier(license.tier || 'Standard');
+    setEditAppId(license.app_id || 'global');
+    setEditLimit(license.device_limit);
+    setEditStatus(license.status);
+    setEditNotes(license.notes || '');
+    setEditPin(license.pin || '');
+  };
+
+  const handleSaveEdit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingLicense) return;
+    setEditLoading(true);
+    try {
+      await api.updateLicense(editingLicense.id, {
+        tier: editTier,
+        app_id: editAppId === 'global' ? null : editAppId,
+        device_limit: Number(editLimit),
+        status: editStatus,
+        notes: editNotes,
+        pin: editPin.trim() || undefined,
+      });
+      setEditingLicense(null);
+      await loadLicenses();
+    } catch (err: any) {
+      alert(err.message || 'Failed to update license');
+    } finally {
+      setEditLoading(false);
+    }
+  };
+
+  const handleExportSelectedCsv = () => {
+    const target = selectedIds.length > 0
+      ? licenses.filter((l) => selectedIds.includes(l.id))
+      : licenses;
+
+    let csv = 'key,pin,status,tier,app,device_limit,validity_type,expires_at,customer,notes\n';
+    target.forEach((l) => {
+      const expStr = l.expires_at ? new Date(l.expires_at).toISOString() : 'Lifetime';
+      csv += `"${l.key}","${l.pin || ''}","${l.status}","${l.tier}","${l.app_name || l.app_slug || 'GLOBAL'}",${l.device_limit},"${l.validity_type}","${expStr}","${l.customer_name || ''}","${l.notes || ''}"\n`;
+    });
+
+    const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `vcon_licenses_export_${Date.now()}.csv`;
+    a.click();
+  };
+
+  const formatExpiry = (license: License) => {
+    if (license.validity_type === 'lifetime' || (!license.expires_at && license.validity_type !== 'hourly')) {
+      return <span className="text-slate-400">Lifetime</span>;
+    }
+
+    if (!license.activated_at && license.validity_type === 'hourly') {
+      return <span className="text-slate-400">{license.validity_value}h (Inactive)</span>;
+    }
+
+    if (!license.expires_at) return <span className="text-slate-500">N/A</span>;
+
+    const diff = license.expires_at - Date.now();
+    if (diff <= 0) {
+      return <span className="text-rose-400/90 font-medium">Expired</span>;
+    }
+
+    const hours = Math.floor(diff / (3600 * 1000));
+    const days = Math.floor(hours / 24);
+
+    if (days > 0) {
+      return <span className="text-slate-400">{days}d {hours % 24}h</span>;
+    }
+    return <span className="text-amber-400/90 font-medium">{hours}h</span>;
+  };
+
+  return (
+    <div className="space-y-3 font-sans text-xs">
+      {/* Controls Bar */}
+      <div className="flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-2">
+        <form onSubmit={handleSearchSubmit} className="flex items-center gap-1.5 flex-1 max-w-md">
+          <div className="relative flex-1">
+            <input
+              type="text"
+              value={search}
+              onChange={(e) => setSearch(e.target.value)}
+              placeholder="Search key..."
+              className="w-full pl-7 pr-2.5 py-1 text-xs bg-slate-900 border border-slate-800 rounded text-slate-200 font-sans focus:border-indigo-500/80 focus:outline-none"
+            />
+            <Search className="w-3.5 h-3.5 text-slate-500 absolute left-2 top-1.5" />
+          </div>
+          <button
+            type="submit"
+            className="px-2.5 py-1 text-xs font-medium rounded bg-slate-900 hover:bg-slate-850 text-slate-300 border border-slate-800 transition-colors"
+          >
+            Search
+          </button>
+        </form>
+
+        <div className="flex items-center gap-2">
+          {/* App Scope Filter */}
+          <select
+            value={appFilter}
+            onChange={(e) => setAppFilter(e.target.value)}
+            className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none max-w-[140px] truncate"
+          >
+            <option value="all">App: All</option>
+            <option value="global">Global Only</option>
+            {apps.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.display_name}
+              </option>
+            ))}
+          </select>
+
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value)}
+            className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none"
+          >
+            <option value="all">Status: All</option>
+            <option value="active">Active</option>
+            <option value="expired">Expired</option>
+            <option value="suspended">Suspended</option>
+            <option value="revoked">Revoked</option>
+          </select>
+
+          <select
+            value={tierFilter}
+            onChange={(e) => setTierFilter(e.target.value)}
+            className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none"
+          >
+            <option value="all">Tier: All</option>
+            <option value="Standard">Standard</option>
+            <option value="Pro">Pro</option>
+            <option value="Enterprise">Enterprise</option>
+            <option value="VIP">VIP</option>
+          </select>
+
+          <button
+            onClick={() => loadLicenses(true)}
+            title="Reload table"
+            className="p-1 rounded bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+
+          <button
+            onClick={onOpenBulk}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-slate-900 hover:bg-slate-850 text-slate-300 border border-slate-750 transition-colors"
+          >
+            <Layers className="w-3 h-3 text-slate-400" />
+            Bulk
+          </button>
+
+          <button
+            onClick={onOpenCreate}
+            className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-indigo-600/90 hover:bg-indigo-600 text-slate-100 transition-colors"
+          >
+            <Plus className="w-3 h-3" />
+            Issue
+          </button>
+        </div>
+      </div>
+
+      {/* Bulk Action Bar (when selected) - Includes Reset Feature */}
+      {selectedIds.length > 0 && (
+        <div className="p-2 rounded bg-slate-900 border border-slate-800 flex items-center justify-between text-xs text-slate-300 font-sans">
+          <span>{selectedIds.length} licenses selected</span>
+          <div className="flex items-center gap-1.5 font-medium">
+            {/* Bulk Reset Feature */}
+            <button
+              onClick={() => handleBulkAction('reset')}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-750 text-sky-400 border border-slate-700 transition-colors"
+              title="Reset devices & logout clients for selected licenses"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Reset Devices
+            </button>
+            <button
+              onClick={() => handleBulkAction('activate')}
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-750 text-emerald-400 border border-slate-700 transition-colors"
+            >
+              Activate
+            </button>
+            <button
+              onClick={() => handleBulkAction('suspend')}
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-750 text-amber-400 border border-slate-700 transition-colors"
+            >
+              Suspend
+            </button>
+            <button
+              onClick={() => handleBulkAction('revoke')}
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-750 text-rose-400 border border-slate-700 transition-colors"
+            >
+              Revoke
+            </button>
+            <button
+              onClick={() => handleBulkAction('extend', 30)}
+              className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-750 text-indigo-300 border border-slate-700 transition-colors"
+            >
+              +30 Days
+            </button>
+            <button
+              onClick={handleExportSelectedCsv}
+              className="flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-750 text-slate-300 border border-slate-700 transition-colors"
+            >
+              <Download className="w-3 h-3" />
+              CSV
+            </button>
+            <button
+              onClick={() => handleBulkAction('delete')}
+              className="p-1 rounded bg-slate-800 hover:bg-rose-950/40 text-rose-400 transition-colors"
+              title="Delete Selected"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Main License Table - Clean & Compact */}
+      <div className="border border-slate-800/80 rounded bg-slate-950/50 overflow-hidden min-h-[320px]">
+        <div className="overflow-x-auto">
+          <table className="w-full text-left font-sans text-xs">
+            <thead className="bg-slate-900/60 border-b border-slate-800/80 text-xs font-semibold tracking-wider text-slate-400 uppercase font-sans">
+              <tr>
+                <th className="py-2.5 px-3 w-6">
+                  <input
+                    type="checkbox"
+                    checked={isAllPageSelected}
+                    onChange={toggleSelectAll}
+                    className="rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-0"
+                  />
+                </th>
+                <th className="py-2.5 px-3">License Key</th>
+                <th className="py-2.5 px-3">App Scope</th>
+                <th className="py-2.5 px-3">Status</th>
+                <th className="py-2.5 px-3">Tier</th>
+                <th className="py-2.5 px-3">HWID Lock</th>
+                <th className="py-2.5 px-3">Validity</th>
+                <th className="py-2.5 px-3 text-right">Actions</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/40 text-slate-300 text-xs">
+              {licenses.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="py-8 text-center text-slate-500 font-sans">
+                    {loading ? 'Loading licenses...' : 'No licenses matching filter criteria.'}
+                  </td>
+                </tr>
+              ) : (
+                paginatedLicenses.map((lic) => {
+                const boundCount = lic.bound_devices_count ?? 0;
+                const limit = lic.device_limit;
+                const isFull = limit !== -1 && boundCount >= limit;
+                const isMenuOpen = openMenuId === lic.id;
+
+                return (
+                  <tr key={lic.id} className="hover:bg-slate-900/30 transition-colors">
+                    {/* Checkbox */}
+                    <td className="py-2 px-3">
+                      <input
+                        type="checkbox"
+                        checked={selectedIds.includes(lic.id)}
+                        onChange={() => toggleSelectOne(lic.id)}
+                        className="rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-0"
+                      />
+                    </td>
+
+                    {/* License Key: Half shown, full key & PIN copied */}
+                    <td className="py-2 px-3">
+                      <div className="flex items-center gap-1.5">
+                        <div className="flex flex-col">
+                          <span
+                            onClick={() => handleCopyKey(lic)}
+                            className="font-medium text-slate-200 cursor-pointer font-mono text-xs tracking-wider hover:text-indigo-300 transition-colors"
+                            title={`Click to copy: ${lic.key}${lic.pin ? ` PIN: ${lic.pin}` : ''}`}
+                          >
+                            {formatHalfKey(lic.key)}
+                          </span>
+                          {lic.pin && (
+                            <span className="text-[10px] text-indigo-300/80 font-mono font-medium tracking-widest">
+                              PIN: {lic.pin}
+                            </span>
+                          )}
+                        </div>
+                        <button
+                          onClick={() => handleCopyKey(lic)}
+                          className="text-slate-500 hover:text-slate-300 p-0.5 rounded transition-colors"
+                          title={`Copy Key & PIN: ${lic.key}${lic.pin ? ` PIN: ${lic.pin}` : ''}`}
+                        >
+                          {copiedKey === lic.key ? (
+                            <Check className="w-3 h-3 text-emerald-400/90" />
+                          ) : (
+                            <Copy className="w-3 h-3" />
+                          )}
+                        </button>
+                      </div>
+                    </td>
+
+                    {/* App Scope: Only App Display Name */}
+                    <td className="py-2 px-3">
+                      <span className="text-slate-300 font-sans font-medium">
+                        {lic.app_name || 'Global'}
+                      </span>
+                    </td>
+
+                    {/* Status */}
+                    <td className="py-2 px-3">
+                      <span
+                        className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium uppercase font-sans ${
+                          lic.status === 'active'
+                            ? 'bg-emerald-950/30 text-emerald-400/90 border border-emerald-900/40'
+                            : lic.status === 'expired'
+                            ? 'bg-amber-950/30 text-amber-300/85 border border-amber-900/40'
+                            : lic.status === 'suspended'
+                            ? 'bg-slate-900 text-slate-400 border border-slate-800'
+                            : 'bg-rose-950/30 text-rose-400/85 border border-rose-900/40'
+                        }`}
+                      >
+                        {lic.status}
+                      </span>
+                    </td>
+
+                    {/* Tier */}
+                    <td className="py-2 px-3">
+                      <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-800 text-[10px] font-medium font-sans text-slate-400">
+                        {lic.tier}
+                      </span>
+                    </td>
+
+                    {/* HWID Lock */}
+                    <td className="py-2 px-3">
+                      <button
+                        onClick={() => onManageDevices(lic)}
+                        className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-sans border transition-colors ${
+                          isFull
+                            ? 'bg-amber-950/20 border-amber-900/40 text-amber-300/85'
+                            : 'bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200 hover:border-slate-700'
+                        }`}
+                        title="Click to view & unbind locked hardware"
+                      >
+                        <Laptop className="w-3 h-3 text-slate-400" />
+                        <span className="font-mono">
+                          {boundCount} / {limit === -1 ? '∞' : limit}
+                        </span>
+                      </button>
+                    </td>
+
+                    {/* Validity without 'remaining' */}
+                    <td className="py-2 px-3 font-sans">{formatExpiry(lic)}</td>
+
+                    {/* Actions: Reset Icon, Logout Icon, Settings Dropdown Menu */}
+                    <td className="py-2 px-2.5 text-right relative">
+                      <div className="flex items-center justify-end gap-1 license-settings-menu">
+                        {/* 1. Reset Icon */}
+                        <button
+                          onClick={() => handleResetSingle(lic)}
+                          title="Reset Devices"
+                          className="p-1 rounded text-slate-400 hover:text-sky-300 hover:bg-slate-900 transition-colors"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" />
+                        </button>
+
+                        {/* 2. Logout Icon */}
+                        <button
+                          onClick={() => handleLogoutSingle(lic)}
+                          title="Force Logout"
+                          className="p-1 rounded text-slate-400 hover:text-amber-300 hover:bg-slate-900 transition-colors"
+                        >
+                          <LogOut className="w-3.5 h-3.5" />
+                        </button>
+
+                        {/* 3. Settings Icon */}
+                        <button
+                          onClick={(e) => toggleMenu(e, lic.id)}
+                          title="Settings & Actions"
+                          className={`license-settings-btn p-1 rounded transition-colors ${
+                            isMenuOpen
+                              ? 'bg-indigo-600/30 text-indigo-300 border border-indigo-500/40'
+                              : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+                          }`}
+                        >
+                          <Settings className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
+      <TablePagination
+        currentPage={safeCurrentPage}
+        totalItems={licenses.length}
+        pageSize={pageSize}
+        onPageChange={setCurrentPage}
+        onPageSizeChange={(newSize) => {
+          setPageSize(newSize);
+          setCurrentPage(1);
+        }}
+        itemLabel="licenses"
+      />
+    </div>
+
+      {/* Edit License Modal */}
+      {editingLicense && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/75 backdrop-blur-xs">
+          <div className="w-full max-w-md bg-slate-950 border border-slate-800 rounded-lg shadow-xl overflow-hidden font-sans text-xs">
+            <div className="p-3.5 border-b border-slate-800 bg-slate-900/40 flex items-center justify-between">
+              <span className="font-semibold text-slate-200 text-xs tracking-normal">
+                Edit Key: <span className="font-mono text-indigo-300 font-medium">{editingLicense.key}</span>
+              </span>
+              <button
+                onClick={() => setEditingLicense(null)}
+                className="text-slate-400 hover:text-slate-200 transition-colors"
+              >
+                ✕
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEdit} className="p-4 space-y-3.5 font-sans text-xs">
+              <div>
+                <label className="text-xs font-medium text-slate-400 block mb-1">Target Application Scope</label>
+                <select
+                  value={editAppId}
+                  onChange={(e) => setEditAppId(e.target.value)}
+                  className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded text-slate-200 font-sans focus:outline-none"
+                >
+                  <option value="global">Global (All Applications)</option>
+                  {apps.map((a) => (
+                    <option key={a.id} value={a.id}>
+                      {a.display_name} ({a.app_slug})
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-xs font-medium text-slate-400 block mb-1">Status</label>
+                <select
+                  value={editStatus}
+                  onChange={(e: any) => setEditStatus(e.target.value)}
+                  className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded text-slate-200 font-sans focus:outline-none"
+                >
+                  <option value="active">Active</option>
+                  <option value="suspended">Suspended</option>
+                  <option value="expired">Expired</option>
+                  <option value="revoked">Revoked</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-medium text-slate-400 block mb-1">Tier</label>
+                  <select
+                    value={editTier}
+                    onChange={(e) => setEditTier(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded text-slate-200 font-sans focus:outline-none"
+                  >
+                    <option value="Standard">Standard</option>
+                    <option value="Pro">Pro</option>
+                    <option value="Enterprise">Enterprise</option>
+                    <option value="VIP">VIP</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-400 block mb-1">Device Limit</label>
+                  <select
+                    value={editLimit}
+                    onChange={(e) => setEditLimit(Number(e.target.value))}
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded text-slate-200 font-sans focus:outline-none"
+                  >
+                    <option value={1}>1 Device</option>
+                    <option value={2}>2 Devices</option>
+                    <option value={3}>3 Devices</option>
+                    <option value={5}>5 Devices</option>
+                    <option value={10}>10 Devices</option>
+                    <option value={-1}>Unlimited (-1)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs font-medium text-slate-400 block mb-1">4-Digit Security PIN</label>
+                  <input
+                    type="text"
+                    maxLength={4}
+                    value={editPin}
+                    onChange={(e) => setEditPin(e.target.value.replace(/\D/g, ''))}
+                    placeholder="e.g. 4321"
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded text-slate-200 focus:outline-none tracking-widest font-mono text-center font-bold text-xs"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-medium text-slate-400 block mb-1">Notes</label>
+                  <input
+                    type="text"
+                    value={editNotes}
+                    onChange={(e) => setEditNotes(e.target.value)}
+                    className="w-full px-2.5 py-1.5 bg-slate-900 border border-slate-800 rounded text-slate-200 font-sans text-xs focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 flex justify-end gap-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingLicense(null)}
+                  className="px-3 py-1.5 rounded bg-slate-900 hover:bg-slate-850 text-slate-400 hover:text-slate-200 border border-slate-800 font-medium transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={editLoading}
+                  className="px-3 py-1.5 rounded bg-indigo-600/90 hover:bg-indigo-600 text-slate-100 font-medium disabled:opacity-50 transition-colors"
+                >
+                  Save Changes
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Floating Action Dropdown Popover (Portal to Body) */}
+      {openMenuId && menuPos && activeMenuLic && createPortal(
+        <div
+          onClick={(e) => e.stopPropagation()}
+          style={{
+            position: 'fixed',
+            top: menuPos.top !== undefined ? `${menuPos.top}px` : 'auto',
+            bottom: menuPos.bottom !== undefined ? `${menuPos.bottom}px` : 'auto',
+            right: `${menuPos.right}px`,
+          }}
+          className="license-settings-dropdown z-[9999] w-44 rounded-md bg-slate-950/95 backdrop-blur-md border border-slate-800 shadow-2xl py-1 text-left font-sans text-xs animate-in fade-in zoom-in-95 duration-100"
+        >
+          {/* Device View */}
+          <button
+            onClick={() => {
+              setOpenMenuId(null);
+              setMenuPos(null);
+              onManageDevices(activeMenuLic);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-slate-300 hover:bg-slate-900 hover:text-slate-200 transition-colors"
+          >
+            <Eye className="w-3.5 h-3.5 text-indigo-400/90" />
+            <span>View Devices</span>
+          </button>
+
+          {/* Edit */}
+          <button
+            onClick={() => {
+              setOpenMenuId(null);
+              setMenuPos(null);
+              handleOpenEdit(activeMenuLic);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-slate-300 hover:bg-slate-900 hover:text-slate-200 transition-colors"
+          >
+            <Edit2 className="w-3.5 h-3.5 text-slate-400" />
+            <span>Edit License</span>
+          </button>
+
+          <div className="my-1 border-t border-slate-800/80" />
+
+          {/* Activate */}
+          {activeMenuLic.status !== 'active' && (
+            <button
+              onClick={() => {
+                setOpenMenuId(null);
+                setMenuPos(null);
+                handleStatusChange(activeMenuLic.id, 'active');
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-emerald-400 hover:bg-slate-900 transition-colors"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5" />
+              <span>Activate</span>
+            </button>
+          )}
+
+          {/* Deactivate / Suspend */}
+          {activeMenuLic.status !== 'suspended' && (
+            <button
+              onClick={() => {
+                setOpenMenuId(null);
+                setMenuPos(null);
+                handleStatusChange(activeMenuLic.id, 'suspended');
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-amber-400 hover:bg-slate-900 transition-colors"
+            >
+              <PauseCircle className="w-3.5 h-3.5" />
+              <span>Suspend</span>
+            </button>
+          )}
+
+          {/* Revoke */}
+          {activeMenuLic.status !== 'revoked' && (
+            <button
+              onClick={() => {
+                setOpenMenuId(null);
+                setMenuPos(null);
+                handleStatusChange(activeMenuLic.id, 'revoked');
+              }}
+              className="w-full flex items-center gap-2 px-3 py-1.5 text-rose-400 hover:bg-slate-900 transition-colors"
+            >
+              <Ban className="w-3.5 h-3.5" />
+              <span>Revoke</span>
+            </button>
+          )}
+
+          <div className="my-1 border-t border-slate-800/80" />
+
+          {/* Delete */}
+          <button
+            onClick={() => {
+              setOpenMenuId(null);
+              setMenuPos(null);
+              handleDeleteSingle(activeMenuLic.id);
+            }}
+            className="w-full flex items-center gap-2 px-3 py-1.5 text-rose-400 hover:bg-rose-950/30 transition-colors"
+          >
+            <Trash2 className="w-3.5 h-3.5" />
+            <span>Delete Key</span>
+          </button>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+};
