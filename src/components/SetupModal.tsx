@@ -4,12 +4,14 @@ import { api } from '../services/apiClient';
 
 interface SetupModalProps {
   hasTursoEnv: boolean;
+  ownerCodeRequired?: boolean;
   onCompleted: (username: string) => void;
 }
 
-export const SetupModal: React.FC<SetupModalProps> = ({ hasTursoEnv, onCompleted }) => {
+export const SetupModal: React.FC<SetupModalProps> = ({ hasTursoEnv, ownerCodeRequired = false, onCompleted }) => {
   const [username, setUsername] = useState('admin');
   const [password, setPassword] = useState('');
+  const [ownerSetupCode, setOwnerSetupCode] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [enableR2, setEnableR2] = useState(false);
   const [r2Config, setR2Config] = useState({
@@ -43,6 +45,7 @@ export const SetupModal: React.FC<SetupModalProps> = ({ hasTursoEnv, onCompleted
       const payload: any = {
         username: username.trim(),
         password,
+        ...(ownerCodeRequired ? { ownerSetupCode } : {}),
       };
 
       if (enableR2 && r2Config.accountId && r2Config.bucketName) {
@@ -82,6 +85,15 @@ export const SetupModal: React.FC<SetupModalProps> = ({ hasTursoEnv, onCompleted
             </div>
           )}
 
+          {ownerCodeRequired && (
+            <div className="space-y-1">
+              <label className="text-[11px] font-mono text-slate-400 block mb-1">Owner Setup Code</label>
+              <input type="password" autoComplete="off" value={ownerSetupCode}
+                onChange={(e) => setOwnerSetupCode(e.target.value)} required minLength={64} maxLength={64}
+                className="w-full px-2.5 py-1.5 text-xs bg-slate-900 border border-slate-800 rounded text-slate-200 focus:border-indigo-500/80 focus:outline-none font-mono"
+                placeholder="Code shown by VPS installer" />
+            </div>
+          )}
           <div className="space-y-1">
             <label className="text-[11px] font-mono text-slate-400 block mb-1">Admin Username</label>
             <input

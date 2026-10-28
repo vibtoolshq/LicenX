@@ -105,6 +105,7 @@ export interface StorageStatus {
 
 export interface SetupStatus extends Partial<StorageStatus> {
   initialized: boolean;
+  ownerCodeRequired?: boolean;
   adminUsername: string | null;
   r2Configured: boolean;
   hasTursoEnv: boolean;

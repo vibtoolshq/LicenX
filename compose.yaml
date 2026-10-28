@@ -25,6 +25,7 @@ services:
       STORAGE_PROVIDER: local
       LOCAL_STORAGE_PATH: /var/lib/licenx/storage
       TRUSTED_PROXY_IP: ${TRUSTED_PROXY_IP:-172.30.3.2}
+      OWNER_SETUP_CODE_SHA256: ${OWNER_SETUP_CODE_SHA256:-}
     volumes:
       - app-storage:/var/lib/licenx/storage
     depends_on:

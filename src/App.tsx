@@ -337,6 +337,7 @@ export default function App() {
       <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col font-sans">
         <SetupModal
           hasTursoEnv={setupStatus.hasTursoEnv}
+          ownerCodeRequired={setupStatus.ownerCodeRequired}
           onCompleted={(user) => {
             setUsername(user);
             setAuthenticated(true);

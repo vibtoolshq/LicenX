@@ -278,6 +278,7 @@ export const api = {
   initSetup: async (data: {
     username: string;
     password: string;
+    ownerSetupCode?: string;
     r2Config?: any;
   }) => {
     invalidateCache();

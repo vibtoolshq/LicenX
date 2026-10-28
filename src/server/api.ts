@@ -2,6 +2,7 @@ import { loadStorage, storageStatus, prepareAssetUpload, assertPublicAssetKey, p
 import * as archiverModule from "archiver";
 import { NextFunction, Request, Response, Router } from "express";
 import crypto from "node:crypto";
+import { ownerBootstrapRequired, validOwnerSetupCode } from "./bootstrap.js";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -203,6 +204,7 @@ apiRouter.get("/setup/status", async (req: Request, res: Response) => {
 
     res.json({
       initialized: isInitialized,
+      ownerCodeRequired: ownerBootstrapRequired(),
       adminUsername: null,
       r2Configured,
       ...storageStatus(result.rows[0]?.r2_config_json),
@@ -222,15 +224,18 @@ apiRouter.post("/setup/init", async (req: Request, res: Response) => {
     }
 
     const db = getDbClient();
-    const existing = await db.execute("SELECT id FROM admin_config LIMIT 1");
-    if (existing.rows.length > 0) {
-      res
-        .status(400)
-        .json({ error: "Admin is already initialized. Please login." });
+    const { username, password, r2Config, ownerSetupCode } = req.body ?? {};
+    if (ownerBootstrapRequired() && !validOwnerSetupCode(ownerSetupCode)) {
+      res.status(403).json({ error: "Invalid owner setup code" });
       return;
     }
-
-    const { username, password, r2Config } = req.body;
+    if (!ownerBootstrapRequired()) {
+      const existing = await db.execute("SELECT id FROM admin_config LIMIT 1");
+      if (existing.rows.length > 0) {
+        res.status(400).json({ error: "Admin is already initialized. Please login." });
+        return;
+      }
+    }
     if (!username || !password) {
       res.status(400).json({ error: "Username and password are required" });
       return;
@@ -251,7 +256,18 @@ apiRouter.post("/setup/init", async (req: Request, res: Response) => {
 
     const r2Json = r2Config ? JSON.stringify(r2Config) : null;
 
-    await db.execute({
+    const ownerTx = ownerBootstrapRequired() ? await db.transaction("write") : null;
+    try {
+      if (ownerTx) {
+        await ownerTx.execute("SELECT pg_advisory_xact_lock(1280197465)");
+        const existing = await ownerTx.execute("SELECT id FROM admin_config LIMIT 1");
+        if (existing.rows.length) {
+          await ownerTx.rollback();
+          res.status(409).json({ error: "Admin is already initialized. Please login." });
+          return;
+        }
+      }
+      await (ownerTx ?? db).execute({
       sql: `INSERT INTO admin_config (id, username, password_hash, jwt_secret, ed25519_private_key, ed25519_public_key, r2_config_json, created_at, updated_at)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       args: [
@@ -265,7 +281,14 @@ apiRouter.post("/setup/init", async (req: Request, res: Response) => {
         now,
         now,
       ],
-    });
+      });
+      if (ownerTx) await ownerTx.commit();
+    } catch (setupError) {
+      if (ownerTx) await ownerTx.rollback();
+      throw setupError;
+    } finally {
+      ownerTx?.close();
+    }
 
     const token = createSessionToken(
       {

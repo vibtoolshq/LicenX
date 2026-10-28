@@ -266,3 +266,18 @@ For a **new, isolated VPS** where 80/443 are free, review `deploy/env.vps.exampl
 If **Coolify or another reverse proxy already owns 80/443**, do **not** enable the `standalone-https` profile or publish the database. Connect the existing proxy to the Compose `licenx_frontend` network and route its HTTPS hostname to `app:3000`. Set `TRUSTED_PROXY_IP` to **only** the proxy's actual container IP, then re-create the application container. The default trusted hop `172.30.3.2` is for the standalone Caddy configuration. The frontend bridge subnet must not conflict with existing Docker networks. Always verify the HTTPS Origin/CSRF/login flow on an authorized test environment before rollout.
 
 Container builds whitelist only required source/static/SDK inputs through `.dockerignore`; the existing local `vcon_data.db`, ignored `notes/`, credentials and runtime data are not deployment inputs. This does **not** remediate previously published secrets in Git history. Review the unresolved security findings and rotate any reused exposed secrets before a real production rollout. Operational deployment, installer, complete database backup/restore and staging acceptance are outside this phase.
+
+## Ubuntu 24.04 installer (Phase-04)
+
+A clean Ubuntu 24.04 LTS VPS with Git, OpenSSL, Docker Engine and the Docker Compose plugin can run the following **from the checked-out LicenX repository root**. The installer will not replace existing services, install a different container runtime, alter firewall rules or remove existing volumes.
+
+```sh
+bash scripts/install-vps.sh --check --domain license.example.com --email operator@example.com
+bash scripts/install-vps.sh --domain license.example.com --email operator@example.com
+```
+
+The preflight requires an available Docker daemon, supported OS, valid host/email, DNS resolution, and unoccupied ports 80/443 on a **fresh standalone-Caddy** install. Install Docker Engine and Compose first following the official Ubuntu guidance when missing; if Coolify already owns HTTPS ports, do not use the standalone installer—use the existing reverse-proxy integration from Phase-03. The `--check` flag performs **no installation or writes**.
+
+On the first install, the script creates a private `.env` (mode 0600) with generated PostgreSQL credentials and **only a SHA-256 hash** of a random 256-bit owner claim code. The original owner code is available locally in `.env.owner-setup` (mode 0600) and printed only on an interactive terminal; **do not post it in chat, logs or Git**. Visit `https://YOUR_DOMAIN/vcon`, enter that owner setup code and a fresh admin password. An invalid code cannot initialize the VPS admin; the successful claim becomes immutable because the first-admin insert is serialized in PostgreSQL. Cloudflare/Turso legacy setup is unchanged. After setup, keep the owner file secured with your backup materials.
+
+Running the same installer again using the exact same domain/email preserves the existing secrets/configuration, first-admin identity, PostgreSQL data, files and TLS volumes. A changed domain/email or invalid existing owner hash blocks the run rather than overwriting it. No automatic database restore, system package setup, arbitrary domain takeover or live VPS deployment has been performed here. Phase-05 remains responsible for real approved-target lifecycle, backup/restore and outstanding security remediation.
