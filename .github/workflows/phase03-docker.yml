@@ -1,0 +1,148 @@
+name: Phase-03 Docker build and smoke
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/phase03-docker.yml"
+      - "Dockerfile"
+      - ".dockerignore"
+      - "compose.yaml"
+      - "deploy/Caddyfile"
+      - "deploy/env.vps.example"
+      - "server.ts"
+      - "package.json"
+      - "package-lock.json"
+      - "src/server/**"
+      - "src/**"
+      - "scripts/buildPythonSdkArchive.mjs"
+      - "SDK/x_license_python/**"
+      - "vite.config.ts"
+      - "index.html"
+      - "public/**"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: phase03-docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-smoke:
+    name: Build and exercise isolated Docker Compose
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Check out exact source revision
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Generate disposable CI-only database configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          password="$(openssl rand -hex 24)"
+          {
+            echo "COMPOSE_PROJECT_NAME=licenx_ci_${GITHUB_RUN_ID}"
+            echo "DOMAIN=localhost"
+            echo "ACME_EMAIL=ci@example.invalid"
+            echo "POSTGRES_DB=licenx_ci"
+            echo "POSTGRES_USER=licenx_ci"
+            echo "POSTGRES_PASSWORD=${password}"
+            echo "DATABASE_URL=postgresql://licenx_ci:${password}@postgres:5432/licenx_ci?sslmode=disable"
+          } >> "$GITHUB_ENV"
+          echo "::add-mask::${password}"
+
+      - name: Verify Docker and Compose and validate config
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version --format '{{.Server.Version}}'
+          docker compose version
+          docker compose --profile standalone-https config --quiet
+
+      - name: Build and start PostgreSQL, production app and localhost HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose --profile standalone-https up --detach --build --wait --wait-timeout 180
+
+      - name: Verify production API, static UI and SDK routes
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose exec -T app node --input-type=module -e '
+            const urls = [
+              ["/api/health", "application/json"],
+              ["/api/ready", "application/json"],
+              ["/api/setup/status", "application/json"],
+              ["/", "text/html"],
+              ["/vcon", "text/html"],
+              ["/api/sdk/download/python", "application/zip"],
+            ];
+            for (const [path, mime] of urls) {
+              const response = await fetch("http://127.0.0.1:3000" + path);
+              if (!response.ok || !response.headers.get("content-type")?.includes(mime)) {
+                throw new Error(path + " failed with status " + response.status);
+              }
+              const body = await response.arrayBuffer();
+              if (body.byteLength < 20) throw new Error(path + " returned an empty response");
+              console.log("PASS", path, response.status, mime);
+            }
+            const unknown = await fetch("http://127.0.0.1:3000/api/not-a-real-route");
+            if (unknown.status !== 404 || !unknown.headers.get("content-type")?.includes("application/json")) {
+              throw new Error("Unknown API path must return JSON 404");
+            }
+          '
+
+      - name: Verify HTTPS through isolated localhost Caddy
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Localhost uses Caddy's disposable local CA. -k is CI-only, never production guidance.
+          curl --insecure --silent --show-error --fail --retry 15 --retry-delay 2 --retry-all-errors \
+            https://localhost/api/ready | grep -q '"status":"ready"'
+          curl --insecure --silent --show-error --fail \
+            https://localhost/ | grep -q 'id="root"'
+          echo "PASS local HTTPS reverse proxy and SPA"
+
+      - name: Inspect runtime image and persistent volumes
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose exec -T app sh -ec '
+            test "$(id -u)" != 0
+            test ! -e /app/vcon_data.db
+            test ! -e /app/notes
+            test ! -e /app/.env
+            test ! -e /app/.git
+            printf "ci-only-fixture" > /var/lib/licenx/storage/.ci-persistence-marker
+          '
+          before="$(docker compose exec -T postgres sh -ec 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname = '\''public'\'';"' | tr -d '\r')"
+          test "$before" -gt 0
+          docker compose --profile standalone-https up --detach --no-deps --no-build --force-recreate app
+          docker compose exec -T app sh -ec 'test "$(cat /var/lib/licenx/storage/.ci-persistence-marker)" = "ci-only-fixture"'
+          docker compose --profile standalone-https up --detach --no-deps --force-recreate postgres
+          for attempt in $(seq 1 30); do
+            if docker compose exec -T postgres sh -ec 'pg_isready -U "$POSTGRES_USER" -d "$POSTGRES_DB" >/dev/null'; then break; fi
+            sleep 2
+          done
+          after="$(docker compose exec -T postgres sh -ec 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname = '\''public'\'';"' | tr -d '\r')"
+          test "$after" = "$before"
+          echo "PASS non-root runtime, no tracked DB/notes, app and PostgreSQL volume recreation"
+
+      - name: Report redacted service state on failure
+        if: failure()
+        shell: bash
+        run: |
+          docker compose --profile standalone-https ps || true
+          # Do not dump app/DB logs or expanded Compose secrets to public workflow output.
+
+      - name: Remove disposable runner-only resources
+        if: always()
+        shell: bash
+        run: |
+          docker compose --profile standalone-https down --volumes --remove-orphans || true
