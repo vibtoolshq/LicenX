@@ -23,6 +23,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
 }) => {
   const confirm = useConfirm();
   const [loading, setLoading] = useState(true);
+  const [storageProvider, setStorageProvider] = useState<'local' | 'r2'>('r2');
   const [tursoUrl, setTursoUrl] = useState('');
   const [hasTursoEnv, setHasTursoEnv] = useState(false);
 
@@ -33,6 +34,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
     secretAccessKey: '',
     bucketName: '',
     publicUrl: '',
+    privateBucketName: '',
   });
   const [r2Saving, setR2Saving] = useState(false);
   const [r2Testing, setR2Testing] = useState(false);
@@ -57,6 +59,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       setLoading(true);
       const [sRes, bRes] = await Promise.all([api.getSettings(), api.getR2Backups()]);
       if (sRes) {
+        setStorageProvider(sRes.storageProvider || 'r2');
         setTursoUrl(sRes.tursoUrl || '');
         setHasTursoEnv(Boolean(sRes.hasTursoEnv));
         if (sRes.r2Config) {
@@ -67,6 +70,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             secretAccessKey: '',
             bucketName: sRes.r2Config.bucketName || '',
             publicUrl: sRes.r2Config.publicUrl || '',
+            privateBucketName: sRes.r2Config.privateBucketName || '',
           });
         }
       }
@@ -183,7 +187,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
         <div className="flex items-center justify-between pb-2 border-b border-slate-800/80">
           <div className="flex items-center gap-2">
             <Cloud className="w-4 h-4 text-slate-400" />
-            <span className="font-medium text-slate-300 uppercase">Cloudflare R2 Object Storage</span>
+            <span className="font-medium text-slate-300 uppercase">{storageProvider === 'local' ? 'VPS Local Storage' : 'Cloudflare R2 Object Storage'}</span>
           </div>
           {r2StatusMessage && (
             <span
@@ -198,7 +202,9 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
           )}
         </div>
 
-        <form onSubmit={handleSaveR2} className="space-y-2.5">
+        {storageProvider === 'local' ? (
+          <p className="text-[11px] text-slate-400">Branding and private backups are stored on this server. Backup downloads require admin login.</p>
+        ) : <form onSubmit={handleSaveR2} className="space-y-2.5">
           <div className="grid grid-cols-2 gap-2.5">
             <div>
               <label className="text-[10px] text-slate-400 block mb-1">Account ID</label>
@@ -260,6 +266,15 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
             />
           </div>
 
+          <div>
+            <label className="text-[10px] text-slate-400 block mb-1">Private Backup Bucket (Optional)</label>
+            <input type="text" value={r2Config.privateBucketName || ''}
+              onChange={(e) => setR2Config({ ...r2Config, privateBucketName: e.target.value })}
+              placeholder="Separate bucket with public access disabled"
+              className="w-full px-2 py-1.5 bg-slate-950 border border-slate-800 rounded text-slate-200 focus:border-indigo-500/80 focus:outline-none" />
+            <p className="text-[10px] text-slate-500 mt-1">Required for private CSV backups. Keep this bucket separate from public branding.</p>
+          </div>
+
           <div className="pt-2 flex items-center justify-end gap-2">
             <button
               type="button"
@@ -277,7 +292,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
               {r2Saving ? 'Saving...' : 'Save R2 Config'}
             </button>
           </div>
-        </form>
+        </form>}
       </div>
 
       {/* Cryptographic Signing Keys */}
@@ -386,7 +401,7 @@ export const SettingsTab: React.FC<SettingsTabProps> = ({
       {backups.length > 0 && (
         <div className="p-3.5 rounded bg-slate-900/40 border border-slate-800 space-y-2">
           <span className="font-medium text-slate-300 uppercase block pb-2 border-b border-slate-800/80">
-            R2 Backup Archive ({backups.length})
+            Private Backup Archive ({backups.length})
           </span>
           <div className="space-y-1">
             {backups.map((b) => (

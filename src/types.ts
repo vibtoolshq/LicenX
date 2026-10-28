@@ -70,6 +70,7 @@ export interface R2Config {
   secretAccessKey: string;
   bucketName: string;
   publicUrl?: string;
+  privateBucketName?: string;
 }
 
 export interface R2Backup {
@@ -77,7 +78,10 @@ export interface R2Backup {
   filename: string;
   record_count: number;
   file_size: number;
-  r2_url: string;
+  r2_url: string | null;
+  download_url?: string | null;
+  provider?: "local" | "r2" | "legacy";
+  downloadable?: boolean;
   created_at: number;
 }
 
@@ -93,7 +97,13 @@ export interface SystemStats {
   serverTime: number;
 }
 
-export interface SetupStatus {
+export interface StorageStatus {
+  storageProvider: "local" | "r2";
+  storageConfigured: boolean;
+  privateBackupsConfigured: boolean;
+}
+
+export interface SetupStatus extends Partial<StorageStatus> {
   initialized: boolean;
   adminUsername: string | null;
   r2Configured: boolean;

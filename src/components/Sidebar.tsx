@@ -42,6 +42,7 @@ interface SidebarProps {
   username: string;
   onLogout: () => void;
   r2Configured: boolean;
+  storageProvider?: 'local' | 'r2';
   hasTursoEnv: boolean;
   collapsed: boolean;
   setCollapsed: (val: boolean) => void;
@@ -61,6 +62,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
   username,
   onLogout,
   r2Configured,
+  storageProvider = 'r2',
   hasTursoEnv,
   collapsed,
   setCollapsed,
@@ -372,7 +374,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
             <div className="flex items-center justify-between text-slate-400">
               <span className="flex items-center gap-1">
                 <Cloud className="w-3 h-3 text-slate-400" />
-                R2 Storage:
+                {storageProvider === 'local' ? 'Local Storage:' : 'R2 Storage:'}
               </span>
               <span className={`font-mono ${r2Configured ? 'text-slate-300' : 'text-slate-500'}`}>
                 {r2Configured ? 'Active' : 'Off'}

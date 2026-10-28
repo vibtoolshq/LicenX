@@ -26,7 +26,7 @@ export const BulkLicenseModal: React.FC<BulkLicenseModalProps> = ({
   const [backupToR2, setBackupToR2] = useState<boolean>(r2Configured);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
-  const [result, setResult] = useState<{ count: number; pin: string; keys: string[]; csv: string; r2Backup: any } | null>(
+  const [result, setResult] = useState<{ count: number; pin: string; keys: string[]; csv: string; r2Backup: any; backupError?: { code: string; message: string } | null } | null>(
     null
   );
   const [copiedAll, setCopiedAll] = useState(false);
@@ -149,7 +149,7 @@ export const BulkLicenseModal: React.FC<BulkLicenseModalProps> = ({
               <div className="p-2.5 rounded bg-slate-900 border border-slate-800 text-xs text-slate-300 flex items-center justify-between font-sans">
                 <span className="flex items-center gap-1.5">
                   <Cloud className="w-3.5 h-3.5 text-slate-400" />
-                  Backed up to Cloudflare R2
+                  Private backup saved
                 </span>
                 {result.r2Backup.url && (
                   <a
@@ -158,10 +158,14 @@ export const BulkLicenseModal: React.FC<BulkLicenseModalProps> = ({
                     rel="noreferrer"
                     className="text-slate-300 underline hover:text-slate-100"
                   >
-                    Download from R2
+                    Download backup
                   </a>
                 )}
               </div>
+            )}
+
+            {result.backupError && (
+              <p role="alert" className="text-xs text-rose-400">Licenses were created, but the backup failed: {result.backupError.message}. Download the CSV below.</p>
             )}
 
             {/* Generated Keys & PIN List Preview */}
@@ -347,7 +351,7 @@ export const BulkLicenseModal: React.FC<BulkLicenseModalProps> = ({
                     className="rounded bg-slate-900 border-slate-700 text-indigo-600 focus:ring-0"
                   />
                   <span className="text-[11px] text-slate-300">
-                    Auto-upload generated CSV to Cloudflare R2 Storage
+                    Save generated CSV to private backup storage
                   </span>
                 </label>
               </div>

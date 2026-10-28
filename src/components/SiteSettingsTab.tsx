@@ -32,7 +32,8 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
   const confirm = useConfirm();
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [r2Configured, setR2Configured] = useState(false);
+  const [storageConfigured, setStorageConfigured] = useState(false);
+  const [storageProvider, setStorageProvider] = useState<'local' | 'r2'>('r2');
   const [settings, setSettings] = useState<SiteSettings>(DEFAULT_SITE_SETTINGS);
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -56,7 +57,8 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
       if (res?.siteSettings) {
         setSettings({ ...DEFAULT_SITE_SETTINGS, ...res.siteSettings });
       }
-      setR2Configured(Boolean(res?.r2Configured));
+      setStorageConfigured(Boolean(res?.storageConfigured ?? res?.r2Configured));
+      setStorageProvider(res?.storageProvider || 'r2');
     } catch (err: any) {
       setErrorMessage(err.message || 'Failed to load site settings');
     } finally {
@@ -102,8 +104,8 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
     field: 'logoUrl' | 'faviconUrl' | 'ogImageUrl',
     folder = 'branding'
   ) => {
-    if (!r2Configured) {
-      setErrorMessage('Cloudflare R2 is not configured. Configure in Storage tab first.');
+    if (!storageConfigured) {
+      setErrorMessage('Storage is not configured. Configure in Storage tab first.');
       return;
     }
 
@@ -155,7 +157,7 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
         throw new Error('Upload returned empty asset URL');
       }
     } catch (err: any) {
-      setErrorMessage(err.message || 'Failed to upload asset to Cloudflare R2');
+      setErrorMessage(err.message || 'Failed to upload asset to storage');
     } finally {
       setUploadingField(null);
     }
@@ -179,14 +181,14 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
           <h2 className="text-xs font-semibold text-slate-300 tracking-tight">Site Settings</h2>
           <span
             className={`text-[10px] px-1.5 py-0.5 rounded border font-medium ${
-              r2Configured
+              storageConfigured
                 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20'
                 : 'bg-amber-500/10 text-amber-400 border-amber-500/20'
             }`}
           >
-            {r2Configured ? 'R2 Active' : 'R2 Inactive'}
+            {storageConfigured ? (storageProvider === 'local' ? 'Local Storage Active' : 'R2 Active') : 'Storage Inactive'}
           </span>
-          {!r2Configured && onNavigateToTab && (
+          {!storageConfigured && onNavigateToTab && (
             <button
               type="button"
               onClick={() => onNavigateToTab('settings')}
@@ -309,7 +311,7 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
           <input
             type="file"
             ref={logoInputRef}
-            accept="image/png,image/jpeg,image/svg+xml,image/webp"
+            accept="image/png,image/jpeg,image/gif,image/webp"
             className="hidden"
             onChange={(e) => {
               if (e.target.files?.[0]) handleFileUpload(e.target.files[0], 'logoUrl');
@@ -318,7 +320,7 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
           <input
             type="file"
             ref={faviconInputRef}
-            accept="image/x-icon,image/png,image/svg+xml"
+            accept="image/x-icon,image/vnd.microsoft.icon,image/png"
             className="hidden"
             onChange={(e) => {
               if (e.target.files?.[0]) handleFileUpload(e.target.files[0], 'faviconUrl');
@@ -366,7 +368,7 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
                 <button
                   type="button"
                   onClick={() => logoInputRef.current?.click()}
-                  disabled={uploadingField === 'logoUrl' || !r2Configured}
+                  disabled={uploadingField === 'logoUrl' || !storageConfigured}
                   className="w-full flex items-center justify-center gap-1 px-2 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 text-[10px] font-medium border border-indigo-500/30 transition-colors disabled:opacity-40 cursor-pointer"
                 >
                   {uploadingField === 'logoUrl' ? (
@@ -410,7 +412,7 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
                 <button
                   type="button"
                   onClick={() => faviconInputRef.current?.click()}
-                  disabled={uploadingField === 'faviconUrl' || !r2Configured}
+                  disabled={uploadingField === 'faviconUrl' || !storageConfigured}
                   className="w-full flex items-center justify-center gap-1 px-2 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 text-[10px] font-medium border border-indigo-500/30 transition-colors disabled:opacity-40 cursor-pointer"
                 >
                   {uploadingField === 'faviconUrl' ? (
@@ -454,7 +456,7 @@ export const SiteSettingsTab: React.FC<SiteSettingsTabProps> = ({
                 <button
                   type="button"
                   onClick={() => ogInputRef.current?.click()}
-                  disabled={uploadingField === 'ogImageUrl' || !r2Configured}
+                  disabled={uploadingField === 'ogImageUrl' || !storageConfigured}
                   className="w-full flex items-center justify-center gap-1 px-2 py-1 rounded bg-indigo-600/20 hover:bg-indigo-600/30 text-indigo-300 text-[10px] font-medium border border-indigo-500/30 transition-colors disabled:opacity-40 cursor-pointer"
                 >
                   {uploadingField === 'ogImageUrl' ? (

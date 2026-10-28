@@ -7,6 +7,7 @@ import {
   R2Backup,
   R2Config,
   SetupStatus,
+  StorageStatus,
   SiteSettings,
   SystemStats,
   ValidationLog,
@@ -558,6 +559,7 @@ export const api = {
     validity_value?: number;
     notes?: string;
     backupToR2?: boolean;
+    backupToStorage?: boolean;
   }) => {
     invalidateCache("licenses");
     invalidateCache("system_stats");
@@ -568,6 +570,7 @@ export const api = {
       keys: string[];
       csv: string;
       r2Backup: any;
+      backupError?: { code: string; message: string } | null;
     }>("/api/licenses/bulk", {
       method: "POST",
       body: JSON.stringify(data),
@@ -670,7 +673,7 @@ export const api = {
       r2Config: Partial<R2Config>;
       hasTursoEnv: boolean;
       tursoUrl: string;
-    }>("/api/settings"),
+    } & Partial<StorageStatus>>("/api/settings"),
   saveR2Config: async (config: R2Config) => {
     invalidateCache("settings");
     return request<{ success: boolean; message: string }>("/api/settings/r2", {
@@ -730,7 +733,7 @@ export const api = {
     ),
 
   getSiteSettings: () =>
-    request<{ siteSettings: SiteSettings; r2Configured: boolean }>(
+    request<{ siteSettings: SiteSettings; r2Configured: boolean } & Partial<StorageStatus>>(
       "/api/settings/site",
     ),
   saveSiteSettings: async (data: Partial<SiteSettings>) => {

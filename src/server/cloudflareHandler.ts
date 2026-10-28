@@ -1,3 +1,4 @@
+import { loadStorage, storageStatus, prepareAssetUpload, assertPublicAssetKey, publicAssetHeaders, privateBackupHeaders, backupRecord, saveBackup, readBackup, backupFailure, storageError } from "./storage/index.js";
 import crypto from "node:crypto";
 import {
   ADMIN_CSRF_COOKIE,
@@ -40,7 +41,7 @@ import {
   isValidAppLicensePolicy,
 } from "./licensePolicy.js";
 import { isPublicAccessEnabled } from "./publicAccessSettings.js";
-import { getR2Object, R2Config, testR2Connection, uploadToR2 } from "./r2.js";
+import { R2Config, testR2Connection } from "./r2.js";
 import {
   clearUserControlPinAttempts,
   getUserControlPinRateLimit,
@@ -561,6 +562,7 @@ export async function handleCloudflareApi(
         initialized: isInitialized,
         adminUsername: null, // do not leak admin username
         r2Configured,
+        ...storageStatus(result.rows[0]?.r2_config_json, { runtime: "cloudflare", env }),
         hasTursoEnv: hasTurso,
         serverTime: Date.now(),
       });
@@ -1347,6 +1349,11 @@ export async function handleCloudflareApi(
       } = body;
 
       const numCount = Math.min(Math.max(1, Number(count)), 2000);
+      const backupRequested = Boolean(body.backupToStorage ?? backupToR2);
+      const backupStorage = backupRequested ? await loadStorage(db, { runtime: "cloudflare", env }) : null;
+      if (backupStorage && !backupStorage.privateBackupsConfigured) {
+        return errorResponse("Configure private backup storage before generating a backup", 400);
+      }
       const batchPin =
         pin && pin.toString().length === 4
           ? pin.toString()
@@ -1401,53 +1408,11 @@ export async function handleCloudflareApi(
         await db.batch(statements.slice(i, i + 200));
       }
 
-      let r2UploadResult: any = null;
-      if (backupToR2) {
-        const configRes = await db.execute(
-          "SELECT r2_config_json FROM admin_config LIMIT 1",
-        );
-        if (configRes.rows.length > 0 && configRes.rows[0].r2_config_json) {
-          try {
-            const r2Config: R2Config = JSON.parse(
-              configRes.rows[0].r2_config_json as string,
-            );
-            if (
-              r2Config.accountId &&
-              r2Config.accessKeyId &&
-              r2Config.secretAccessKey &&
-              r2Config.bucketName
-            ) {
-              const timestampStr = new Date()
-                .toISOString()
-                .replace(/[:.]/g, "-");
-              const filename = `bulk_licenses_${prefix}_${timestampStr}.csv`;
-              const uploadRes = await uploadToR2(
-                r2Config,
-                `licenses/${filename}`,
-                csvContent,
-                "text/csv",
-              );
-              if (uploadRes.success) {
-                r2UploadResult = uploadRes;
-                const backupId = "r2_" + crypto.randomBytes(6).toString("hex");
-                await db.execute({
-                  sql: `INSERT INTO r2_backups (id, filename, record_count, file_size, r2_url, created_at)
-                        VALUES (?, ?, ?, ?, ?, ?)`,
-                  args: [
-                    backupId,
-                    filename,
-                    numCount,
-                    csvContent.length,
-                    uploadRes.url || null,
-                    now,
-                  ],
-                });
-              }
-            }
-          } catch {
-            // ignore
-          }
-        }
+      let r2UploadResult: Awaited<ReturnType<typeof saveBackup>> | null = null;
+      let backupError: ReturnType<typeof backupFailure> | null = null;
+      if (backupStorage) {
+        try { r2UploadResult = await saveBackup(db, backupStorage, csvContent, numCount, now); }
+        catch (error) { backupError = backupFailure(error); }
       }
 
       return jsonResponse({
@@ -1458,7 +1423,9 @@ export async function handleCloudflareApi(
         csv: csvContent,
         licenses: createdLicenses,
         r2Backup: r2UploadResult,
-      });
+        backup: r2UploadResult,
+        backupError,
+      }, 200, privateBackupHeaders);
     }
 
     if (normalizedPath === "/licenses/bulk-action" && method === "POST") {
@@ -2620,6 +2587,7 @@ export async function handleCloudflareApi(
             accessKeyId: parsed.accessKeyId || "",
             bucketName: parsed.bucketName || "",
             publicUrl: parsed.publicUrl || "",
+            privateBucketName: parsed.privateBucketName || "",
             secretAccessKey: parsed.secretAccessKey ? "••••••••••••••••" : "",
           };
         } catch {}
@@ -2643,6 +2611,7 @@ export async function handleCloudflareApi(
         username: row.username,
         publicKeyPem: row.ed25519_public_key || null,
         r2Config,
+        ...storageStatus(row.r2_config_json, { runtime: "cloudflare", env }),
         hasTursoEnv: hasTurso,
         tursoUrl: tursoDbUrl,
       });
@@ -2653,7 +2622,7 @@ export async function handleCloudflareApi(
       if (!auth.authorized)
         return errorResponse(auth.error || "Unauthorized", auth.status || 401);
 
-      const { accountId, accessKeyId, secretAccessKey, bucketName, publicUrl } =
+      const { accountId, accessKeyId, secretAccessKey, bucketName, publicUrl, privateBucketName } =
         body;
       let finalSecret = (secretAccessKey || "").trim();
 
@@ -2696,6 +2665,18 @@ export async function handleCloudflareApi(
         bucketName: (bucketName || "").trim(),
         publicUrl: (publicUrl || "").trim(),
       };
+
+      if (privateBucketName !== undefined && typeof privateBucketName !== "string") {
+        return errorResponse("Invalid private bucket name", 400);
+      }
+      if (privateBucketName === undefined) {
+        const existingConfig = await db.execute("SELECT r2_config_json FROM admin_config LIMIT 1");
+        const stored = existingConfig.rows[0]?.r2_config_json;
+        cleanR2Config.privateBucketName = stored ? JSON.parse(String(stored)).privateBucketName || "" : "";
+      } else cleanR2Config.privateBucketName = privateBucketName.trim();
+      if (cleanR2Config.privateBucketName && cleanR2Config.privateBucketName === cleanR2Config.bucketName) {
+        return errorResponse("Use a separate private backup bucket", 400);
+      }
 
       await db.execute({
         sql: "UPDATE admin_config SET r2_config_json = ?, updated_at = ?",
@@ -2754,7 +2735,7 @@ export async function handleCloudflareApi(
       const result = await db.execute(
         "SELECT * FROM r2_backups ORDER BY created_at DESC LIMIT 50",
       );
-      return jsonResponse({ backups: result.rows });
+      return jsonResponse({ backups: result.rows.map(backupRecord) }, 200, privateBackupHeaders);
     }
 
     if (normalizedPath === "/settings/crypto/rotate" && method === "POST") {
@@ -2857,7 +2838,7 @@ export async function handleCloudflareApi(
         }
       }
 
-      return jsonResponse({ siteSettings, r2Configured });
+      return jsonResponse({ siteSettings, r2Configured, ...storageStatus(configRes.rows[0]?.r2_config_json, { runtime: "cloudflare", env }) });
     }
 
     if (normalizedPath === "/settings/site" && method === "POST") {
@@ -2895,70 +2876,32 @@ export async function handleCloudflareApi(
 
     if (normalizedPath === "/settings/upload" && method === "POST") {
       const auth = await verifyAdminAuth(request, env);
-      if (!auth.authorized)
-        return errorResponse(auth.error || "Unauthorized", auth.status || 401);
-
-      const {
-        filename,
-        contentType = "image/png",
-        dataBase64,
-        folder = "branding",
-      } = body;
-      if (!dataBase64) {
-        return errorResponse("Missing file data", 400);
+      if (!auth.authorized) return errorResponse(auth.error || "Unauthorized", auth.status || 401);
+      try {
+        const asset = prepareAssetUpload(body);
+        const storage = await loadStorage(db, { runtime: "cloudflare", env });
+        const result = await storage.putPublic(asset.key, asset.data, asset.contentType);
+        return jsonResponse({ success: true, ...result });
+      } catch (error) {
+        const failure = storageError(error);
+        return errorResponse(failure.message, failure.status);
       }
+    }
 
-      const configRes = await db.execute(
-        "SELECT r2_config_json FROM admin_config LIMIT 1",
-      );
-      if (configRes.rows.length === 0 || !configRes.rows[0].r2_config_json) {
-        return errorResponse(
-          "Cloudflare R2 is not configured. Please configure your R2 credentials in Storage & DB.",
-          400,
-        );
+    if (normalizedPath.startsWith("/storage/backups/") && method === "GET") {
+      const auth = await verifyAdminAuth(request, env);
+      if (!auth.authorized) return errorResponse(auth.error || "Unauthorized", auth.status || 401);
+      try {
+        const storage = await loadStorage(db, { runtime: "cloudflare", env });
+        const file = await readBackup(db, storage, normalizedPath.slice("/storage/backups/".length));
+        return new Response(file.data as BodyInit, { status: 200, headers: {
+          ...corsHeaders, ...privateBackupHeaders, "Content-Type": file.contentType,
+          "Content-Disposition": `attachment; filename="${file.filename}"`,
+        } });
+      } catch (error) {
+        const failure = storageError(error);
+        return new Response(JSON.stringify({ error: failure.message, code: failure.code }), { status: failure.status, headers: { ...corsHeaders, ...privateBackupHeaders, "Content-Type": "application/json" } });
       }
-
-      const r2Config: R2Config = JSON.parse(
-        configRes.rows[0].r2_config_json as string,
-      );
-      if (
-        !r2Config.accountId ||
-        !r2Config.accessKeyId ||
-        !r2Config.secretAccessKey ||
-        !r2Config.bucketName
-      ) {
-        return errorResponse(
-          "Incomplete R2 credentials. Please verify your R2 configuration in Storage & DB.",
-          400,
-        );
-      }
-
-      const cleanExt = (filename || "asset.png").split(".").pop() || "png";
-      const cleanName = (filename || "image")
-        .replace(/[^a-zA-Z0-9_-]/g, "_")
-        .substring(0, 32);
-      const key = `${folder}/${Date.now()}_${cleanName}.${cleanExt}`;
-
-      const rawBase64 = dataBase64.replace(
-        /^data:image\/[a-zA-Z+]+;base64,/,
-        "",
-      );
-      const buffer = Buffer.from(rawBase64, "base64");
-      const uploadRes = await uploadToR2(r2Config, key, buffer, contentType);
-
-      if (!uploadRes.success) {
-        return errorResponse(
-          uploadRes.error || "Failed to upload image to Cloudflare R2",
-          500,
-        );
-      }
-
-      return jsonResponse({
-        success: true,
-        url: uploadRes.url || uploadRes.signedUrl,
-        signedUrl: uploadRes.signedUrl,
-        key,
-      });
     }
 
     // -----------------------------------------------------------------
@@ -2979,39 +2922,24 @@ export async function handleCloudflareApi(
         // ignore decoding errors
       }
 
-      if (
-        !assetKey ||
-        assetKey.includes("..") ||
-        assetKey.startsWith("/") ||
-        assetKey.startsWith("\\")
-      ) {
-        return errorResponse("Invalid asset path", 400);
-      }
+      try {
+      assertPublicAssetKey(assetKey);
 
-      const configRes = await db.execute(
-        "SELECT r2_config_json FROM admin_config LIMIT 1",
-      );
-      if (configRes.rows.length === 0 || !configRes.rows[0].r2_config_json) {
-        return errorResponse("Cloudflare R2 storage not configured", 404);
-      }
-
-      const r2Config: R2Config = JSON.parse(
-        configRes.rows[0].r2_config_json as string,
-      );
-      const fileRes = await getR2Object(r2Config, assetKey);
-      if (!fileRes.success || !fileRes.data) {
-        return errorResponse(fileRes.error || "Asset not found", 404);
-      }
+      const storage = await loadStorage(db, { runtime: "cloudflare", env });
+      const fileRes = await storage.readPublic(assetKey);
 
       return new Response(fileRes.data as unknown as BodyInit, {
         status: 200,
         headers: {
           ...corsHeaders,
           "Content-Type": fileRes.contentType || "application/octet-stream",
-          "Cache-Control":
-            "public, max-age=604800, stale-while-revalidate=86400",
+          ...publicAssetHeaders,
         },
       });
+      } catch (error) {
+        const failure = storageError(error);
+        return errorResponse(failure.message, failure.status);
+      }
     }
 
     // -----------------------------------------------------------------

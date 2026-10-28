@@ -8,3 +8,4 @@ public/x_license_python.zip
 .env*
 !.env.example
 /notes/
+/data/

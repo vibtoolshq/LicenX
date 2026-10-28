@@ -383,7 +383,8 @@ export default function App() {
         setActiveTab={handleTabChange}
         username={username}
         onLogout={handleLogout}
-        r2Configured={setupStatus?.r2Configured ?? false}
+        r2Configured={setupStatus?.storageConfigured ?? setupStatus?.r2Configured ?? false}
+        storageProvider={setupStatus?.storageProvider}
         hasTursoEnv={setupStatus?.hasTursoEnv ?? false}
         collapsed={sidebarCollapsed}
         setCollapsed={handleSetSidebarCollapsed}
@@ -493,7 +494,7 @@ export default function App() {
 
       {showBulkModal && (
         <BulkLicenseModal
-          r2Configured={setupStatus?.r2Configured ?? false}
+          r2Configured={setupStatus?.privateBackupsConfigured ?? setupStatus?.r2Configured ?? false}
           onClose={() => {
             setShowBulkModal(false);
             handleRefresh();

@@ -7,6 +7,7 @@ export interface R2Config {
   secretAccessKey: string;
   bucketName: string;
   publicUrl?: string; // Optional custom domain or worker URL
+  privateBucketName?: string; // Separate bucket with public access disabled for license backups.
 }
 
 /**
@@ -289,7 +290,8 @@ export async function uploadToR2(
   config: R2Config,
   key: string,
   content: string | Uint8Array,
-  contentType = 'text/csv'
+  contentType = 'text/csv',
+  privateObject = false
 ): Promise<{ success: boolean; url?: string; signedUrl?: string; key?: string; error?: string }> {
   try {
     const validation = validateR2Config(config);
@@ -309,6 +311,11 @@ export async function uploadToR2(
     });
 
     await client.send(command);
+
+    if (privateObject) {
+      // Private exports never receive a public/custom-domain URL or presigned bearer URL.
+      return { success: true, key };
+    }
 
     let signedUrl = '';
     try {
