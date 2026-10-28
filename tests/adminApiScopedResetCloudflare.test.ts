@@ -84,6 +84,44 @@ test("Cloudflare admin reset allows own-app key but rejects missing permission a
     const otherAfter = await db.execute({ sql: "SELECT id FROM devices WHERE license_id = ?", args: ["lic_scope_b_" + nonce] });
     assert.equal(ownAfter.rows.length, 0);
     assert.equal(otherAfter.rows.length, 1, "cross-app device must remain after allowed reset");
+
+    // Phase-03 regression: malformed create bodies and %-encoding return 400.
+    const issueKey = generateAdminApiKey("create-qa");
+    await db.execute({
+      sql: "INSERT INTO admin_api_keys (id, name, key_prefix, secret_hash, permissions_json, app_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
+      args: [issueKey.id, issueKey.id, issueKey.keyPrefix, issueKey.secretHash, JSON.stringify(["licenses:create", "licenses:read", "licenses:manage"]), ownApp, now],
+    });
+    const invoke = (path: string, method: string, body?: unknown) =>
+      handleCloudflareApi(
+        new Request("https://licenx.test" + path, {
+          method,
+          headers: { "Authorization": "Bearer " + issueKey.secret, "Content-Type": "application/json" },
+          ...(method === "GET" ? {} : { body: JSON.stringify(body ?? {}) }),
+        }),
+        undefined,
+      );
+    const malformed = await invoke("/api/v1/admin/licenses", "POST", { device_limit: -5 });
+    assert.equal(malformed.status, 400, "bad create input must not issue license");
+    const brokenJson = await handleCloudflareApi(
+      new Request("https://licenx.test/api/v1/admin/licenses", {
+        method: "POST",
+        headers: { Authorization: "Bearer " + issueKey.secret, "Content-Type": "application/json" },
+        body: "{broken-json",
+      }),
+      undefined,
+    );
+    assert.equal(brokenJson.status, 400, "malformed JSON must not issue a default license");
+    for (const [path, method] of [
+      ["/api/v1/admin/licenses/%ZZ", "GET"],
+      ["/api/v1/admin/licenses/%ZZ/reset", "POST"],
+      ["/api/v1/admin/licenses/%ZZ/status", "PATCH"],
+    ]) {
+      assert.equal((await invoke(path, method, method === "PATCH" ? { status: "revoked" } : {})).status, 400, "malformed key encoding must return 400");
+    }
+    const ownIssue = await invoke("/api/v1/admin/licenses", "POST", { prefix: "SCOPED", validity_type: "daily", validity_value: 3 });
+    assert.equal(ownIssue.status, 201, "valid scoped license creation remains supported");
+    const ownIssueBody = await ownIssue.json() as { license: { app_id: string } };
+    assert.equal(ownIssueBody.license.app_id, ownApp);
   } finally {
     await db.close();
     for (const [key, value] of Object.entries(original)) {

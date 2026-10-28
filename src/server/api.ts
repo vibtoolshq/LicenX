@@ -34,6 +34,8 @@ import {
   verifySessionToken,
 } from "./crypto.js";
 import { getDbClient, isTursoPlaceholder } from "./db.js";
+import { validateAdminLicenseCreation } from "./adminApiInput.js";
+import { createAdminApiRateLimiter } from "./adminApiRateLimiter.js";
 import {
   bindDeviceWithinLimit,
   getDeviceLeaseSeconds,
@@ -2972,14 +2974,9 @@ apiRouter.get(
 // EXTERNAL STORE REST API ENDPOINTS (/api/v1/admin/*)
 // -------------------------------------------------------------
 
-// Middleware: Authenticate Admin API Key with granular scope verification
-// In-memory sliding rate limit tracker for external Admin APIs (120 req/min per key/IP)
-const adminApiRateLimits = new Map<
-  string,
-  { count: number; windowStart: number }
->();
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const RATE_LIMIT_MAX_REQUESTS = 120;
+// Middleware: Authenticate Admin API Key with granular scope verification.
+// Bounded per-process IP limiter; Express req.ip honours configured trusted proxies.
+const adminApiRateLimits = createAdminApiRateLimiter();
 
 export function requireAdminApiKey(requiredScope?: string) {
   return async (
@@ -2988,32 +2985,16 @@ export function requireAdminApiKey(requiredScope?: string) {
     next: NextFunction,
   ): Promise<void> => {
     try {
-      // 1. IP / Key Sliding Window Rate Limit Check
-      const clientIp =
-        (req.headers["x-forwarded-for"] as string)?.split(",")[0]?.trim() ||
-        req.ip ||
-        "unknown";
-      const now = Date.now();
-      const rateLimitKey = "admin_api_" + clientIp;
-      const rateEntry = adminApiRateLimits.get(rateLimitKey);
-
-      if (rateEntry) {
-        if (now - rateEntry.windowStart < RATE_LIMIT_WINDOW_MS) {
-          if (rateEntry.count >= RATE_LIMIT_MAX_REQUESTS) {
-            res.setHeader("Retry-After", "60");
-            res.status(429).json({
-              success: false,
-              error:
-                "Too Many Requests: Rate limit exceeded (max 120 requests/minute). Please slow down.",
-            });
-            return;
-          }
-          rateEntry.count += 1;
-        } else {
-          adminApiRateLimits.set(rateLimitKey, { count: 1, windowStart: now });
-        }
-      } else {
-        adminApiRateLimits.set(rateLimitKey, { count: 1, windowStart: now });
+      // 1. Rate limit by Express-normalized client IP, not raw X-Forwarded-For.
+      const clientIp = req.ip || req.socket?.remoteAddress || "unknown";
+      if (!adminApiRateLimits.check(clientIp)) {
+        res.setHeader("Retry-After", "60");
+        res.status(429).json({
+          success: false,
+          error:
+            "Too Many Requests: Rate limit exceeded (max 120 requests/minute). Please slow down.",
+        });
+        return;
       }
       const authHeader = req.headers.authorization;
       if (!authHeader || !authHeader.startsWith("Bearer ")) {
@@ -3109,6 +3090,11 @@ apiRouter.post(
   requireAdminApiKey("licenses:create"),
   async (req: Request, res: Response) => {
     try {
+      const validationError = validateAdminLicenseCreation(req.body);
+      if (validationError) {
+        res.status(400).json({ success: false, error: validationError });
+        return;
+      }
       const {
         key,
         prefix = "VCON",

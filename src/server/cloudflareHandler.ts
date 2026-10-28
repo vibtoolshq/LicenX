@@ -30,6 +30,8 @@ import {
   verifySessionToken,
 } from "./crypto.js";
 import { getDbClient, initDatabaseSchema, isTursoPlaceholder } from "./db.js";
+import { decodeAdminLicensePathKey, validateAdminLicenseCreation } from "./adminApiInput.js";
+import { createAdminApiRateLimiter } from "./adminApiRateLimiter.js";
 import {
   bindDeviceWithinLimit,
   getDeviceLeaseSeconds,
@@ -272,14 +274,9 @@ async function verifyAdminAuth(
   }
 }
 
-// Verify Admin API Key with permissions check for Cloudflare
-// In-memory rate limiting map for Cloudflare worker instance
-const cfAdminApiRateLimits = new Map<
-  string,
-  { count: number; windowStart: number }
->();
-const CF_RATE_LIMIT_WINDOW_MS = 60 * 1000;
-const CF_RATE_LIMIT_MAX_REQUESTS = 120;
+// Verify Admin API Key with permissions check for Cloudflare.
+// Each worker has a bounded local limiter; CF supplies the connecting IP.
+const cfAdminApiRateLimits = createAdminApiRateLimiter();
 
 async function verifyAdminApiKey(
   request: Request,
@@ -292,30 +289,14 @@ async function verifyAdminApiKey(
   status?: number;
 }> {
   try {
-    const clientIp =
-      request.headers.get("cf-connecting-ip") ||
-      request.headers.get("x-forwarded-for") ||
-      "unknown";
-    const now = Date.now();
-    const rateLimitKey = "cf_admin_api_" + clientIp;
-    const rateEntry = cfAdminApiRateLimits.get(rateLimitKey);
-
-    if (rateEntry) {
-      if (now - rateEntry.windowStart < CF_RATE_LIMIT_WINDOW_MS) {
-        if (rateEntry.count >= CF_RATE_LIMIT_MAX_REQUESTS) {
-          return {
-            authorized: false,
-            error:
-              "Too Many Requests: Rate limit exceeded (max 120 requests/minute). Please slow down.",
-            status: 429,
-          };
-        }
-        rateEntry.count += 1;
-      } else {
-        cfAdminApiRateLimits.set(rateLimitKey, { count: 1, windowStart: now });
-      }
-    } else {
-      cfAdminApiRateLimits.set(rateLimitKey, { count: 1, windowStart: now });
+    const clientIp = request.headers.get("cf-connecting-ip") || "unknown";
+    if (!cfAdminApiRateLimits.check(clientIp)) {
+      return {
+        authorized: false,
+        error:
+          "Too Many Requests: Rate limit exceeded (max 120 requests/minute). Please slow down.",
+        status: 429,
+      };
     }
     const authHeader =
       request.headers.get("authorization") ||
@@ -441,6 +422,7 @@ export async function handleCloudflareApi(
 
   // Parse Body for non-GET requests
   let body: any = {};
+  let bodyParseFailed = false;
   if (method !== "GET" && method !== "HEAD") {
     try {
       const text = await request.text();
@@ -449,6 +431,7 @@ export async function handleCloudflareApi(
       }
     } catch {
       body = {};
+      bodyParseFailed = true;
     }
   }
 
@@ -3069,6 +3052,9 @@ export async function handleCloudflareApi(
         return errorResponse(auth.error || "Unauthorized", auth.status || 401);
       }
 
+      if (bodyParseFailed) return errorResponse("Invalid JSON request body", 400);
+      const validationError = validateAdminLicenseCreation(body);
+      if (validationError) return errorResponse(validationError, 400);
       const {
         key,
         prefix = "VCON",
@@ -3205,7 +3191,8 @@ export async function handleCloudflareApi(
         return errorResponse("Missing license key", 400);
       }
 
-      const cleanKey = decodeURIComponent(keyParam).trim().toUpperCase();
+      const cleanKey = decodeAdminLicensePathKey(keyParam);
+      if (cleanKey === null) return errorResponse("Invalid license key encoding", 400);
       const licRes = await db.execute({
         sql: "SELECT id, key, status, tier, app_id, device_limit, validity_type, validity_value, activated_at, expires_at, created_at, customer_name, customer_email, notes, pin FROM licenses WHERE key = ? LIMIT 1",
         args: [cleanKey],
@@ -3281,7 +3268,8 @@ export async function handleCloudflareApi(
         return errorResponse("Missing license key", 400);
       }
 
-      const cleanKey = decodeURIComponent(keyParam).trim().toUpperCase();
+      const cleanKey = decodeAdminLicensePathKey(keyParam);
+      if (cleanKey === null) return errorResponse("Invalid license key encoding", 400);
       const licRes = await db.execute({
         sql: "SELECT id, app_id FROM licenses WHERE key = ? LIMIT 1",
         args: [cleanKey],
@@ -3335,7 +3323,8 @@ export async function handleCloudflareApi(
         );
       }
 
-      const cleanKey = decodeURIComponent(keyParam).trim().toUpperCase();
+      const cleanKey = decodeAdminLicensePathKey(keyParam);
+      if (cleanKey === null) return errorResponse("Invalid license key encoding", 400);
       const licRes = await db.execute({
         sql: "SELECT id, status, app_id FROM licenses WHERE key = ? LIMIT 1",
         args: [cleanKey],

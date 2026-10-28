@@ -622,3 +622,60 @@ test("POST /api/v1/admin/licenses sanitizes unexpected database failures", async
     });
   }
 });
+
+test("POST /api/v1/admin/licenses rejects malformed inputs with 400 without creating licenses", async () => {
+  await initDatabaseSchema();
+  const url = await startTestServer();
+  const db = getDbClient();
+  const generated = generateAdminApiKey("validation");
+  await db.execute({
+    sql: "INSERT INTO admin_api_keys (id, name, key_prefix, secret_hash, permissions_json, app_id, status, created_at) VALUES (?, ?, ?, ?, ?, NULL, 'active', ?)",
+    args: [generated.id, "Input validation QA", generated.keyPrefix, generated.secretHash, JSON.stringify(["licenses:create"]), Date.now()],
+  });
+  const create = (payload: unknown) => fetch(url + "/api/v1/admin/licenses", {
+    method: "POST",
+    headers: { Authorization: "Bearer " + generated.secret, "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+
+  const before = await db.execute("SELECT COUNT(*) AS c FROM licenses");
+  for (const payload of [
+    [], { key: { malicious: true } }, { device_limit: -3 }, { device_limit: 0.25 },
+    { validity_type: "unknown" }, { expires_at: "yesterday" },
+  ]) {
+    const response = await create(payload);
+    const body = await response.json() as { error?: string };
+    assert.equal(response.status, 400, JSON.stringify(payload));
+    assert.match(body.error || "", /Invalid/);
+  }
+  const after = await db.execute("SELECT COUNT(*) AS c FROM licenses");
+  assert.equal(Number(after.rows[0].c), Number(before.rows[0].c));
+
+  // Existing accepted request/response contract, including numeric strings.
+  const accepted = await create({ prefix: "STORE", device_limit: "2", validity_type: "hourly", validity_value: "24" });
+  assert.equal(accepted.status, 201);
+  const body = await accepted.json() as { success: boolean; license: { device_limit: number; validity_type: string } };
+  assert.equal(body.success, true);
+  assert.equal(body.license.device_limit, 2);
+  assert.equal(body.license.validity_type, "hourly");
+});
+
+test("Admin API rate limit cannot be bypassed by changing an untrusted X-Forwarded-For header", async () => {
+  const middleware = requireAdminApiKey("licenses:create");
+  const serverIp = "192.0.2.125";
+  let finalStatus = 0;
+  for (let i = 0; i < 121; i++) {
+    const req: any = {
+      ip: serverIp,
+      headers: { "x-forwarded-for": "198.51.100." + i },
+    };
+    const res: any = {
+      status(code: number) { finalStatus = code; return this; },
+      json() { return this; },
+      setHeader() { return this; },
+    };
+    finalStatus = 0;
+    await middleware(req, res, () => {});
+    assert.equal(finalStatus, i === 120 ? 429 : 401);
+  }
+});
