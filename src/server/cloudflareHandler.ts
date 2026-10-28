@@ -3283,7 +3283,7 @@ export async function handleCloudflareApi(
 
       const cleanKey = decodeURIComponent(keyParam).trim().toUpperCase();
       const licRes = await db.execute({
-        sql: "SELECT id FROM licenses WHERE key = ? LIMIT 1",
+        sql: "SELECT id, app_id FROM licenses WHERE key = ? LIMIT 1",
         args: [cleanKey],
       });
 
