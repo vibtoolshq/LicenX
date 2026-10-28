@@ -17,6 +17,7 @@ on:
       - "package.json"
       - "package-lock.json"
       - "tests/backupSystemDocker.mjs"
+      - "tests/backupScheduleTiming.test.ts"
 
 permissions:
   contents: read
@@ -52,6 +53,7 @@ jobs:
           set -euo pipefail
           npm ci --no-audit --no-fund
           npm run lint
+          node --import tsx --test tests/backupScheduleTiming.test.ts
           npm run build
       - name: Build and start isolated PostgreSQL + app
         shell: bash
