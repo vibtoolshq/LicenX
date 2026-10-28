@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import type { Client } from "@libsql/client";
+import type { DatabaseClient } from "./database/contracts.js";
 
 export const ADMIN_LOGIN_MAX_FAILURES = 5;
 export const ADMIN_LOGIN_WINDOW_MS = 15 * 60 * 1000;
@@ -20,7 +20,7 @@ export function createAdminLoginAttemptKey(
 }
 
 export async function getAdminLoginRateLimit(
-  db: Client,
+  db: DatabaseClient,
   attemptKey: string,
   now = Date.now(),
 ): Promise<AdminLoginRateLimit> {
@@ -43,7 +43,7 @@ export async function getAdminLoginRateLimit(
 }
 
 export async function recordFailedAdminLoginAttempt(
-  db: Client,
+  db: DatabaseClient,
   attemptKey: string,
   now = Date.now(),
 ): Promise<AdminLoginRateLimit> {
@@ -98,7 +98,7 @@ export async function recordFailedAdminLoginAttempt(
 }
 
 export async function clearAdminLoginAttempts(
-  db: Client,
+  db: DatabaseClient,
   attemptKey: string,
 ): Promise<void> {
   await db.execute({

@@ -59,6 +59,7 @@ let cachedAdminConfig: {
   jwtSecret: string;
   username: string;
   cachedAt: number;
+  db: ReturnType<typeof getDbClient>;
 } | null = null;
 const ADMIN_CONFIG_CACHE_TTL = 60 * 1000; // 60 seconds
 
@@ -122,11 +123,13 @@ async function requireAdminAuth(
       return;
     }
     const now = Date.now();
+    const authDb = getDbClient();
     let jwtSecret = "";
     let username = "";
 
     if (
       cachedAdminConfig &&
+      cachedAdminConfig.db === authDb &&
       now - cachedAdminConfig.cachedAt < ADMIN_CONFIG_CACHE_TTL
     ) {
       jwtSecret = cachedAdminConfig.jwtSecret;
@@ -145,7 +148,7 @@ async function requireAdminAuth(
       const configRow = configResult.rows[0];
       jwtSecret = configRow.jwt_secret as string;
       username = configRow.username as string;
-      cachedAdminConfig = { jwtSecret, username, cachedAt: now };
+      cachedAdminConfig = { jwtSecret, username, cachedAt: now, db: authDb };
     }
 
     const session = verifySessionToken(token, jwtSecret);
@@ -2093,11 +2096,6 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
       ) {
         expiresAt = now + (license.validity_value as number) * 86400 * 1000;
       }
-
-      await db.execute({
-        sql: "UPDATE licenses SET activated_at = ?, expires_at = ? WHERE id = ?",
-        args: [activatedAt, expiresAt, license.id as string],
-      });
     }
 
     if (expiresAt && now > expiresAt) {
@@ -2139,6 +2137,7 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
       deviceLimit,
       deviceLeaseSeconds,
       rejectBlocked: true,
+      activateLicense: true,
     });
 
     if (binding.status === "blocked") {
@@ -2178,6 +2177,8 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
       });
       return;
     }
+
+    if (binding.activation) ({ activatedAt, expiresAt } = binding.activation);
 
     // 8. Construct Cryptographically Signed Payload
     const signedData: Record<string, unknown> = {

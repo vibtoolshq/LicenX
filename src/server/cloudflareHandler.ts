@@ -181,6 +181,7 @@ let cachedAdminConfig: {
   jwtSecret: string;
   username: string;
   cachedAt: number;
+  db: ReturnType<typeof getDbClient>;
 } | null = null;
 const ADMIN_CONFIG_CACHE_TTL = 60 * 1000; // 60 seconds cache
 
@@ -228,11 +229,13 @@ async function verifyAdminAuth(
       };
     }
     const now = Date.now();
+    const authDb = getDbClient(env);
     let jwtSecret = "";
     let username = "";
 
     if (
       cachedAdminConfig &&
+      cachedAdminConfig.db === authDb &&
       now - cachedAdminConfig.cachedAt < ADMIN_CONFIG_CACHE_TTL
     ) {
       jwtSecret = cachedAdminConfig.jwtSecret;
@@ -250,7 +253,7 @@ async function verifyAdminAuth(
       const configRow = configResult.rows[0];
       jwtSecret = configRow.jwt_secret as string;
       username = configRow.username as string;
-      cachedAdminConfig = { jwtSecret, username, cachedAt: now };
+      cachedAdminConfig = { jwtSecret, username, cachedAt: now, db: authDb };
     }
 
     const session = verifySessionToken(token, jwtSecret);
@@ -2227,12 +2230,6 @@ export async function handleCloudflareApi(
         } else if (validityType === "daily" && validityValue > 0) {
           expiresAt = now + validityValue * 86400 * 1000;
         }
-
-        validationStage = "license_activation_update";
-        await db.execute({
-          sql: "UPDATE licenses SET activated_at = ?, expires_at = ? WHERE id = ?",
-          args: [activatedAt, expiresAt, lic.id as string],
-        });
       }
 
       // Check expiry BEFORE device binding
@@ -2281,6 +2278,7 @@ export async function handleCloudflareApi(
         deviceLimit,
         deviceLeaseSeconds,
         rejectBlocked: true,
+        activateLicense: true,
       });
 
       if (binding.status === "blocked") {
@@ -2325,6 +2323,8 @@ export async function handleCloudflareApi(
           403,
         );
       }
+
+      if (binding.activation) ({ activatedAt, expiresAt } = binding.activation);
 
       // 9. Sign payload with server private key
       const boundCount = binding.boundDevicesCount;

@@ -1,10 +1,10 @@
-import type { Client, Transaction } from "@libsql/client";
+import type { DatabaseClient, DatabaseTransaction } from "./database/contracts.js";
 import { DEFAULT_DEVICE_LEASE_SECONDS } from "./licensePolicy.js";
 
 const MAX_TRANSACTION_ATTEMPTS = 12;
 
 export async function getDeviceLeaseSeconds(
-  db: Client,
+  db: DatabaseClient,
   appId: unknown,
 ): Promise<number> {
   if (typeof appId !== "string" || !appId) {
@@ -22,7 +22,7 @@ export async function getDeviceLeaseSeconds(
 }
 
 interface BindDeviceParams {
-  db: Client;
+  db: DatabaseClient;
   licenseId: string;
   hwid: string;
   deviceId: string;
@@ -33,6 +33,7 @@ interface BindDeviceParams {
   deviceLimit: number;
   deviceLeaseSeconds?: number;
   rejectBlocked: boolean;
+  activateLicense?: boolean;
 }
 
 export type BindDeviceResult =
@@ -41,6 +42,7 @@ export type BindDeviceResult =
       existingDevice: boolean;
       activeDevicesCount: number;
       boundDevicesCount: number;
+      activation?: { activatedAt: number; expiresAt: number | null };
     }
   | {
       status: "limit";
@@ -71,14 +73,16 @@ export async function bindDeviceWithinLimit({
   deviceLimit,
   deviceLeaseSeconds = DEFAULT_DEVICE_LEASE_SECONDS,
   rejectBlocked,
+  activateLicense = false,
 }: BindDeviceParams): Promise<BindDeviceResult> {
   const staleBefore = now - deviceLeaseSeconds * 1000;
 
   for (let attempt = 0; attempt < MAX_TRANSACTION_ATTEMPTS; attempt++) {
-    let transaction: Transaction | undefined;
+    let transaction: DatabaseTransaction | undefined;
 
     try {
       transaction = await db.transaction("write");
+      await transaction.lockLicense?.(licenseId);
       await transaction.execute({
         sql: "UPDATE devices SET status = 'logged_out' WHERE license_id = ? AND status = 'active' AND last_ping_at <= ?",
         args: [licenseId, staleBefore],
@@ -146,6 +150,26 @@ export async function bindDeviceWithinLimit({
         });
       }
 
+      let activation: { activatedAt: number; expiresAt: number | null } | undefined;
+      if (activateLicense) {
+        const result = await transaction.execute({
+          sql: "SELECT activated_at, expires_at, validity_type, validity_value FROM licenses WHERE id = ?",
+          args: [licenseId],
+        });
+        const license = result.rows[0];
+        if (!license) throw new Error("License no longer exists");
+        let activatedAt = Number(license.activated_at) || now;
+        let expiresAt = license.expires_at === null ? null : Number(license.expires_at);
+        if (!license.activated_at) {
+          const duration = license.validity_type === "hourly" ? 3_600_000 : license.validity_type === "daily" ? 86_400_000 : 0;
+          if (duration && Number(license.validity_value) > 0) expiresAt = now + Number(license.validity_value) * duration;
+          await transaction.execute({
+            sql: "UPDATE licenses SET activated_at = ?, expires_at = ? WHERE id = ?",
+            args: [activatedAt, expiresAt, licenseId],
+          });
+        }
+        activation = { activatedAt, expiresAt };
+      }
       await transaction.commit();
       return {
         status: "bound",
@@ -154,6 +178,7 @@ export async function bindDeviceWithinLimit({
         boundDevicesCount: wasActive
           ? activeDevicesCount
           : activeDevicesCount + 1,
+        ...(activation ? { activation } : {}),
       };
     } catch (error) {
       if (transaction) await transaction.rollback();
@@ -185,6 +210,6 @@ function isTransientLockError(error: unknown): boolean {
   const code = error.code;
   return (
     typeof code === "string" &&
-    (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED"))
+    (code.startsWith("SQLITE_BUSY") || code.startsWith("SQLITE_LOCKED") || code === "40001" || code === "40P01")
   );
 }

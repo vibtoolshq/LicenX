@@ -1,4 +1,6 @@
-import { createClient, type Client } from "@libsql/client";
+import { createClient } from "@libsql/client";
+import type { DatabaseClient } from "./database/contracts.js";
+import { PostgresClient } from "./database/postgres.js";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
@@ -8,20 +10,22 @@ import {
   DEFAULT_PING_INTERVAL_SECONDS,
 } from "./licensePolicy.js";
 
-let dbClient: Client | null = null;
+let dbClient: DatabaseClient | null = null;
 let currentDbUrl = "";
 let currentAuthToken = "";
 
-let isSchemaInitialized = false;
-let schemaInitPromise: Promise<void> | null = null;
+const initializedClients = new WeakSet<DatabaseClient>();
+const schemaInitPromises = new WeakMap<DatabaseClient, Promise<void>>();
 
 interface DatabaseEnvironment {
+  DATABASE_PROVIDER?: string;
   TURSO_DATABASE_URL?: string;
   DATABASE_URL?: string;
   TURSO_AUTH_TOKEN?: string;
 }
 
 interface ResolvedDatabaseConfig {
+  provider: "libsql" | "postgres";
   url: string;
   authToken?: string;
   requireRemote: boolean;
@@ -92,8 +96,27 @@ export function resolveDatabaseConfig(
 ): ResolvedDatabaseConfig {
   const requireRemote = env !== undefined || nodeEnvironment === "production";
   const runtimeEnv = env ?? nodeEnv;
-  const configuredUrl =
-    runtimeEnv.TURSO_DATABASE_URL || runtimeEnv.DATABASE_URL || "";
+  const selectedProvider = runtimeEnv.DATABASE_PROVIDER?.trim().toLowerCase();
+  if (selectedProvider && !["libsql", "postgres", "postgresql"].includes(selectedProvider)) {
+    throw new DatabaseConfigurationError("Unsupported DATABASE_PROVIDER; use libsql or postgres.");
+  }
+  const configuredUrl = (selectedProvider === "postgres" || selectedProvider === "postgresql"
+    ? runtimeEnv.DATABASE_URL
+    : runtimeEnv.TURSO_DATABASE_URL || runtimeEnv.DATABASE_URL)?.trim() || "";
+  const postgresUrl = /^postgres(?:ql)?:\/\//i.test(configuredUrl);
+  if (selectedProvider === "postgres" || selectedProvider === "postgresql" || postgresUrl) {
+    if (env !== undefined) throw new DatabaseConfigurationError("PostgreSQL is supported only by the Node runtime; Cloudflare requires libsql.");
+    if (selectedProvider === "libsql" || !postgresUrl) throw new DatabaseConfigurationError("PostgreSQL requires a postgres:// or postgresql:// DATABASE_URL.");
+    try {
+      const parsed = new URL(configuredUrl);
+      const mode = parsed.searchParams.get("sslmode");
+      if (!parsed.hostname || !parsed.pathname.slice(1) || (mode && !["disable", "require", "verify-ca", "verify-full"].includes(mode))) throw new Error();
+      if (["ssl", "sslcert", "sslkey", "sslrootcert", "uselibpqcompat"].some((name) => parsed.searchParams.has(name))) throw new Error();
+    } catch {
+      throw new DatabaseConfigurationError("Invalid PostgreSQL URL or TLS options; use sslmode=require for verified TLS or disable for a private local database.");
+    }
+    return { provider: "postgres", url: configuredUrl, authToken: undefined, requireRemote, isRemoteUrl: true };
+  }
   const authToken = runtimeEnv.TURSO_AUTH_TOKEN || undefined;
 
   if (isTursoPlaceholder(configuredUrl, authToken)) {
@@ -103,6 +126,7 @@ export function resolveDatabaseConfig(
       );
     }
     return {
+      provider: "libsql",
       url: "file:vcon_data.db",
       authToken: undefined,
       requireRemote: false,
@@ -117,15 +141,16 @@ export function resolveDatabaseConfig(
     );
   }
 
-  return { url: configuredUrl, authToken, requireRemote, isRemoteUrl };
+  return { provider: "libsql", url: configuredUrl, authToken, requireRemote, isRemoteUrl };
 }
 
-export function getDbClient(env?: DatabaseEnvironment): Client {
-  const { url, authToken, requireRemote, isRemoteUrl } =
+export function getDbClient(env?: DatabaseEnvironment): DatabaseClient {
+  const { provider, url, authToken, requireRemote, isRemoteUrl } =
     resolveDatabaseConfig(env);
 
   if (
     !dbClient ||
+    dbClient.closed ||
     currentDbUrl !== url ||
     currentAuthToken !== (authToken || "")
   ) {
@@ -147,7 +172,7 @@ export function getDbClient(env?: DatabaseEnvironment): Client {
     }
 
     try {
-      dbClient = createClient({
+      dbClient = provider === "postgres" ? new PostgresClient(url) : createClient({
         url,
         authToken,
       });
@@ -171,7 +196,7 @@ export function getDbClient(env?: DatabaseEnvironment): Client {
 }
 
 async function ensureColumnExists(
-  db: Client,
+  db: DatabaseClient,
   tableName: string,
   columnName: string,
   columnDefinition: string,
@@ -187,11 +212,18 @@ async function ensureColumnExists(
 }
 
 export async function initDatabaseSchema(env?: any): Promise<void> {
-  if (isSchemaInitialized) return;
-  if (schemaInitPromise) return schemaInitPromise;
+  const db = getDbClient(env);
+  if (initializedClients.has(db)) return;
+  const pending = schemaInitPromises.get(db);
+  if (pending) return pending;
 
-  schemaInitPromise = (async () => {
-    let db = getDbClient(env);
+  const schemaInitPromise = (async () => {
+    if (db instanceof PostgresClient) {
+      const { migratePostgres } = await import("./database/postgresSchema.js");
+      await migratePostgres(db);
+      initializedClients.add(db);
+      return;
+    }
 
     await db.execute(`
       CREATE TABLE IF NOT EXISTS user_control_pin_attempts (
@@ -297,7 +329,7 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
           "CREATE INDEX IF NOT EXISTS idx_devices_first_bound ON devices(first_bound_at DESC)",
         );
       } catch {}
-      isSchemaInitialized = true;
+      initializedClients.add(db);
       return;
     }
 
@@ -491,10 +523,11 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
     );
   `);
 
-    isSchemaInitialized = true;
+    initializedClients.add(db);
   })().finally(() => {
-    schemaInitPromise = null;
+    schemaInitPromises.delete(db);
   });
 
+  schemaInitPromises.set(db, schemaInitPromise);
   return schemaInitPromise;
 }

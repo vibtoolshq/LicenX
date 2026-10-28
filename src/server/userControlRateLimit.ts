@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { Client } from '@libsql/client';
+import type { DatabaseClient } from './database/contracts.js';
 
 export const USER_CONTROL_PIN_MAX_FAILURES = 5;
 export const USER_CONTROL_PIN_WINDOW_MS = 15 * 60 * 1000;
@@ -17,7 +17,7 @@ function getAttemptKey(licenseKey: string, clientIp: string): string {
 }
 
 export async function getUserControlPinRateLimit(
-  db: Client,
+  db: DatabaseClient,
   licenseKey: string,
   clientIp: string,
   now = Date.now()
@@ -37,7 +37,7 @@ export async function getUserControlPinRateLimit(
 }
 
 export async function recordFailedUserControlPinAttempt(
-  db: Client,
+  db: DatabaseClient,
   licenseKey: string,
   clientIp: string,
   now = Date.now()
@@ -105,7 +105,7 @@ export async function recordFailedUserControlPinAttempt(
 }
 
 export async function clearUserControlPinAttempts(
-  db: Client,
+  db: DatabaseClient,
   licenseKey: string,
   clientIp: string
 ): Promise<void> {

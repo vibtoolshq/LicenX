@@ -1,9 +1,9 @@
-import type { Client } from "@libsql/client";
+import type { DatabaseClient } from "./database/contracts.js";
 
 export type PublicAccessSetting = "allowPublicCheck" | "allowPublicReset";
 
 export async function isPublicAccessEnabled(
-  db: Client,
+  db: DatabaseClient,
   setting: PublicAccessSetting,
 ): Promise<boolean> {
   const result = await db.execute(

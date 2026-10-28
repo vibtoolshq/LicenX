@@ -12,6 +12,7 @@ import { getDeviceLeaseSeconds } from "../src/server/deviceBinding.js";
 
 test("keeps local SQLite as the development default", () => {
   assert.deepEqual(resolveDatabaseConfig(undefined, "development", {}), {
+    provider: "libsql",
     url: "file:vcon_data.db",
     authToken: undefined,
     requireRemote: false,
