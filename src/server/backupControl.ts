@@ -79,16 +79,33 @@ function cleanAccount(input: any): { name: string; accountId: string; accessKeyI
 function serialJob(id: string, action: Job['action'], destination: string): Job {
   return { id, action, status: 'running', destination, createdAt: Date.now() };
 }
+// Long weekly intervals are checked in <=24-hour chunks; a chunk expiry is not
+// itself permission to execute a backup before the actual nextAt timestamp.
+export function backupScheduleTiming(nextAt: number, now: number): { delayMs: number; isDue: boolean } {
+  const remaining = nextAt - now;
+  return {
+    delayMs: Math.min(Math.max(1000, remaining), 24 * 3600_000),
+    isDue: remaining <= 0,
+  };
+}
 function scheduleNext() {
   if (timer) clearTimeout(timer);
   if (!state.schedule.enabled) return;
-  const due = Math.max(1000, state.schedule.nextAt - Date.now());
+  const { delayMs } = backupScheduleTiming(state.schedule.nextAt, Date.now());
   timer = setTimeout(() => {
     timer = undefined;
     if (!state.schedule.enabled) return;
+    if (!backupScheduleTiming(state.schedule.nextAt, Date.now()).isDue) {
+      scheduleNext();
+      return;
+    }
+    const destination = state.schedule.destination;
     state.schedule.nextAt = Date.now() + state.schedule.intervalHours * 3600_000;
-    void safeWrite().then(() => startJob('backup', state.schedule.destination)).finally(scheduleNext);
-  }, Math.min(due, 24 * 3600_000));
+    void safeWrite()
+      .then(() => startJob('backup', destination))
+      .catch(() => { console.warn('[LicenX] Scheduled backup dispatch did not start'); })
+      .finally(scheduleNext);
+  }, delayMs);
   timer.unref();
 }
 async function startJob(action: Job['action'], destination: string): Promise<Job> {
