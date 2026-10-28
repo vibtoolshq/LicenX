@@ -476,6 +476,7 @@ class LiveConfigTests(unittest.TestCase):
                 "app_name",
                 "app_version",
                 "client_time",
+                "nonce",
             },
         )
         self.assertEqual(request_body["device_name"], "test-host")
