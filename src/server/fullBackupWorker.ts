@@ -170,6 +170,7 @@ async function restoreBackup(source: string, id: string) {
   const key = await readKey();
   const temp = await fs.mkdtemp(path.join(tmpdir(), 'licenx-restore-'));
   const restoreBase = path.join(store, 'pre-restore-' + id);
+  const staged = path.join(store, 'restore-stage-' + id);
   let committed = false;
   const movedDirs: string[] = [];
   const installedDirs: string[] = [];
@@ -191,12 +192,23 @@ async function restoreBackup(source: string, id: string) {
     for (const table of BACKUP_TABLES) {
       if (!(await fs.stat(path.join(unpacked, 'db', table + '.copy'))).isFile()) throw new Error('Missing database table file');
     }
+    // Copy extracted assets onto the SAME persistent filesystem before atomic renames.
+    // /tmp and the Docker app-storage volume are separate mount points (EXDEV).
+    await fs.mkdir(staged, { recursive: false, mode: 0o700 });
+    for (const name of ['public', 'private']) {
+      const extracted = path.join(unpacked, name);
+      try {
+        if ((await fs.stat(extracted)).isDirectory()) {
+          await fs.cp(extracted, path.join(staged, name), { recursive: true, force: false, errorOnExist: true });
+        }
+      } catch (e: any) { if (e.code !== 'ENOENT') throw e; }
+    }
     // Recovery checkpoint before any destructive operation.
     const checkpoint = await makeBackup('local', 'pre-restore-' + id);
     await fs.mkdir(restoreBase, { recursive: false, mode: 0o700 });
     await restoreDatabase(path.join(unpacked, 'db'), async () => {
       for (const name of ['public', 'private']) {
-        const incoming = path.join(unpacked, name);
+        const incoming = path.join(staged, name);
         const previous = path.join(storageRoot, name);
         try { if (!(await fs.stat(incoming)).isDirectory()) continue; }
         catch (e: any) { if (e.code === 'ENOENT') continue; throw e; }
@@ -220,6 +232,7 @@ async function restoreBackup(source: string, id: string) {
     throw err;
   } finally {
     await fs.rm(temp, { recursive: true, force: true }).catch(() => {});
+    await fs.rm(staged, { recursive: true, force: true }).catch(() => {});
     // Keep prior storage until operator verifies restored state; do not delete checkpoint.
   }
 }
