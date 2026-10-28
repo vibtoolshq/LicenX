@@ -1,3 +1,5 @@
+> Historical release note: preserve original version-specific claims. Current app integrations use SDK/client/python/licenx/ (import licenx); SDK/x_license_python/ is reference-only.
+
 # Python SDK v1.2.3
 
 This patch release improves SDK-side error correlation and makes the live diagnostic console safer and clearer to operate.

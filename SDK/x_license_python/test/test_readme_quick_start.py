@@ -23,7 +23,7 @@ class ReadmeQuickStartTests(unittest.TestCase):
                 ast.parse(example, filename=f"SDK README example {index}")
 
     def test_basic_integration_example_matches_sdk_api(self):
-        readme_path = Path(__file__).resolve().parents[3] / "README.md"
+        readme_path = Path(__file__).resolve().parents[1] / "README.md"
         with open(readme_path, encoding="utf-8") as readme_file:
             readme = readme_file.read()
 

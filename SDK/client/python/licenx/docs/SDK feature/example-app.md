@@ -1,6 +1,6 @@
 # Runnable Example Application
 
-Source: `SDK/x_license_python/example_app.py`
+Source: `SDK/client/python/licenx/example_app.py`
 
 ## Purpose
 

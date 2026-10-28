@@ -1,56 +1,31 @@
 # Contributing to LicenX
 
-Thank you for your interest in contributing to **LicenX**! We welcome community contributions to make this open-source cryptographic licensing engine faster, more secure, and easier to use.
+Thanks for improving LicenX. Changes should be small, reviewable, compatible and verified against the existing codebase.
 
----
+## Development workflow
 
-## 🛠️ Development Workflow
+1. Fork the repository, create a topic branch and keep unrelated work out of the diff.
+2. Read [AGENTS.md](AGENTS.md) and [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md). Follow the applicable scope and private-notes rules.
+3. Install dependencies and run focused checks:
 
-### 1. Fork & Clone
-```bash
-git clone https://github.com/your-username/LicenX.git
-cd LicenX
-```
+   ```bash
+   npm ci
+   npm run lint
+   npm test
+   npm run build
+   ```
 
-### 2. Install Dependencies
-```bash
-npm install
-```
+4. For Python client changes, test the **primary** SDK at [`SDK/client/python/licenx`](SDK/client/python/licenx/README.md). Run reference `SDK/x_license_python` tests when compatibility or archive behavior is affected.
+5. Include a concise change explanation, regression evidence, security impact and any backward-compatibility caveat in your pull request.
 
-### 3. Local Development
-Start the local full-stack server running Vite and Express:
-```bash
-npm run dev
-```
+## Python SDK layout
 
-### 4. Code Quality & Formatting
-Ensure TypeScript checks and linting pass before submitting:
-```bash
-npm run lint
-npm run build
-```
+- **Primary application integration:** `SDK/client/python/licenx/`, installed with `python -m pip install ./SDK/client/python/licenx`; import `licenx`.
+- **Reference/compatibility implementation:** `SDK/x_license_python/`; import `x_license_python`. Do not present it as the default for new integrations.
+- **Existing downloadable ZIP:** `public/x_license_python.zip` is generated from the reference tree. Changing its source/contract requires an explicit implementation change, not just documentation edits.
 
----
+## Safety and documentation
 
-## 📌 Submission Guidelines
+Do not commit passwords, signing keys, licenses, `.env`, backup archives or anything under private `notes/`. Preserve existing routes, database migrations, SDK imports and UI behavior unless an authorized change requires otherwise. Update relevant public Markdown when behavior changes, and label historical verification evidence as such.
 
-1. **Feature Branches:** Create a feature branch off `main` (e.g. `feature/hardware-id-enhancement` or `fix/r2-upload-timeout`).
-2. **Clear Commit Messages:** Write clear, concise commit messages explaining the rationale behind your change.
-3. **No Regressions:** Verify that existing endpoints and client SDKs (such as `x_license_python`) remain backward-compatible.
-4. **Documentation:** Update relevant markdown files (`README.md`, `VERIFICATION_AUDIT.md`, or SDK docs) if introducing new parameters or configuration flags.
-
----
-
-## 🐛 Reporting Bugs & Issues
-
-When reporting an issue, please include:
-- Operating system and runtime environment (Node.js version, Cloudflare Pages, etc.).
-- Steps to reproduce the bug.
-- Expected versus actual behavior.
-- Relevant non-sensitive logs or error stack traces.
-
----
-
-## 📜 License
-
-By contributing to LicenX, you agree that your contributions will be licensed under the **MIT License**.
+Security reports: [SECURITY.md](SECURITY.md). License: [MIT](LICENSE).

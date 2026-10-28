@@ -1,6 +1,6 @@
 # Device Identity and Telemetry
 
-Source: `SDK/x_license_python/device.py`
+Source: `SDK/client/python/licenx/device.py`
 
 ## Hardware Identifier
 

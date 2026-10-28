@@ -1,6 +1,6 @@
 # Login Manager and Result
 
-Source: `SDK/x_license_python/login.py`
+Source: `SDK/client/python/licenx/login.py`
 
 ## `LoginResult`
 

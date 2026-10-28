@@ -1,6 +1,6 @@
 # SDK Diagnostic and Test Console
 
-Source: `SDK/x_license_python/test/app.py`
+Source: `SDK/client/python/licenx/test/app.py`
 
 ## Modes and Configuration
 

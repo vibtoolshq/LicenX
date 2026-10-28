@@ -1,6 +1,6 @@
 # SDK Dependencies
 
-Source: `SDK/x_license_python/requirements.txt`
+Source: `SDK/client/python/licenx/requirements.txt`
 
 The requirements file declares:
 

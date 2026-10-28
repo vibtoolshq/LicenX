@@ -1,4 +1,6 @@
-# Repository Diagnostic Launcher
+# Repository Diagnostic Launcher (Reference Harness)
+
+This historical `SDK/test/app.py` launcher invokes the reference `x_license_python` diagnostic console. For the primary SDK, use `SDK/client/python/licenx/test/app.py`; this launcher is not the `licenx` application integration entry point.
 
 Source: `SDK/test/app.py`
 

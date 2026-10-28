@@ -1,5 +1,7 @@
 # SDK Feature and File Reference
 
+Reference-only SDK: SDK/x_license_python/ is retained for compatibility/testing. New consumers use SDK/client/python/licenx/ (import licenx). This does not describe the primary distribution.
+
 This directory documents the Python SDK source tree file by file for developers. It describes the current checkout, including local changes; it is not a claim that the code is published or production-certified.
 
 ## Start Here

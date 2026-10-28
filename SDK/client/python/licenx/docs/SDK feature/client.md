@@ -1,6 +1,6 @@
 # High-Level Client Facade
 
-Source: `SDK/x_license_python/client.py`
+Source: `SDK/client/python/licenx/client.py`
 
 ## Role and Construction
 

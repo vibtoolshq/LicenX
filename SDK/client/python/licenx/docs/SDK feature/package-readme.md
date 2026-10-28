@@ -1,6 +1,6 @@
 # Package README
 
-Source: `SDK/x_license_python/README.md`
+Source: `SDK/client/python/licenx/README.md`
 
 This is the package's primary integration guide. It summarizes module responsibilities, Python compatibility/testing claims, installation, client configuration, a quick-start flow, trust-anchor handling, HTTPS requirements, hardware identity, telemetry minimization, logout hooks, background heartbeats, and troubleshooting/documentation links.
 

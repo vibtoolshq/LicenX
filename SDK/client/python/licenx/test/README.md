@@ -1,5 +1,7 @@
 # LicenX / VCON Python SDK - Diagnostic & Test Console
 
+Primary SDK test harness: SDK/client/python/licenx/test/ exercises the installable licenx package. The reference SDK/x_license_python harness is separate; use authorized test credentials.
+
 This directory contains `app.py`, an interactive test application built using Python `tkinter` (with automatic headless CLI fallback) to test all features of the LicenX / VCON Python Client SDK and backend licensing server.
 
 ---

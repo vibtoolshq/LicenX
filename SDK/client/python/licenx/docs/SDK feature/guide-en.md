@@ -1,6 +1,6 @@
 # English Integration Guide
 
-Source: `SDK/x_license_python/docs/GUIDE_EN.md`
+Source: `SDK/client/python/licenx/docs/GUIDE_EN.md`
 
 This is the English end-to-end developer guide for installing and integrating the Python client. It complements the package README with deeper workflow and API explanations. Use it alongside the source references in this folder for current implementation details.
 

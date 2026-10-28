@@ -1,10 +1,12 @@
+> Historical verification record: the paths and outcomes below describe their audit dates. Current primary Python SDK: SDK/client/python/licenx/; SDK/x_license_python/ is reference-only. Do not interpret old results as current production assurance.
+
 # Forensic Verification & Audit Report
 
 **Target Scope:** Python Client SDK (`x_license_python`) & Server Backend License Engine
 **Verification Date:** October 7, 2026
 **Status:** Historical audit findings; not a current readiness or production verification.
 
-This document records historical checks and findings from October 2026. All "Fix Applied" statements, pass percentages, and live-test descriptions below are claims recorded by that audit, not independently revalidated evidence. This document does not identify a verified current commit, candidate build, or deployment, and its results do not certify the current candidate or any live deployment. Current local, staging, and production evidence is tracked separately in [IMPLEMENTATION_STATUS.md](../notes/IMPLEMENTATION_STATUS.md).
+This document records historical checks and findings from October 2026. All "Fix Applied" statements, pass percentages, and live-test descriptions below are claims recorded by that audit, not independently revalidated evidence. This document does not identify a verified current commit, candidate build, or deployment, and its results do not certify the current candidate or any live deployment. Current local, staging, and production evidence must be checked against current CI results and private operator records; the former `notes/IMPLEMENTATION_STATUS.md` was a local-only historical file and is not distributed.
 
 ---
 

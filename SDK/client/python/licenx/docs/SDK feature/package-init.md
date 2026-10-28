@@ -1,6 +1,6 @@
 # Package Exports and Version
 
-Source: `SDK/x_license_python/__init__.py`
+Source: `SDK/client/python/licenx/__init__.py`
 
 ## Role
 

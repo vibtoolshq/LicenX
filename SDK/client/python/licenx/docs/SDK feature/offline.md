@@ -1,6 +1,6 @@
 # Online Policy and Clock Guard
 
-Source: `SDK/x_license_python/offline.py`
+Source: `SDK/client/python/licenx/offline.py`
 
 ## `OfflineGuard`
 

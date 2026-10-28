@@ -1,6 +1,6 @@
 # Transport and Signed Protocol
 
-Source: `SDK/x_license_python/server.py`
+Source: `SDK/client/python/licenx/server.py`
 
 ## Transport
 

@@ -1,3 +1,5 @@
+> Historical release note: preserve original version-specific claims. Current app integrations use SDK/client/python/licenx/ (import licenx); SDK/x_license_python/ is reference-only.
+
 # Python SDK v1.2.2
 
 This patch release strengthens login cleanup, session replacement, heartbeat configuration, and resilience during temporary service outages.

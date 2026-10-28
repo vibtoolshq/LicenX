@@ -1,6 +1,6 @@
 # Diagnostic Console Test README
 
-Source: `SDK/x_license_python/test/README.md`
+Source: `SDK/client/python/licenx/test/README.md`
 
 This is the operator guide for running the Tkinter/CLI test console. It documents Python/Tkinter setup, dependencies, explicit config selection, actual app-version entry, exact-host staging/Production allowlists, consent requirements, possible binding/audit side effects, report redaction, and the 12-stage suite.
 

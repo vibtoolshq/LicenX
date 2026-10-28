@@ -1,6 +1,6 @@
 # বাংলা Integration Guide
 
-Source: `SDK/x_license_python/docs/GUIDE_BN.md`
+Source: `SDK/client/python/licenx/docs/GUIDE_BN.md`
 
 এই ফাইলটি Python SDK-র পূর্ণাঙ্গ বাংলা developer integration guide। এতে SDK ব্যবহার, configuration ও license lifecycle-এর জন্য বাংলা ভাষায় ব্যাখ্যা দেওয়া আছে; ইংরেজি নির্দেশিকার সঙ্গে এটি একই documentation set-এর অংশ।
 

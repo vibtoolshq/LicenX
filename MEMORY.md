@@ -1,5 +1,12 @@
 # LicenX Project Memory
 
+## Current Python SDK Orientation
+
+- Primary for new applications: SDK/client/python/licenx/; install from ./SDK/client/python/licenx and import licenx (XLicenseClient).
+- Reference/compatibility only: SDK/x_license_python/ and the current public/x_license_python.zip, built from the reference source.
+- Older dated records below are historical; manifests and maintained SDK README are authoritative. This documentation update does not change served ZIP contents or automatically publish to PyPI.
+
+
 This is a maintained orientation document for future AI-assisted work. It summarizes the current repository structure and source-backed product behavior; it is not a substitute for reading the relevant implementation before changing it.
 
 ## Tech Stack and Dependencies

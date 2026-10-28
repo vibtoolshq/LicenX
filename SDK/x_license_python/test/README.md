@@ -1,5 +1,7 @@
 # LicenX / VCON Python SDK - Diagnostic & Test Console
 
+Reference-only SDK: SDK/x_license_python/ is retained for compatibility/testing. New consumers use SDK/client/python/licenx/ (import licenx). This does not describe the primary distribution.
+
 This directory contains `app.py`, an interactive test application built using Python `tkinter` (with automatic headless CLI fallback) to test all features of the LicenX / VCON Python Client SDK and backend licensing server.
 
 ---

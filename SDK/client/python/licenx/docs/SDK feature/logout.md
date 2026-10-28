@@ -1,6 +1,6 @@
 # Logout and Process Exit Hooks
 
-Source: `SDK/x_license_python/logout.py`
+Source: `SDK/client/python/licenx/logout.py`
 
 ## Explicit Logout
 

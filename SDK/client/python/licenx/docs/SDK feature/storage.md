@@ -1,6 +1,6 @@
 # Session Storage and Heartbeat Worker
 
-Source: `SDK/x_license_python/storage.py`
+Source: `SDK/client/python/licenx/storage.py`
 
 ## Persistence Policy
 
