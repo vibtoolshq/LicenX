@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "tsx server.ts",
     "prebuild": "npm run build:sdk-archive",
-    "build": "vite build",
+    "build": "vite build && npm run build:server",
+    "build:server": "esbuild server.ts --bundle --platform=node --format=esm --packages=external --outfile=build/server.js",
     "build:sdk-archive": "node scripts/buildPythonSdkArchive.mjs",
-    "start": "node server.ts",
+    "start": "node build/server.js",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
     "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
@@ -41,6 +42,7 @@
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "autoprefixer": "^10.4.21",
+    "esbuild": "0.28.2",
     "tailwindcss": "^4.3.3",
     "tsx": "^4.21.0",
     "typescript": "^7.0.2"

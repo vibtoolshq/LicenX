@@ -248,3 +248,21 @@ Contributions, bug reports, and pull requests are welcome! Please read our [CONT
 
 This project is open-source and licensed under the **[MIT License](./LICENSE)**.
 Free for personal and commercial software distribution.
+
+## Self-hosted production runtime (Phase-03 source)
+
+The production build now emits both the Vite frontend and a runnable Node entry:
+
+```sh
+npm ci
+npm run build
+NODE_ENV=production DATABASE_PROVIDER=postgres DATABASE_URL='postgresql://...' npm start
+```
+
+Do **not** supply real secrets on a shared shell or commit them. Production requires a reachable, previously approved database and storage configuration. `GET /api/health` is liveness; `GET /api/ready` checks database connectivity and local storage availability (returns 503 when not ready). The production app serves its frontend, `/api`, `/v1`, and the Python SDK download endpoint. Development mode continues through `npm run dev`.
+
+For a **new, isolated VPS** where 80/443 are free, review `deploy/env.vps.example`, create a private `.env` with distinct PostgreSQL credentials and matching URL-encoded `DATABASE_URL`, then run `docker compose --profile standalone-https up --build -d`. Caddy obtains public HTTPS certificates for a domain pointing at that host. Backups/branding use the app storage volume, PostgreSQL uses its own private persistent volume, and Caddy uses separate persistent TLS state. Docker and DNS must already be configured; quick installation is Phase-04. Do not use `docker compose down -v` for updates or rollback.
+
+If **Coolify or another reverse proxy already owns 80/443**, do **not** enable the `standalone-https` profile or publish the database. Connect the existing proxy to the Compose `licenx_frontend` network and route its HTTPS hostname to `app:3000`. Set `TRUSTED_PROXY_IP` to **only** the proxy's actual container IP, then re-create the application container. The default trusted hop `172.30.3.2` is for the standalone Caddy configuration. The frontend bridge subnet must not conflict with existing Docker networks. Always verify the HTTPS Origin/CSRF/login flow on an authorized test environment before rollout.
+
+Container builds whitelist only required source/static/SDK inputs through `.dockerignore`; the existing local `vcon_data.db`, ignored `notes/`, credentials and runtime data are not deployment inputs. This does **not** remediate previously published secrets in Git history. Review the unresolved security findings and rotate any reused exposed secrets before a real production rollout. Operational deployment, installer, complete database backup/restore and staging acceptance are outside this phase.

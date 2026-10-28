@@ -1,0 +1,61 @@
+services:
+  postgres:
+    image: postgres:17.6-bookworm
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:?set POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:?set POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks: [backend]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"${POSTGRES_USER}\" -d \"${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+  app:
+    build: .
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      DATABASE_PROVIDER: postgres
+      DATABASE_URL: ${DATABASE_URL:?set URL-encoded DATABASE_URL}
+      STORAGE_PROVIDER: local
+      LOCAL_STORAGE_PATH: /var/lib/licenx/storage
+      TRUSTED_PROXY_IP: ${TRUSTED_PROXY_IP:-172.30.3.2}
+    volumes:
+      - app-storage:/var/lib/licenx/storage
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [backend, frontend]
+  caddy:
+    profiles: [standalone-https]
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${DOMAIN:?set DOMAIN}
+      ACME_EMAIL: ${ACME_EMAIL:?set ACME_EMAIL}
+    ports: ["80:80", "443:443", "443:443/udp"]
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on: [app]
+    networks:
+      frontend:
+        ipv4_address: 172.30.3.2
+networks:
+  frontend:
+    name: licenx_frontend
+    ipam:
+      config: [{ subnet: 172.30.3.0/24 }]
+  backend:
+    internal: true
+volumes:
+  postgres-data:
+  app-storage:
+  caddy-data:
+  caddy-config:
