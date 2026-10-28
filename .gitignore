@@ -9,3 +9,8 @@ public/x_license_python.zip
 !.env.example
 /notes/
 /data/
+/*.db
+/*.db-*
+/*.sqlite
+/*.sqlite-*
+/scripts/*.local.json

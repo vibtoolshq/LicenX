@@ -1732,7 +1732,7 @@ apiRouter.post(
       // Reset all device bindings to logged_out
       const now = Date.now();
       await db.execute({
-        sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ?",
+        sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ? AND status = 'active'",
         args: [now, license.id],
       });
 
@@ -1843,6 +1843,11 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
     }
     const hwid = rawHwid.trim();
     if (!hwid) {
+      invalidValidationRequest();
+      return;
+    }
+    const requestNonce = req.body?.nonce;
+    if (requestNonce !== undefined && (typeof requestNonce !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(requestNonce))) {
       invalidValidationRequest();
       return;
     }
@@ -2194,6 +2199,10 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
       server_time: now,
       grace_period_hours: 72,
     };
+    if (requestNonce !== undefined) {
+      signedData.nonce = requestNonce;
+      signedData.request_app = typeof app_name === "string" ? app_name.trim() : "";
+    }
 
     const canonicalPayload = canonicalJson(signedData);
     const signature = signPayload(canonicalPayload, privateKeyPem);
@@ -2269,6 +2278,13 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
       return;
     }
 
+    if (license.app_id) {
+      const appState = await db.execute({ sql: "SELECT status FROM apps WHERE id = ? LIMIT 1", args: [license.app_id] });
+      if (!appState.rows.length || appState.rows[0].status !== "active") {
+        res.status(403).json({ valid: false, code: !appState.rows.length ? "APP_NOT_FOUND" : "APP_INACTIVE" });
+        return;
+      }
+    }
     const deviceLeaseSeconds = await getDeviceLeaseSeconds(db, license.app_id);
     const staleBefore = now - deviceLeaseSeconds * 1000;
 
@@ -2369,7 +2385,7 @@ const handleLogoutOrDeactivate = async (req: Request, res: Response) => {
 
     // Set device status to 'logged_out' so active device count frees up slot
     await db.execute({
-      sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ? AND hwid = ?",
+      sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ? AND hwid = ? AND status = 'active'",
       args: [now, licId, hwid],
     });
 
@@ -3241,6 +3257,11 @@ apiRouter.get(
       }
 
       const lic = licRes.rows[0];
+      const scopedApp = (req as any).adminApiKey?.app_id;
+      if (scopedApp && lic.app_id !== scopedApp) {
+        res.status(403).json({ success: false, error: "Forbidden: application scope mismatch" });
+        return;
+      }
       const now = Date.now();
       let currentStatus = lic.status as string;
 
@@ -3307,7 +3328,7 @@ apiRouter.post(
       const cleanKey = key.trim().toUpperCase();
       const db = getDbClient();
       const licRes = await db.execute({
-        sql: "SELECT id FROM licenses WHERE key = ? LIMIT 1",
+        sql: "SELECT id, app_id FROM licenses WHERE key = ? LIMIT 1",
         args: [cleanKey],
       });
 
@@ -3316,6 +3337,11 @@ apiRouter.post(
         return;
       }
 
+      const scopedApp = (req as any).adminApiKey?.app_id;
+      if (scopedApp && licRes.rows[0].app_id !== scopedApp) {
+        res.status(403).json({ success: false, error: "Forbidden: application scope mismatch" });
+        return;
+      }
       const licId = licRes.rows[0].id as string;
       const deleteRes = await db.execute({
         sql: "DELETE FROM devices WHERE license_id = ?",
@@ -3363,7 +3389,7 @@ apiRouter.patch(
       const cleanKey = key.trim().toUpperCase();
       const db = getDbClient();
       const licRes = await db.execute({
-        sql: "SELECT id, status FROM licenses WHERE key = ? LIMIT 1",
+        sql: "SELECT id, status, app_id FROM licenses WHERE key = ? LIMIT 1",
         args: [cleanKey],
       });
 
@@ -3372,6 +3398,11 @@ apiRouter.patch(
         return;
       }
 
+      const scopedApp = (req as any).adminApiKey?.app_id;
+      if (scopedApp && licRes.rows[0].app_id !== scopedApp) {
+        res.status(403).json({ success: false, error: "Forbidden: application scope mismatch" });
+        return;
+      }
       const licId = licRes.rows[0].id as string;
       await db.execute({
         sql: "UPDATE licenses SET status = ? WHERE id = ?",

@@ -1881,13 +1881,13 @@ export async function handleCloudflareApi(
         );
       }
       await clearUserControlPinAttempts(db, license_key, ip);
-      // Reset all bound machines
+      // Self-service may free active slots but must never erase admin blocks.
       await db.execute({
-        sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ?",
+        sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ? AND status = 'active'",
         args: [Date.now(), lic.id as string],
       });
       await db.execute({
-        sql: "DELETE FROM devices WHERE license_id = ?",
+        sql: "DELETE FROM devices WHERE license_id = ? AND status != 'blocked'",
         args: [lic.id as string],
       });
 
@@ -1936,6 +1936,10 @@ export async function handleCloudflareApi(
       const cleanKey = license_key.trim().toUpperCase();
       const cleanHwid = hwid.trim();
       if (!cleanHwid) return errorResponse("Missing license_key or hwid");
+      const requestNonce = body.nonce;
+      if (requestNonce !== undefined && (typeof requestNonce !== "string" || !/^[A-Za-z0-9_-]{16,128}$/.test(requestNonce))) {
+        return errorResponse("Invalid validation request", 400);
+      }
       const now = Date.now();
 
       // 1. Fetch server keys for signing
@@ -2315,6 +2319,10 @@ export async function handleCloudflareApi(
         server_time: now,
         grace_period_hours: 72,
       };
+      if (requestNonce !== undefined) {
+        signedData.nonce = requestNonce;
+        signedData.request_app = typeof app_name === "string" ? app_name.trim() : "";
+      }
 
       const canonicalPayload = canonicalJson(signedData);
       validationStage = "response_signing";
@@ -2376,6 +2384,12 @@ export async function handleCloudflareApi(
         );
       }
 
+      if (lic.app_id) {
+        const appState = await db.execute({ sql: "SELECT status FROM apps WHERE id = ? LIMIT 1", args: [lic.app_id] });
+        if (!appState.rows.length || appState.rows[0].status !== "active") {
+          return jsonResponse({ valid: false, code: !appState.rows.length ? "APP_NOT_FOUND" : "APP_INACTIVE" }, 403);
+        }
+      }
       const deviceLeaseSeconds = await getDeviceLeaseSeconds(db, lic.app_id);
       const staleBefore = now - deviceLeaseSeconds * 1000;
       const devCheck = await db.execute({
@@ -2469,7 +2483,7 @@ export async function handleCloudflareApi(
 
       const licId = licRes.rows[0].id as string;
       await db.execute({
-        sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ? AND hwid = ?",
+        sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ? AND hwid = ? AND status = 'active'",
         args: [now, licId, cleanHwid],
       });
 
@@ -3202,6 +3216,9 @@ export async function handleCloudflareApi(
       }
 
       const lic = licRes.rows[0];
+      if (auth.apiKey?.app_id && lic.app_id !== auth.apiKey.app_id) {
+        return errorResponse("Forbidden: application scope mismatch", 403);
+      }
       const now = Date.now();
       let currentStatus = lic.status as string;
 
@@ -3274,6 +3291,9 @@ export async function handleCloudflareApi(
         return errorResponse("License not found", 404);
       }
 
+      if (auth.apiKey?.app_id && licRes.rows[0].app_id !== auth.apiKey.app_id) {
+        return errorResponse("Forbidden: application scope mismatch", 403);
+      }
       const licId = licRes.rows[0].id as string;
       const deleteRes = await db.execute({
         sql: "DELETE FROM devices WHERE license_id = ?",
@@ -3317,7 +3337,7 @@ export async function handleCloudflareApi(
 
       const cleanKey = decodeURIComponent(keyParam).trim().toUpperCase();
       const licRes = await db.execute({
-        sql: "SELECT id, status FROM licenses WHERE key = ? LIMIT 1",
+        sql: "SELECT id, status, app_id FROM licenses WHERE key = ? LIMIT 1",
         args: [cleanKey],
       });
 
@@ -3325,6 +3345,9 @@ export async function handleCloudflareApi(
         return errorResponse("License not found", 404);
       }
 
+      if (auth.apiKey?.app_id && licRes.rows[0].app_id !== auth.apiKey.app_id) {
+        return errorResponse("Forbidden: application scope mismatch", 403);
+      }
       const licId = licRes.rows[0].id as string;
       await db.execute({
         sql: "UPDATE licenses SET status = ? WHERE id = ?",

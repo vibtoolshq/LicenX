@@ -5,8 +5,6 @@ thread to monitor periodic server validation (every 20 mins).
 """
 
 import os
-import json
-import base64
 import tempfile
 import threading
 import time
@@ -74,29 +72,13 @@ class BackgroundLicenseWorker:
     # -------------------------------------------------------------
 
     def save_session(self, license_key: str, license_data: Dict[str, Any]) -> None:
-        """Persists validated license key to session storage for smooth auto-login."""
-        try:
-            os.makedirs(os.path.dirname(self._session_file), exist_ok=True)
-            payload = json.dumps({"license_key": license_key.strip(), "saved_at": time.time()})
-            encoded = base64.b64encode(payload.encode("utf-8")).decode("utf-8")
-            with open(self._session_file, "w", encoding="utf-8") as f:
-                f.write(encoded)
-        except Exception:
-            pass
+        """Never persist license keys in reversible temporary files."""
+        self.clear_session()
 
     def load_saved_session(self) -> Optional[str]:
-        """Loads saved session key if available."""
-        try:
-            if not os.path.exists(self._session_file):
-                return None
-            with open(self._session_file, "r", encoding="utf-8") as f:
-                encoded = f.read().strip()
-            if not encoded:
-                return None
-            payload = json.loads(base64.b64decode(encoded.encode("utf-8")).decode("utf-8"))
-            return payload.get("license_key")
-        except Exception:
-            return None
+        """Reject and remove legacy insecure saved sessions."""
+        self.clear_session()
+        return None
 
     def clear_session(self) -> None:
         """Deletes session file from temp storage"""

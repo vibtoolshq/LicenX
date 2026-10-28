@@ -67,7 +67,7 @@ class ReadmeQuickStartTests(unittest.TestCase):
             return original_import(name, globals, locals, fromlist, level)
 
         example_globals = {
-            "__builtins__": {**vars(builtins), "__import__": import_sdk},
+            "__builtins__": {**vars(builtins), "__import__": import_sdk, "input": lambda prompt="": "VCON-TEST"},
         }
         output = io.StringIO()
         with patch.object(

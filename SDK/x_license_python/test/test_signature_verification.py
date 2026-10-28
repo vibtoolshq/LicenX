@@ -133,13 +133,22 @@ class SignatureVerificationTests(unittest.TestCase):
             app_version="1.0.0",
         )
         communicator = ServerCommunicator(config)
-        signature = base64.b64encode(trusted_key.sign(self.message)).decode("ascii")
-        response = {
-            **self.payload,
-            "signature": signature,
-            "public_key": self.public_key_pem(response_key.public_key()),
-        }
-        communicator._http_post = Mock(return_value=(200, response))
+        def signed_response(_url, body, _timeout):
+            payload = {
+                **self.payload,
+                "hwid": body["hwid"],
+                "nonce": body["nonce"],
+                "request_app": body["app_name"].strip(),
+            }
+            signature = base64.b64encode(
+                trusted_key.sign(ServerCommunicator.canonical_json(payload).encode("utf-8"))
+            ).decode("ascii")
+            return 200, {
+                **payload,
+                "signature": signature,
+                "public_key": self.public_key_pem(response_key.public_key()),
+            }
+        communicator._http_post = Mock(side_effect=signed_response)
 
         valid, status_code, _ = communicator.validate_license(
             "LICX-TEST",
@@ -150,6 +159,37 @@ class SignatureVerificationTests(unittest.TestCase):
         self.assertTrue(valid)
         self.assertEqual(status_code, 200)
         self.assertEqual(config.public_key_pem, self.public_key_pem(trusted_key.public_key()))
+
+    def test_validate_rejects_authenticated_wrong_identity_or_replayed_challenge(self):
+        trusted = ed25519.Ed25519PrivateKey.generate()
+        communicator = ServerCommunicator(
+            SDKConfig(public_key_pem=self.public_key_pem(trusted.public_key()), app_version="1.0.0")
+        )
+        for field, incorrect in (
+            ("license_key", "OTHER-LICENSE"),
+            ("hwid", "other-hwid"),
+            ("request_app", "other-app"),
+            ("nonce", "replayed-challenge"),
+        ):
+            with self.subTest(field=field):
+                def signed_wrong_identity(_url, body, _timeout):
+                    payload = {
+                        "valid": True,
+                        "license_key": body["license_key"],
+                        "hwid": body["hwid"],
+                        "request_app": body["app_name"].strip(),
+                        "nonce": body["nonce"],
+                    }
+                    payload[field] = incorrect
+                    signature = base64.b64encode(
+                        trusted.sign(ServerCommunicator.canonical_json(payload).encode("utf-8"))
+                    ).decode("ascii")
+                    return 200, {**payload, "signature": signature}
+                communicator._http_post = Mock(side_effect=signed_wrong_identity)
+                valid, status, details = communicator.validate_license("LICX-TEST", "test-hwid", {})
+                self.assertFalse(valid)
+                self.assertEqual(status, 403)
+                self.assertEqual(details["code"], "VALIDATION_BINDING_FAILED")
 
     def diagnostic_engine(self, configured_key, server_key):
         engine = DiagnosticEngine.__new__(DiagnosticEngine)

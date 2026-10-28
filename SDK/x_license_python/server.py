@@ -84,7 +84,7 @@ class ServerCommunicator:
     @staticmethod
     def canonical_json(data: Dict[str, Any]) -> str:
         """Produces canonical sorted JSON string matching server-side signing format"""
-        return json.dumps(data, sort_keys=True, separators=(",", ":"))
+        return json.dumps(data, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
     def verify_signature(self, payload: Dict[str, Any], signature_b64: str) -> bool:
         """
@@ -315,6 +315,7 @@ class ServerCommunicator:
             "app_name": self.config.app_name,
             "app_version": app_version.strip(),
             "client_time": int(time.time() * 1000),
+            "nonce": secrets.token_urlsafe(32),
         }
 
         status_code, data = self._http_post(url, body, self.config.request_timeout_seconds)
@@ -327,6 +328,13 @@ class ServerCommunicator:
             # Verify cryptographic signature
             if not sig or not self.verify_signature(data, sig):
                 return False, 403, {"error": "Server cryptographic signature mismatch", "code": "SIGNATURE_FAILED"}
+            if (
+                data.get("nonce") != body["nonce"]
+                or data.get("request_app") != body["app_name"].strip()
+                or data.get("license_key") != body["license_key"]
+                or data.get("hwid") != hwid.strip()
+            ):
+                return False, 403, {"error": "Signed validation does not match request", "code": "VALIDATION_BINDING_FAILED"}
 
             return True, 200, data
         else:
