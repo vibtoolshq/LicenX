@@ -66,6 +66,25 @@ Before any bug fix, feature change, production update, deployment change, or oth
 
 All development-time Markdown plans, forensic notes, error audits, and phase logs belong under `notes/`. Preserve the existing `.gitignore` behavior unless the user explicitly asks to change tracking policy.
 
+## Private Local Development Notes
+
+- The root `notes/` directory is exclusively for personal local development reports, plans, investigation notes, working Markdown, and update/fix step or phase logs.
+- Do not place public documentation, public-facing Markdown, user guides, release documentation, or other public information in `notes/`. Keep those documents in the project's appropriate public documentation locations.
+- Before starting any update, change, addition, or fix, create or update its relevant report and scoped plan in `notes/` before editing the target files. Record the requested scope, baseline/evidence, planned steps or phases, affected files, risks, and acceptance checks.
+- Maintain the relevant step/phase log during work. After each update/fix phase, record what changed, verification commands and actual results, completion status, and any blocker or next authorized step. Reuse existing task notes and phase/status logs where applicable instead of creating duplicate records.
+- Keep `notes/` only on the local development machine/server and ignored by the root `.gitignore` rule `/notes/`. Do not stage, force-add, commit, push, upload, publish, or include its contents in public documentation, SDK packages, build outputs, or deployment artifacts.
+- Preserve existing private notes and unrelated user work. Do not move, delete, publish, or rewrite them as part of routine implementation.
+
+## Phase Execution and Verification Efficiency
+
+- Work only on the separately authorized phase scope; do not start the next phase automatically.
+- Aim to complete a suitably sized phase within about 10 minutes when scope and tooling permit. Do not skip required work or claim unverified success to meet that target.
+- After implementation, run one focused verification pass and audit the exact patch against the phase target, acceptance criteria, and file allowlist. Reuse passing evidence; do not repeat identical tests/checks or broaden into full suites without a new reason.
+- If verification finds an in-scope defect, fix it and rerun only the affected checks. Record environment failures or scope-crossing blockers honestly; do not hide a failure to close the phase.
+- Once acceptance is satisfied, immediately close the phase and update the relevant plan, roadmap, logs, actual-working status, and required project memory. Do not prolong the phase with unrelated improvements or verification loops.
+- For an authorized implementation phase, publish the reviewed change to GitHub and safely fast-forward-pull it into the remote project after the focused verification; preserve local user changes, data, and ignored notes.
+- Finish with a short factual summary of updates, benefits, verification, unchanged/out-of-scope behavior, and the next documented phase. Provide a short copy-paste approval command for that next phase, then wait for the user to issue it.
+
 ## Project Memory Maintenance
 
 Use the root [`MEMORY.md`](./MEMORY.md) as the maintained project orientation. Source code and manifests remain authoritative; keep the memory factual, avoid secrets, and do not treat dated notes or local test results as current without verification.
