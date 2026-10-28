@@ -30,7 +30,10 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    networks: [backend, frontend]
+    networks:
+      backend: {}
+      frontend:
+        ipv4_address: 172.30.3.3
   caddy:
     profiles: [standalone-https]
     image: caddy:2.10.2-alpine
