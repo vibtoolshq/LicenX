@@ -663,10 +663,10 @@ class DiagnosticEngine:
 
         try:
             worker.save_session(test_key, test_payload)
-            if not os.path.exists(worker._session_file):
-                return False, "Session storage file was not created"
-            if worker.load_saved_session() != test_key:
-                return False, "Session storage failed to load saved key"
+            if os.path.exists(worker._session_file):
+                return False, "Insecure session storage unexpectedly created a file"
+            if worker.load_saved_session() is not None:
+                return False, "Insecure saved license key unexpectedly loaded"
         finally:
             worker.clear_session()
 
@@ -679,7 +679,7 @@ class DiagnosticEngine:
         if not OfflineGuard.is_clock_tampered(now_ms + 16 * 60 * 1000):
             return False, "Clock guard accepted a timestamp beyond the 15-minute limit"
 
-        return True, "Session storage verified; data is not encrypted; clock drift checks passed"
+        return True, "Session key persistence is disabled (not encrypted on disk); clock drift checks passed"
 
     def _test_logout_protocol(self, active_key: Optional[str]) -> Tuple[bool, str]:
         key = active_key or self.client.get_current_key()
