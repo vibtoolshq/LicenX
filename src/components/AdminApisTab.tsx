@@ -18,6 +18,7 @@ import React, { useEffect, useState } from 'react';
 import { useConfirm } from '../context/ConfirmContext';
 import { api } from '../services/apiClient';
 import { AdminApiKeyRecord, CreatedAdminApiKey } from '../types';
+import { deleteExplicitTestAdminApiKeys, getExplicitTestAdminApiKeys } from './adminApiKeySafety';
 
 interface AdminApisTabProps {
   onNavigateToTab?: (tab: string) => void;
@@ -46,6 +47,7 @@ export const AdminApisTab: React.FC<AdminApisTabProps> = () => {
   // Bulk Clean Keys modal state
   const [isCleanModalOpen, setIsCleanModalOpen] = useState(false);
   const [isCleaningKeys, setIsCleaningKeys] = useState(false);
+  const testKeys = getExplicitTestAdminApiKeys(keys);
 
   // Code snippets tab
   const [activeSnippetTab, setActiveSnippetTab] = useState<'php' | 'node' | 'python' | 'curl'>('php');
@@ -73,12 +75,15 @@ export const AdminApisTab: React.FC<AdminApisTabProps> = () => {
     try {
       setLoading(true);
       setError(null);
-      const [keysRes, appsRes] = await Promise.all([
-        api.getAdminApiKeys().catch(() => ({ success: true, keys: [] })),
-        api.getApps().catch(() => ({ apps: [] })),
+      const [keysRes, appsRes] = await Promise.allSettled([
+        api.getAdminApiKeys(),
+        api.getApps(),
       ]);
-      setKeys(keysRes.keys || []);
-      setApps(appsRes.apps || []);
+      if (keysRes.status === 'fulfilled') setKeys(keysRes.value.keys || []);
+      if (appsRes.status === 'fulfilled') setApps(appsRes.value.apps || []);
+      if (keysRes.status === 'rejected' || appsRes.status === 'rejected') {
+        setError('Failed to refresh ' + [keysRes.status === 'rejected' ? 'API keys' : '', appsRes.status === 'rejected' ? 'applications' : ''].filter(Boolean).join(' and '));
+      }
     } catch (err: any) {
       setError(err.message || 'Failed to load keys');
     } finally {
@@ -148,11 +153,15 @@ export const AdminApisTab: React.FC<AdminApisTabProps> = () => {
     try {
       setIsCleaningKeys(true);
       setError(null);
-      await Promise.all(keys.map((k) => api.deleteAdminApiKey(k.id).catch(() => null)));
+      const result = await deleteExplicitTestAdminApiKeys(testKeys, (id) => api.deleteAdminApiKey(id));
       await loadData();
-      setIsCleanModalOpen(false);
-      setActionSuccess('Cleaned all test keys');
-      setTimeout(() => setActionSuccess(null), 2500);
+      if (result.failed) {
+        setError(`Deleted ${result.deleted} test keys; ${result.failed} failed. Please retry.`);
+      } else {
+        setIsCleanModalOpen(false);
+        setActionSuccess(`Deleted ${result.deleted} test keys`);
+        setTimeout(() => setActionSuccess(null), 2500);
+      }
     } catch (err: any) {
       setError(err.message || 'Failed to clean keys');
     } finally {
@@ -212,7 +221,7 @@ export const AdminApisTab: React.FC<AdminApisTabProps> = () => {
 
   const selectedAppObj = apps.find((a) => a.id === testerAppId || a.app_slug === testerAppId);
   const currentAppSlug = selectedAppObj?.app_slug || (testerAppId ? testerAppId : 'your-app-slug');
-  const activeSecretKey = testerKey.trim() || createdKeyData?.secret || 'vcon_sec_YOUR_SECRET_KEY';
+  const activeSecretKey = 'vcon_sec_YOUR_SECRET_KEY';
 
   const phpSnippet = `<?php
 add_action('woocommerce_order_status_completed', 'vcon_issue_license');
@@ -323,14 +332,14 @@ print(license['key'], license['pin'])`;
         </div>
 
         <div className="flex items-center gap-2">
-          {keys.length > 0 && (
+          {testKeys.length > 0 && (
             <button
               onClick={() => setIsCleanModalOpen(true)}
               className="flex items-center gap-1.5 px-2.5 py-1.5 text-[11px] font-medium text-red-400 hover:text-red-300 bg-red-500/10 hover:bg-red-500/20 border border-red-500/20 rounded-md transition"
               title="Delete all test keys"
             >
               <Trash2 className="w-3 h-3" />
-              <span>Clean Keys ({keys.length})</span>
+              <span>Clean Keys ({testKeys.length})</span>
             </button>
           )}
           <button
@@ -531,7 +540,8 @@ print(license['key'], license['pin'])`;
                 <div>
                   <label className="block text-slate-300 mb-1">Secret Key (Bearer Token):</label>
                   <input
-                    type="text"
+                    type="password"
+                    autoComplete="off"
                     value={testerKey}
                     onChange={(e) => setTesterKey(e.target.value)}
                     placeholder="vcon_sec_..."
@@ -1154,7 +1164,7 @@ print(license['key'], license['pin'])`;
             </div>
 
             <p className="text-slate-300 text-[11px]">
-              This will remove all {keys.length} API keys currently listed. You can generate new keys at any time.
+              This will remove only {testKeys.length} explicitly test-prefixed API keys. Other keys will remain active.
             </p>
 
             <div className="flex items-center justify-end gap-2 pt-2">
@@ -1171,7 +1181,7 @@ print(license['key'], license['pin'])`;
                 disabled={isCleaningKeys}
                 className="px-3.5 py-1.5 font-semibold text-white bg-red-600 hover:bg-red-500 disabled:bg-slate-800 rounded transition"
               >
-                {isCleaningKeys ? 'Cleaning...' : `Delete All ${keys.length}`}
+                {isCleaningKeys ? 'Cleaning...' : `Delete All ${testKeys.length}`}
               </button>
             </div>
           </div>
