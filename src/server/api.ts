@@ -94,7 +94,7 @@ export function invalidateAdminConfigCache(): void {
 }
 
 // Middleware: Authenticate Admin using Bearer token (High Performance Cached)
-async function requireAdminAuth(
+export async function requireAdminAuth(
   req: Request,
   res: Response,
   next: NextFunction,

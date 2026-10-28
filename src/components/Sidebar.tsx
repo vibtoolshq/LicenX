@@ -19,6 +19,7 @@ import {
   AppWindow,
   Globe,
   Webhook,
+  DatabaseBackup,
 } from 'lucide-react';
 import { ActiveTab, SiteSettings } from '../types';
 
@@ -155,6 +156,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           id: 'site-settings',
           label: 'Site Settings',
           icon: <Globe className="w-3.5 h-3.5" />,
+        },
+        {
+          id: 'backup',
+          label: 'Backup',
+          icon: <DatabaseBackup className="w-3.5 h-3.5" />,
         },
         {
           id: 'settings',

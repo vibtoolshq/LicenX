@@ -1,0 +1,78 @@
+name: LicenX App Backup - isolated verification
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/backup-system.yml"
+      - "src/server/backupControl.ts"
+      - "src/server/fullBackupWorker.ts"
+      - "src/components/BackupTab.tsx"
+      - "src/services/apiClient.ts"
+      - "src/types.ts"
+      - "src/App.tsx"
+      - "server.ts"
+      - "Dockerfile"
+      - "package.json"
+      - "package-lock.json"
+      - "tests/backupSystemDocker.mjs"
+
+permissions:
+  contents: read
+
+jobs:
+  backup-restore:
+    name: Verify private encrypted backup and restore on disposable PostgreSQL
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Configure isolated CI-only database
+        shell: bash
+        run: |
+          set -euo pipefail
+          pw="$(openssl rand -hex 24)"
+          {
+            echo "COMPOSE_PROJECT_NAME=licenx_backup_ci_${GITHUB_RUN_ID}"
+            echo "DOMAIN=localhost"
+            echo "ACME_EMAIL=ci@example.invalid"
+            echo "POSTGRES_DB=licenx_ci"
+            echo "POSTGRES_USER=licenx_ci"
+            echo "POSTGRES_PASSWORD=${pw}"
+            echo "DATABASE_URL=postgresql://licenx_ci:${pw}@postgres:5432/licenx_ci?sslmode=disable"
+            echo "STORAGE_PROVIDER=local"
+          } >> "$GITHUB_ENV"
+          echo "::add-mask::${pw}"
+      - name: Verify source typecheck and production build
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm run lint
+          npm run build
+      - name: Build and start isolated PostgreSQL + app
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose up --detach --build --wait --wait-timeout 180
+      - name: Verify encrypted backup, tamper rejection and transactional restore
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose exec -T app node --input-type=module - < tests/backupSystemDocker.mjs
+      - name: Verify application remains healthy
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker compose exec -T app node --input-type=module -e "
+            const r=await fetch('http://127.0.0.1:3000/api/ready');
+            if (!r.ok || (await r.json()).status!=='ready') process.exit(1);
+            console.log('READINESS_PASS');
+          "
+      - name: Dispose isolated CI containers and volumes
+        if: always()
+        shell: bash
+        run: docker compose down --volumes --remove-orphans || true

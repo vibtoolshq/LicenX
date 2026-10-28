@@ -112,6 +112,43 @@ export interface SetupStatus extends Partial<StorageStatus> {
   serverTime: number;
 }
 
+export interface BackupAccount {
+  id: string;
+  name: string;
+  accountId: string;
+  accessKeyId: string;
+  bucketName: string;
+  hasSecret: boolean;
+}
+
+export interface FullBackupJob {
+  id: string;
+  action: 'backup' | 'restore';
+  status: 'running' | 'completed' | 'failed';
+  destination: string;
+  createdAt: number;
+  finishedAt?: number;
+  error?: string;
+  file?: boolean;
+  r2Key?: string;
+  checkpoint?: string;
+}
+
+export interface FullBackupSchedule {
+  enabled: boolean;
+  intervalHours: number;
+  destination: string;
+  nextAt: number;
+}
+
+export interface FullBackupStatus {
+  accounts: BackupAccount[];
+  jobs: FullBackupJob[];
+  schedule: FullBackupSchedule;
+  recoveryKeySaved: boolean;
+  busy: boolean;
+}
+
 export type ActiveTab =
   | "overview"
   | "apps"
@@ -123,6 +160,7 @@ export type ActiveTab =
   | "profile"
   | "admin-apis"
   | "site-settings"
+  | "backup"
   | "settings";
 
 export interface AdminApiKeyRecord {

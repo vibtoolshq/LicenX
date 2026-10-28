@@ -6,13 +6,15 @@ import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import { initDatabaseSchema, getDbClient } from './src/server/db.js';
-import { apiRouter } from './src/server/api.js';
+import { apiRouter, requireAdminAuth } from './src/server/api.js';
+import { registerBackupRoutes, initializeBackupScheduler, isBackupRestoreRunning } from './src/server/backupControl.js';
 
 dotenv.config();
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const app = express();
 const port = Number(process.env.PORT ?? 3000);
 const storageRoot = process.env.LOCAL_STORAGE_PATH ?? '';
+registerBackupRoutes(apiRouter, requireAdminAuth);
 const isProduction = process.env.NODE_ENV === 'production';
 const trustedProxy = process.env.TRUSTED_PROXY_IP;
 if (trustedProxy) app.set('trust proxy', trustedProxy);
@@ -25,7 +27,7 @@ const fail = (res: express.Response, status: number, code: string, id: string) =
 const live = (_req: express.Request, res: express.Response) =>
   res.set('Cache-Control', 'no-store').json({ status: 'online', system: 'VCON License Engine', time: Date.now() });
 const readiness = async (_req: express.Request, res: express.Response) => {
-  if (!ready || shuttingDown) return res.status(503).set('Cache-Control', 'no-store').json({ status: 'not_ready' });
+  if (!ready || shuttingDown || isBackupRestoreRunning()) return res.status(503).set('Cache-Control', 'no-store').json({ status: 'not_ready' });
   try {
     await getDbClient().execute('SELECT 1');
     if (process.env.STORAGE_PROVIDER === 'local') {
@@ -44,6 +46,12 @@ app.get('/api/ready', readiness);
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+app.use(['/api', '/v1'], (_req, res, next) => {
+  if (isBackupRestoreRunning() && !_req.path.startsWith('/backup/')) {
+    return res.status(503).set('Cache-Control', 'no-store').json({ error: 'RESTORE_IN_PROGRESS' });
+  }
+  next();
+});
 app.use('/api', apiRouter);
 app.use('/v1', (req, res, next) => { req.url = '/v1' + req.url; apiRouter(req, res, next); });
 app.use(['/api', '/v1'], (req, res) => fail(res, 404, 'NOT_FOUND', requestId()));
@@ -62,6 +70,7 @@ async function main() {
     if (!path.isAbsolute(storageRoot)) throw new Error('LOCAL_STORAGE_PATH must be absolute');
     await fs.mkdir(storageRoot, { recursive: true, mode: 0o700 });
     await fs.access(storageRoot, (await import('node:fs')).constants.R_OK | (await import('node:fs')).constants.W_OK);
+    if (process.env.DATABASE_PROVIDER === 'postgres') await initializeBackupScheduler();
   }
   if (!isProduction) {
     const { createServer } = await import('vite');

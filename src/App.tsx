@@ -16,6 +16,7 @@ import { ProfileTab } from './components/ProfileTab';
 import { AdminApisTab } from './components/AdminApisTab';
 import { SiteSettingsTab } from './components/SiteSettingsTab';
 import { SettingsTab } from './components/SettingsTab';
+import { BackupTab } from './components/BackupTab';
 import { CreateLicenseModal } from './components/CreateLicenseModal';
 import { BulkLicenseModal } from './components/BulkLicenseModal';
 import { ManageDevicesModal } from './components/ManageDevicesModal';
@@ -52,6 +53,7 @@ export default function App() {
     'profile',
     'admin-apis',
     'site-settings',
+    'backup',
     'settings',
   ];
 
@@ -60,6 +62,7 @@ export default function App() {
     const path = window.location.pathname.toLowerCase();
 
     // 1. Pathname matches
+    if (path.includes('/backup')) return 'backup';
     if (path.includes('/site-settings')) return 'site-settings';
     if (path.includes('/settings')) return 'settings';
     if (path.includes('/apps') || path.includes('/app')) return 'apps';
@@ -469,6 +472,7 @@ export default function App() {
             />
           )}
 
+          {activeTab === 'backup' && <BackupTab />}
           {activeTab === 'settings' && (
             <SettingsTab
               publicKeyPem={publicKeyPem}

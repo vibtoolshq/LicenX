@@ -6,6 +6,10 @@ import {
   License,
   R2Backup,
   R2Config,
+  FullBackupStatus,
+  BackupAccount,
+  FullBackupSchedule,
+  FullBackupJob,
   SetupStatus,
   StorageStatus,
   SiteSettings,
@@ -866,6 +870,53 @@ export const api = {
     a.click();
     window.URL.revokeObjectURL(url);
     document.body.removeChild(a);
+  },
+
+  // Full-system Backup & Recovery (PostgreSQL + local application storage).
+  getFullBackupStatus: () => request<FullBackupStatus>('/api/backup/status'),
+  createBackupAccount: (data: { name: string; accountId: string; accessKeyId: string; bucketName: string; secretAccessKey: string }) =>
+    request<{ success: boolean; account: BackupAccount }>('/api/backup/accounts', {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+  updateBackupAccount: (id: string, data: { name: string; accountId: string; accessKeyId: string; bucketName: string; secretAccessKey: string }) =>
+    request<{ success: boolean; account: BackupAccount }>(`/api/backup/accounts/${encodeURIComponent(id)}`, {
+      method: 'PUT', body: JSON.stringify(data),
+    }),
+  testBackupAccount: (id: string) =>
+    request<{ success: boolean; message: string }>(`/api/backup/accounts/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+  saveBackupSchedule: (data: { enabled: boolean; intervalHours: number; destination: string }) =>
+    request<{ success: boolean; schedule: FullBackupSchedule }>('/api/backup/schedule', {
+      method: 'POST', body: JSON.stringify(data),
+    }),
+  runFullBackup: (destination: string) =>
+    request<{ job: FullBackupJob }>('/api/backup/run', { method: 'POST', body: JSON.stringify({ destination }) }),
+  startFullRestore: (fileId: string, confirmation: string, currentPassword: string) =>
+    request<{ job: FullBackupJob }>('/api/backup/restore/start', {
+      method: 'POST', body: JSON.stringify({ fileId, confirmation, currentPassword }),
+    }),
+  importFullRestoreFromR2: (accountId: string, key: string) =>
+    request<{ fileId: string; size: number }>('/api/backup/restore/r2', {
+      method: 'POST', body: JSON.stringify({ accountId, key }),
+    }),
+  importBackupRecoveryKey: async (file: File) => {
+    const csrf = await getCsrfToken();
+    const response = await fetch('/api/backup/recovery-key/import', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': csrf },
+      body: file,
+    });
+    if (!response.ok) throw new ApiError(safeErrorMessage(response.status), response.status, 'KEY_IMPORT_FAILED');
+    return response.json() as Promise<{ success: boolean }>;
+  },
+  uploadFullBackup: async (file: File) => {
+    const csrf = await getCsrfToken();
+    const response = await fetch('/api/backup/restore/upload', {
+      method: 'POST', credentials: 'same-origin',
+      headers: { 'Content-Type': 'application/octet-stream', 'X-CSRF-Token': csrf },
+      body: file,
+    });
+    if (!response.ok) throw new ApiError(safeErrorMessage(response.status), response.status, 'BACKUP_UPLOAD_FAILED');
+    return response.json() as Promise<{ fileId: string; size: number }>;
   },
 
   // User Public Self-Service Endpoints
