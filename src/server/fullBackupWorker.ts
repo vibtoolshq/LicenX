@@ -232,6 +232,11 @@ export async function runBackupWorker(action: string, id: string, extra: string)
 if (process.argv[1] && /fullBackupWorker\.js$/.test(process.argv[1])) {
   runBackupWorker(process.argv[2] || '', process.argv[3] || '', process.argv[4] || '').then(
     result => { process.stdout.write(JSON.stringify(result) + '\n'); },
-    () => { process.stderr.write('BACKUP_WORKER_FAILED\n'); process.exitCode = 1; }
+    (error) => {
+      if (process.env.DATABASE_URL?.includes('/licenx_ci')) {
+        process.stderr.write('CI_BACKUP_DIAGNOSTIC: ' + String(error).slice(0, 400) + '\n');
+      }
+      process.stderr.write('BACKUP_WORKER_FAILED\n'); process.exitCode = 1;
+    }
   );
 }
