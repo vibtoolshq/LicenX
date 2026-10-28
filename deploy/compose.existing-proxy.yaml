@@ -1,0 +1,4 @@
+services:
+  app:
+    ports:
+      - "127.0.0.1:${LICENX_HOST_PORT:-13001}:3000"

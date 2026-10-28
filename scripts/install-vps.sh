@@ -8,15 +8,21 @@ cd "$ROOT"
 DOMAIN=""
 EMAIL=""
 CHECK_ONLY=0
+INSTALL_MODE=standalone
+HOST_PORT=13001
 while (( $# )); do
   case "$1" in
     --domain) DOMAIN="$2"; shift 2 ;;
     --email) EMAIL="$2"; shift 2 ;;
     --check) CHECK_ONLY=1; shift ;;
-    *) echo "Usage: bash scripts/install-vps.sh --domain license.example.com --email owner@example.com [--check]" >&2; exit 2 ;;
+    --mode) INSTALL_MODE="$2"; shift 2 ;;
+    --host-port) HOST_PORT="$2"; shift 2 ;;
+    *) echo "Usage: bash scripts/install-vps.sh --domain license.example.com --email owner@example.com [--mode standalone|existing-proxy] [--host-port 13001] [--check]" >&2; exit 2 ;;
   esac
 done
 
+if [[ "$INSTALL_MODE" != standalone && "$INSTALL_MODE" != existing-proxy ]]; then echo "Invalid mode" >&2; exit 2; fi
+if [[ ! "$HOST_PORT" =~ ^[0-9]+$ ]] || (( HOST_PORT < 1024 || HOST_PORT > 65535 )); then echo "Invalid host port" >&2; exit 2; fi
 if [[ ! -r /etc/os-release ]]; then echo "Ubuntu 24.04 required" >&2; exit 1; fi
 # shellcheck source=/dev/null
 source /etc/os-release
@@ -36,13 +42,19 @@ done
 if ! docker compose version >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   echo "Docker daemon / Compose plugin unavailable. Install and start Docker first." >&2; exit 1
 fi
-if [[ ! -f "$ROOT/.env" ]]; then
+if [[ ! -f "$ROOT/.env" && "$INSTALL_MODE" == standalone ]]; then
   if command -v ss >/dev/null 2>&1 && ss -H -ltn | awk '{print $4}' | grep -Eq '(^|:)(80|443)$'; then
     echo "Ports 80/443 are occupied. Use existing proxy integration; do not replace services." >&2
     exit 1
   fi
   if [[ "$DOMAIN" != localhost ]] && ! getent ahostsv4 "$DOMAIN" >/dev/null; then
     echo "Domain must resolve before standalone HTTPS installation." >&2; exit 1
+  fi
+fi
+if [[ ! -f "$ROOT/.env" && "$INSTALL_MODE" == existing-proxy ]] && command -v ss >/dev/null 2>&1; then
+  if ss -H -ltn | awk '{print $4}' | grep -Eq "(^|:)${HOST_PORT}$"; then
+    echo "Host port $HOST_PORT already used; select another --host-port without modifying existing services." >&2
+    exit 1
   fi
 fi
 if [[ "$CHECK_ONLY" -eq 1 ]]; then
@@ -92,7 +104,15 @@ EOF
   unset owner_code
 fi
 
-docker compose --env-file "$ROOT/.env" --profile standalone-https config --quiet
-docker compose --env-file "$ROOT/.env" --profile standalone-https up --detach --build --wait --wait-timeout 180
-echo "Installation ready: https://$DOMAIN/vcon"
+if [[ "$INSTALL_MODE" == standalone ]]; then
+  docker compose --env-file "$ROOT/.env" --profile standalone-https config --quiet
+  docker compose --env-file "$ROOT/.env" --profile standalone-https up --detach --build --wait --wait-timeout 180
+  echo "Installation ready: https://$DOMAIN/vcon"
+else
+  export LICENX_HOST_PORT="$HOST_PORT"
+  docker compose --env-file "$ROOT/.env" -f compose.yaml -f deploy/compose.existing-proxy.yaml config --quiet
+  docker compose --env-file "$ROOT/.env" -f compose.yaml -f deploy/compose.existing-proxy.yaml up --detach --build --wait --wait-timeout 180
+  echo "LicenX isolated stack ready at localhost port $HOST_PORT (HTTP only)."
+  echo "Configure a trusted HTTPS route for $DOMAIN via an explicitly approved proxy before public use."
+fi
 echo "To rerun, use the same --domain and --email; the existing .env and volumes are preserved."

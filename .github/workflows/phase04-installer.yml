@@ -7,6 +7,8 @@ on:
     paths:
       - ".github/workflows/phase04-installer.yml"
       - "scripts/install-vps.sh"
+      - "deploy/compose.existing-proxy.yaml"
+      - "tests/vpsInstallMode.test.ts"
       - "src/server/bootstrap.ts"
       - "src/components/SetupModal.tsx"
       - "tests/bootstrapSetup.test.ts"
@@ -69,6 +71,16 @@ jobs:
         run: |
           bash -n scripts/install-vps.sh
           bash scripts/install-vps.sh --check --domain localhost --email ci@example.invalid
+
+      - name: Verify no-manual-env installer and isolated existing-proxy mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash -n scripts/install-vps.sh
+          docker compose -f compose.yaml -f deploy/compose.existing-proxy.yaml config --quiet
+          npm ci --no-audit --no-fund
+          node --import tsx --test tests/vpsInstallMode.test.ts
+          bash scripts/install-vps.sh --check --mode existing-proxy --domain localhost --email ci@example.invalid
 
       - name: Verify Docker and Compose and validate config
         shell: bash

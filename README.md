@@ -291,3 +291,18 @@ Application-scoped external Admin API keys are checked when reading or managing 
 The populated `vcon_data.db` and literal recovery records are removed from **new Git HEAD content** without rewriting Git history. Private local data must be preserved during the Git pull using a verified offline snapshot. The replacement `scripts/restoreData.mjs` accepts only explicit private input, an existing target database and confirmation; it performs no automatic import. **Important:** historical public Git exposure remains actionable. Credential reuse, coordinated revocation/rotation, customer-data migration and historical purging are separate, explicitly authorized operations.
 
 GitHub Actions `phase05-security.yml` uses **synthetic disposable** PostgreSQL, local storage and HTTPS services to verify API/SDK security, install/restart/update, snapshot, simulated mutation and restore. It is **not** a verified production backup/restore or a deployment to an existing Coolify VPS. Never run the destructive CI restore sequence against customer services. Full approved-target acceptance and any live credential recovery require separate authorization.
+
+## New-VPS installation with automatic credentials and existing services preserved
+
+**No manual .env file is needed.** `scripts/install-vps.sh` generates a fresh PostgreSQL password, internal connection URI and 256-bit one-time owner setup code; it stores private credentials in local mode-0600 `.env` and local owner code in `.env.owner-setup`. These files are ignored by Git and Docker. The new deployment never reuses the old repository's leaked credentials; **it does not automatically revoke any historically exposed keys in other installations**. Install in a separate directory and preserve the new private credentials and named volumes with encrypted off-server backups.
+
+For a host that already runs other services on ports 80/443, use:
+
+```bash
+bash scripts/install-vps.sh --check --mode existing-proxy --domain license.example.com --email owner@example.com
+bash scripts/install-vps.sh --mode existing-proxy --domain license.example.com --email owner@example.com
+```
+
+This creates **only the new LicenX Compose stack** with PostgreSQL on a private Docker network and the new app bound to `127.0.0.1:13001`. It **does not start Caddy**, bind public 80/443, or alter Coolify, Cloudflare, unrelated containers or firewall rules. `127.0.0.1:13001` is plain HTTP restricted to the VPS loopback; it is NOT a publicly usable production HTTPS endpoint. A separate, explicitly authorized proxy or DNS configuration is required to make the domain serve this application securely. If port 13001 is occupied, choose a different unprivileged port using `--host-port 13002`; verify no collision first. The installer is safe to rerun with the same domain/email, but do not change an existing host port without checking the original service binding.
+
+For an otherwise empty VPS with free 80/443, `--mode standalone` (the default) starts the self-contained Caddy HTTPS stack. The installer requires Ubuntu 24.04, Docker Engine, the Docker Compose plugin, Git and OpenSSL. It neither installs missing Docker software nor rotates credentials for existing deployed applications. Never put the private owner code or generated `.env` in a public log, screenshot or Git repository.
