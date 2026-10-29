@@ -41,11 +41,15 @@ export async function setPublicApiEnabled(db: DatabaseClient, enabled: unknown) 
     );
     if (!Number(count.rows[0]?.n)) throw new PublicApiControlError("Register an active domain before enabling the API", 409);
   }
-  await db.execute({
-    sql: "INSERT INTO public_license_api_settings (id, enabled) VALUES ('main', ?) " +
-         "ON CONFLICT(id) DO UPDATE SET enabled = excluded.enabled",
+  // Migration seeds the main row and its private rate key. Never insert a row
+  // without the required secret_key or overwrite the persisted HMAC seed.
+  const result = await db.execute({
+    sql: "UPDATE public_license_api_settings SET enabled = ? WHERE id = 'main'",
     args: [enabled ? 1 : 0],
   });
+  if (result.rowsAffected !== 1) {
+    throw new PublicApiControlError("Public API settings are not initialized", 503);
+  }
   return { success: true, enabled };
 }
 
