@@ -717,7 +717,7 @@ export const api = {
     request<{ success: boolean; enabled: boolean; environment_enabled: boolean; domains: PublicLicenseApiDomain[] }>("/api/public-license-api-control"),
   setPublicLicenseApiEnabled: (enabled: boolean) =>
     request<{ success: boolean; enabled: boolean }>("/api/public-license-api-control", { method: "PUT", body: JSON.stringify({ enabled }) }),
-  createPublicLicenseDomain: (data: { domain_origin: string; app_id: string; name?: string }) =>
+  createPublicLicenseDomain: (data: { domain_origin: string; name?: string }) =>
     request<{ success: boolean; domain: PublicLicenseApiDomain; secret: string }>("/api/public-license-api-control/domains", { method: "POST", body: JSON.stringify(data) }),
   setPublicLicenseDomainEnabled: (id: string, enabled: boolean) =>
     request<{ success: boolean }>(`/api/public-license-api-control/domains/${id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),

@@ -405,7 +405,7 @@ print(license['key'], license['pin'])`;
         </button>
       </div>
 
-      {activeMainTab === 'public' && <PublicLicenseApiTab apps={apps} />}
+      {activeMainTab === 'public' && <PublicLicenseApiTab />}
 
       {actionSuccess && (
         <div className="px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-md text-emerald-400 text-[11px] flex items-center justify-between">

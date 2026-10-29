@@ -65,32 +65,53 @@ export async function consumePublicCheckQuota(
   return Number(result.rows[0]?.requests || 0) <= max;
 }
 
+export type PublicLicenseStatus = {
+  valid: boolean;
+  status: string;
+  app: { name: string; slug: string } | null;
+  validity_type: string | null;
+  validity_value: number | null;
+  expires_at: number | null;
+  expires_in_seconds: number | null;
+  checked_at: number;
+};
+
+/** A read-only snapshot across all LicenX applications, not an activation operation. */
 export function evaluatePublicLicense(
   row: Record<string, unknown> | null,
   now: number,
-): { valid: boolean; status: string; expires_at: number | null; expires_in_seconds: number | null; checked_at: number } {
-  const base = { valid: false, status: "not_valid", expires_at: null, expires_in_seconds: null, checked_at: now };
+): PublicLicenseStatus {
+  const base: PublicLicenseStatus = {
+    valid: false, status: "not_valid", app: null,
+    validity_type: null, validity_value: null, expires_at: null,
+    expires_in_seconds: null, checked_at: now,
+  };
   if (!row) return base;
-  if (row.app_status !== "active") return { ...base, status: "inactive_app" };
+  const app = typeof row.app_name === "string" && typeof row.app_slug === "string"
+    ? { name: row.app_name, slug: row.app_slug } : null;
+  const validity_type = typeof row.validity_type === "string" ? row.validity_type : null;
+  const value = row.validity_value == null ? null : Number(row.validity_value);
+  const validity_value = value !== null && Number.isSafeInteger(value) && value >= 0 ? value : null;
+  const rawExpiry = row.expires_at == null ? null : Number(row.expires_at);
+  const expires_at = rawExpiry != null && Number.isSafeInteger(rawExpiry) ? rawExpiry : null;
+  const expires_in_seconds = expires_at == null ? null : Math.max(0, Math.ceil((expires_at - now) / 1000));
+  const known: PublicLicenseStatus = {
+    ...base, app, validity_type, validity_value, expires_at, expires_in_seconds,
+  };
+  if (row.app_status !== "active") return { ...known, status: "inactive_app" };
   if (row.status !== "active") {
     const status = String(row.status ?? "not_valid");
-    return { ...base, status: ["revoked", "suspended", "expired"].includes(status) ? status : "not_valid" };
+    return { ...known, status: ["revoked", "suspended", "expired"].includes(status) ? status : "not_valid" };
   }
-  const expiry = row.expires_at == null ? null : Number(row.expires_at);
-  if (expiry !== null && (!Number.isSafeInteger(expiry) || expiry <= now)) return { ...base, status: "expired", expires_at: Number.isSafeInteger(expiry) ? expiry : null };
-  if (row.validity_type !== "lifetime" && row.activated_at == null) {
-    return { ...base, status: "not_activated" };
+  if (rawExpiry !== null && expires_at === null) return { ...known, status: "not_valid" };
+  if (expires_at !== null && expires_at <= now) return { ...known, status: "expired" };
+  if (validity_type !== "lifetime" && row.activated_at == null) {
+    return { ...known, status: "not_activated", expires_in_seconds: null };
   }
-  if (row.validity_type !== "lifetime" && expiry === null) {
-    return { ...base, status: "not_valid" };
+  if (validity_type !== "lifetime" && expires_at === null) {
+    return { ...known, status: "not_valid" };
   }
-  return {
-    valid: true,
-    status: "active",
-    expires_at: expiry,
-    expires_in_seconds: expiry == null ? null : Math.max(0, Math.ceil((expiry - now) / 1000)),
-    checked_at: now,
-  };
+  return { ...known, valid: true, status: "active" };
 }
 
 export async function runRestrictedPublicLicenseCheck(params: CheckParams): Promise<CheckResponse> {
@@ -129,15 +150,15 @@ export async function runRestrictedPublicLicenseCheck(params: CheckParams): Prom
     let permissions: unknown;
     try { permissions = consumer && JSON.parse(String(consumer.permissions_json || "[]")); } catch { permissions = null; }
     if (!consumer || consumer.status !== "active" ||
-        typeof consumer.app_id !== "string" || !consumer.app_id ||
+        consumer.app_id != null ||
         !String(consumer.key_prefix).startsWith("vcon_check_") ||
         !Array.isArray(permissions) || permissions.length !== 1 || permissions[0] !== "licenses:check") {
       return output(401, { valid: false, code: "UNAUTHORIZED" });
     }
     const domain = await db.execute({
-      sql: "SELECT d.id FROM public_license_api_domains d JOIN apps a ON a.id=d.app_id " +
-           "WHERE d.key_id=? AND d.app_id=? AND d.domain_origin=? AND d.enabled=1 AND a.status='active' LIMIT 1",
-      args: [consumer.id, consumer.app_id, requestedDomain],
+      sql: "SELECT d.id FROM public_license_api_domains d " +
+           "WHERE d.key_id=? AND d.app_id='' AND d.domain_origin=? AND d.enabled=1 LIMIT 1",
+      args: [consumer.id, requestedDomain],
     });
     if (!domain.rows.length) return output(403, { valid: false, code: "FORBIDDEN" });
     const id = String(consumer.id);
@@ -152,10 +173,11 @@ export async function runRestrictedPublicLicenseCheck(params: CheckParams): Prom
     const key = ((input as Record<string, unknown>).license_key as string).trim().toUpperCase();
     if (!/^[A-Z0-9_-]{3,128}$/.test(key)) return output(400, { valid: false, code: "INVALID_REQUEST" });
     const lic = await db.execute({
-      sql: `SELECT l.status, l.expires_at, l.activated_at, l.validity_type, a.status AS app_status
+      sql: `SELECT l.status, l.expires_at, l.activated_at, l.validity_type, l.validity_value,
+                   a.display_name AS app_name, a.app_slug, a.status AS app_status
             FROM licenses l JOIN apps a ON a.id = l.app_id
-            WHERE l.key = ? AND l.app_id = ? LIMIT 1`,
-      args: [key, consumer.app_id],
+            WHERE l.key = ? LIMIT 1`,
+      args: [key],
     });
     const evaluated = evaluatePublicLicense(lic.rows.length ? lic.rows[0] : null, now);
     if (!evaluated.valid &&

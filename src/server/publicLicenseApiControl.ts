@@ -18,18 +18,24 @@ export function normalizeAllowedToolOrigin(value: unknown): string | null {
   } catch { return null; }
 }
 
+// Historic app-bound registrations must NOT silently gain global read access.
+// Only explicit new global registrations (domain.app_id = '') are accepted.
 export async function getPublicApiControl(db: DatabaseClient) {
   const settings = await db.execute("SELECT enabled FROM public_license_api_settings WHERE id = 'main' LIMIT 1");
   const items = await db.execute(
-    "SELECT d.id, d.domain_origin, d.app_id, d.enabled, d.created_at, d.key_id, a.display_name AS app_name, k.status AS key_status " +
-    "FROM public_license_api_domains d LEFT JOIN apps a ON a.id = d.app_id " +
+    "SELECT d.id, d.domain_origin, d.app_id, d.enabled, d.created_at, d.key_id, k.status AS key_status, " +
+    "k.app_id AS key_app_id FROM public_license_api_domains d " +
     "LEFT JOIN admin_api_keys k ON k.id = d.key_id ORDER BY d.created_at DESC",
   );
-  return { enabled: Number(settings.rows[0]?.enabled || 0) === 1, domains: items.rows.map(r => ({
-    id: String(r.id), domain_origin: String(r.domain_origin), app_id: String(r.app_id),
-    app_name: String(r.app_name || ""), enabled: Number(r.enabled) === 1 && r.key_status === "active",
-    created_at: Number(r.created_at), key_id: String(r.key_id),
-  })) };
+  return { enabled: Number(settings.rows[0]?.enabled || 0) === 1, domains: items.rows.map(r => {
+    const legacyScope = r.app_id !== "" || r.key_app_id != null;
+    return {
+      id: String(r.id), domain_origin: String(r.domain_origin), app_id: String(r.app_id || ""),
+      app_name: "", legacy_scope: legacyScope,
+      enabled: !legacyScope && Number(r.enabled) === 1 && r.key_status === "active",
+      created_at: Number(r.created_at), key_id: String(r.key_id),
+    };
+  }) };
 }
 
 export async function setPublicApiEnabled(db: DatabaseClient, enabled: unknown) {
@@ -37,12 +43,12 @@ export async function setPublicApiEnabled(db: DatabaseClient, enabled: unknown) 
   if (enabled) {
     const count = await db.execute(
       "SELECT COUNT(*) AS n FROM public_license_api_domains d JOIN admin_api_keys k ON k.id=d.key_id " +
-      "JOIN apps a ON a.id=d.app_id WHERE d.enabled=1 AND k.status='active' AND a.status='active'",
+      "WHERE d.app_id='' AND d.enabled=1 AND k.app_id IS NULL AND k.status='active' " +
+      "AND k.permissions_json='[\"licenses:check\"]' AND k.key_prefix LIKE 'vcon_check_%'",
     );
-    if (!Number(count.rows[0]?.n)) throw new PublicApiControlError("Register an active domain before enabling the API", 409);
+    if (!Number(count.rows[0]?.n)) throw new PublicApiControlError("Register a global domain before enabling the API", 409);
   }
-  // Migration seeds the main row and its private rate key. Never insert a row
-  // without the required secret_key or overwrite the persisted HMAC seed.
+  // Preserve the private rate-limit HMAC key seeded during migration.
   const result = await db.execute({
     sql: "UPDATE public_license_api_settings SET enabled = ? WHERE id = 'main'",
     args: [enabled ? 1 : 0],
@@ -54,38 +60,42 @@ export async function setPublicApiEnabled(db: DatabaseClient, enabled: unknown) 
 }
 
 export async function createPublicApiDomain(db: DatabaseClient, input: {
-  domain_origin?: unknown; app_id?: unknown; name?: unknown;
+  domain_origin?: unknown; name?: unknown; app_id?: unknown;
 }) {
+  if (input.app_id != null && input.app_id !== "") {
+    throw new PublicApiControlError("Public API is global; do not select a License Application");
+  }
   const origin = normalizeAllowedToolOrigin(input.domain_origin);
   if (!origin) throw new PublicApiControlError("Provide an exact HTTPS domain origin, without paths or wildcards");
-  if (typeof input.app_id !== "string" || !input.app_id.trim() || input.app_id.length > 256) {
-    throw new PublicApiControlError("A valid application must be selected");
-  }
-  const name = typeof input.name === "string" && input.name.trim()
-    ? input.name.trim() : origin;
+  const name = typeof input.name === "string" && input.name.trim() ? input.name.trim() : origin;
   if (name.length > 128) throw new PublicApiControlError("Name too long");
-  const appId = input.app_id.trim();
   const transaction = await db.transaction("write");
   try {
-    const exists = await transaction.execute({ sql: "SELECT id FROM apps WHERE id=? AND status='active' LIMIT 1", args: [appId] });
-    if (!exists.rows.length) throw new PublicApiControlError("Application not found or inactive", 404);
     const duplicate = await transaction.execute({ sql: "SELECT id FROM public_license_api_domains WHERE domain_origin = ? LIMIT 1", args: [origin] });
-    if (duplicate.rows.length) throw new PublicApiControlError("Domain is already registered", 409);
+    if (duplicate.rows.length) throw new PublicApiControlError("Domain is already registered; revoke the old entry first", 409);
     const generated = generateAdminApiKey("check");
     const id = crypto.randomUUID();
     const now = Date.now();
     await transaction.execute({
       sql: "INSERT INTO admin_api_keys (id, name, key_prefix, secret_hash, permissions_json, app_id, status, created_at) " +
-           "VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
+           "VALUES (?, ?, ?, ?, ?, NULL, 'active', ?)",
       args: [generated.id, name, generated.keyPrefix, generated.secretHash,
-        JSON.stringify(["licenses:check"]), appId, now],
+        JSON.stringify(["licenses:check"]), now],
     });
+    // Empty string is the global-scope marker in the existing NOT NULL column.
+    // No destructive database migration or implicit widening of old credentials.
     await transaction.execute({
-      sql: "INSERT INTO public_license_api_domains (id, domain_origin, app_id, key_id, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)",
-      args: [id, origin, appId, generated.id, now],
+      sql: "INSERT INTO public_license_api_domains (id, domain_origin, app_id, key_id, enabled, created_at) " +
+           "VALUES (?, ?, '', ?, 1, ?)",
+      args: [id, origin, generated.id, now],
     });
     await transaction.commit();
-    return { success: true, domain: { id, domain_origin: origin, app_id: appId, app_name: "", enabled: true, key_id: generated.id, created_at: now }, secret: generated.secret };
+    return {
+      success: true,
+      domain: { id, domain_origin: origin, app_id: "", app_name: "", legacy_scope: false,
+        enabled: true, key_id: generated.id, created_at: now },
+      secret: generated.secret,
+    };
   } catch (e) {
     await transaction.rollback();
     throw e;
@@ -94,8 +104,15 @@ export async function createPublicApiDomain(db: DatabaseClient, input: {
 
 export async function updatePublicApiDomain(db: DatabaseClient, id: string, enabled: unknown) {
   if (typeof enabled !== "boolean") throw new PublicApiControlError("Invalid enabled value");
-  const exists = await db.execute({ sql: "SELECT id FROM public_license_api_domains WHERE id=?", args: [id] });
+  const exists = await db.execute({
+    sql: "SELECT d.id, d.app_id, k.app_id AS key_app_id FROM public_license_api_domains d " +
+         "LEFT JOIN admin_api_keys k ON k.id=d.key_id WHERE d.id=?",
+    args: [id],
+  });
   if (!exists.rows.length) throw new PublicApiControlError("Domain not found", 404);
+  if (enabled && (exists.rows[0].app_id !== "" || exists.rows[0].key_app_id != null)) {
+    throw new PublicApiControlError("Legacy app-scoped domain must be revoked and re-registered", 409);
+  }
   await db.execute({ sql: "UPDATE public_license_api_domains SET enabled = ? WHERE id = ?", args: [enabled ? 1 : 0, id] });
   return { success: true };
 }
@@ -106,7 +123,6 @@ export async function revokePublicApiDomain(db: DatabaseClient, id: string) {
     const found = await tx.execute({ sql: "SELECT key_id FROM public_license_api_domains WHERE id = ?", args: [id] });
     if (!found.rows.length) throw new PublicApiControlError("Domain not found", 404);
     await tx.execute({ sql: "DELETE FROM public_license_api_domains WHERE id = ?", args: [id] });
-    // Explicit revocation, not a bulk deletion of unrelated credentials.
     await tx.execute({ sql: "UPDATE admin_api_keys SET status='revoked' WHERE id=?", args: [found.rows[0].key_id] });
     await tx.commit();
     return { success: true };

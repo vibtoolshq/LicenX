@@ -23,7 +23,7 @@ test("pure membership evaluation never activates or accepts unactivated time-bou
   assert.equal(evaluatePublicLicense(null, now).status, "not_valid");
 });
 
-test("restricted check is disabled by default; scoped auth, read-only status and Node/CF parity", async () => {
+test("global read-only check is disabled by default; consumer/domain auth and Node/CF parity", async () => {
   const old = {
     NODE_ENV: process.env.NODE_ENV, DATABASE_URL: process.env.DATABASE_URL,
     TURSO_DATABASE_URL: process.env.TURSO_DATABASE_URL, TURSO_AUTH_TOKEN: process.env.TURSO_AUTH_TOKEN,
@@ -42,8 +42,9 @@ test("restricted check is disabled by default; scoped auth, read-only status and
     await initDatabaseSchema();
     const now = Date.now();
     const appA = "allowed-app";
-    const appB = "unapproved-app";
-    for (const id of [appA, appB]) {
+    const appB = "second-app";
+    const appC = "inactive-app";
+    for (const id of [appA, appB, appC]) {
       await db.execute({ sql: "INSERT INTO apps (id, app_slug, display_name, app_secret, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)", args: [id, id, id, "TEST_ONLY", now, now] });
     }
     const addLicense = async (id: string, appId: string, status = "active", expiry: number | null = null, kind = "lifetime", activatedAt: number | null = null) => {
@@ -58,18 +59,18 @@ test("restricted check is disabled by default; scoped auth, read-only status and
     await addLicense("REVOKED-KEY", appA, "revoked");
     await addLicense("SUSPENDED-KEY", appA, "suspended");
     await addLicense("UNACTIVATED-KEY", appA, "active", null, "daily");
-    await addLicense("INACTIVE-APP-KEY", appB);
-    await db.execute({ sql: "UPDATE apps SET status='inactive' WHERE id=?", args: [appB] });
+    await addLicense("INACTIVE-APP-KEY", appC);
+    await db.execute({ sql: "UPDATE apps SET status='inactive' WHERE id=?", args: [appC] });
 
     const scoped = generateAdminApiKey("check");
     const normal = generateAdminApiKey("live");
     const mixed = generateAdminApiKey("check");
     const globalKey = generateAdminApiKey("check");
     for (const [g, appId, scopes] of [
-      [scoped, appA, ["licenses:check"]],
+      [scoped, null, ["licenses:check"]],
       [normal, appA, ["licenses:read"]],
       [mixed, appA, ["licenses:check", "admin:*"]],
-      [globalKey, null, ["licenses:check"]],
+      [globalKey, appA, ["licenses:check"]],
     ] as const) {
       await db.execute({
         sql: "INSERT INTO admin_api_keys (id, name, key_prefix, secret_hash, permissions_json, app_id, status, created_at) VALUES (?, ?, ?, ?, ?, ?, 'active', ?)",
@@ -79,7 +80,7 @@ test("restricted check is disabled by default; scoped auth, read-only status and
 
     await db.execute({
       sql: "INSERT INTO public_license_api_domains (id, domain_origin, app_id, key_id, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)",
-      args: ["domain-test", "https://tools.example", appA, scoped.id, now],
+      args: ["domain-test", "https://tools.example", "", scoped.id, now],
     });
     const app = express();
     app.use(PATH, express.json({ limit: "1kb" }));
@@ -101,7 +102,7 @@ test("restricted check is disabled by default; scoped auth, read-only status and
     for (const target of [request, edge]) {
       assert.equal((await target("OWN-KEY", normal.secret)).status, 401, "admin read key not authorized");
       assert.equal((await target("OWN-KEY", mixed.secret)).status, 401, "mixed wildcard key not authorized");
-      assert.equal((await target("OWN-KEY", globalKey.secret)).status, 401, "global key not authorized");
+      assert.equal((await target("OWN-KEY", globalKey.secret)).status, 401, "legacy app-bound check key not authorized");
       assert.equal((await target("OWN-KEY", scoped.secret, { Origin: "https://untrusted.test" })).status, 403, "browser calls refused");
       assert.equal((await target("OWN-KEY", scoped.secret, { "X-LicenX-Tool-Origin": "https://other-tool.example" })).status, 403, "wrong domain denied");
       assert.equal((await target("OWN-KEY", scoped.secret, { "X-LicenX-Tool-Origin": "" })).status, 403, "missing claimed domain denied");
@@ -112,10 +113,15 @@ test("restricted check is disabled by default; scoped auth, read-only status and
       const body = await accepted.json() as { valid: boolean; status: string; expires_at: null };
       assert.deepEqual({ valid: body.valid, status: body.status, expires_at: body.expires_at }, { valid: true, status: "active", expires_at: null });
 
+      const secondApp = await target("OTHER-KEY");
+      assert.equal(secondApp.status, 200);
+      const secondAppBody = await secondApp.json() as { valid: boolean; app: { slug: string } };
+      assert.equal(secondAppBody.valid, true, "one domain can check a license for any LicenX app");
+      assert.equal(secondAppBody.app.slug, appB);
       for (const [key, status] of [
-        ["OTHER-KEY", "not_valid"], ["UNKNOWN-KEY", "not_valid"],
-        ["EXPIRED-KEY", "expired"], ["REVOKED-KEY", "revoked"],
-        ["SUSPENDED-KEY", "suspended"], ["UNACTIVATED-KEY", "not_activated"],
+        ["UNKNOWN-KEY", "not_valid"], ["EXPIRED-KEY", "expired"],
+        ["REVOKED-KEY", "revoked"], ["SUSPENDED-KEY", "suspended"],
+        ["UNACTIVATED-KEY", "not_activated"], ["INACTIVE-APP-KEY", "inactive_app"],
       ] as const) {
         const response = await target(key);
         assert.equal(response.status, 200, key);

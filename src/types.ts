@@ -165,6 +165,7 @@ export type ActiveTab =
 
 export interface PublicLicenseApiDomain {
   id: string;
+  legacy_scope: boolean;
   domain_origin: string;
   app_id: string;
   app_name: string;
