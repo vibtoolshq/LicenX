@@ -14,6 +14,7 @@ LicenX provides a browser administration console, license and device lifecycle A
 | Configure the first administrator | [First login](#first-login-and-administration) |
 | Integrate a Python application | [Primary Python SDK](#primary-python-sdk) |
 | Review REST endpoints | [API surface](#api-surface) |
+| Protect free tools with license membership | [Restricted tool backend example](examples/restricted-license-tool/README.md) |
 | Configure encrypted backups | [Backup and restore](#backup-and-restore) |
 | Understand product behavior | [Project guide](project/README.md) |
 | Contribute or report security issues | [Contributing](CONTRIBUTING.md) · [Security](SECURITY.md) |
@@ -117,13 +118,14 @@ The SDK does not persist license keys automatically. Login requires online valid
 | POST | `/api/v1/license/validate` | License validation, signed response and device binding |
 | POST | `/api/v1/license/ping` | Session heartbeat |
 | POST | `/api/v1/license/logout` | Release client device binding |
+| POST | `/api/v1/public/license/check` | Restricted consumer-backend read-only check; default disabled |
 | GET/POST/DELETE | `/api/admin-api-keys` | Authenticated administrator key management |
 | POST | `/api/v1/admin/licenses` | Scoped API-key license issuance |
 | GET | `/api/v1/admin/licenses/:key` | Scoped license inspection |
 | POST | `/api/v1/admin/licenses/:key/reset` | Scoped device reset |
 | PATCH | `/api/v1/admin/licenses/:key/status` | Scoped license status update |
 
-Admin routes require a session or a scope-authorized Bearer key; do not expose tokens in browser logs or code repositories. The source handlers remain authoritative for detailed field contracts.
+Admin routes require a session or a scope-authorized Bearer key; do not expose tokens in browser logs or code repositories. The restricted membership check requires a separate app-scoped `licenses:check`-only key on an approved **server-side** tool; CORS or an `Origin` header is not client authentication. Its operational guide and safe activation boundary are documented in [the backend example](examples/restricted-license-tool/README.md). The source handlers remain authoritative for detailed field contracts.
 
 ## Backup and restore
 

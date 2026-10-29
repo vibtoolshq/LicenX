@@ -12,7 +12,7 @@
     "start": "node build/server.js",
     "preview": "vite preview",
     "lint": "tsc --noEmit",
-    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts",
+    "test": "node --import tsx --test --test-concurrency=1 tests/*.test.ts tests/*.test.mjs",
     "verify:sdk-archive": "python tests/verify_sdk_archive.py"
   },
   "dependencies": {
