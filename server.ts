@@ -43,6 +43,9 @@ const readiness = async (_req: express.Request, res: express.Response) => {
 };
 app.get('/api/health', live);
 app.get('/api/ready', readiness);
+// Bound payloads before the general 20 MiB parser; never preflight-authorize browser callers.
+app.use('/api/v1/public/license/check', express.json({ limit: '1kb' }));
+app.options('/api/v1/public/license/check', (_req, res) => res.status(405).set('Allow', 'POST').set('Cache-Control', 'no-store').json({code: 'METHOD_NOT_ALLOWED'}));
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));

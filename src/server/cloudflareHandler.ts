@@ -32,6 +32,7 @@ import {
 import { getDbClient, initDatabaseSchema, isTursoPlaceholder } from "./db.js";
 import { decodeAdminLicensePathKey, validateAdminLicenseCreation } from "./adminApiInput.js";
 import { createAdminApiRateLimiter } from "./adminApiRateLimiter.js";
+import { runRestrictedPublicLicenseCheck, PUBLIC_CHECK_MAX_BODY_BYTES } from "./restrictedPublicLicenseCheck.js";
 import {
   bindDeviceWithinLimit,
   getDeviceLeaseSeconds,
@@ -398,6 +399,66 @@ export async function handleCloudflareApi(
   request: Request,
   env: any,
 ): Promise<Response> {
+  // Intercept the backend-only check before legacy permissive CORS/preflight and body parser.
+  if (new URL(request.url).pathname === "/api/v1/public/license/check") {
+    let input: unknown = null;
+    if (request.method === "POST") {
+      const declaredLength = Number(request.headers.get("content-length") || 0);
+      if (declaredLength > PUBLIC_CHECK_MAX_BODY_BYTES) {
+        return new Response(JSON.stringify({ valid: false, code: "PAYLOAD_TOO_LARGE" }), {
+          status: 413, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
+      try {
+        const reader = request.body?.getReader();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        if (reader) {
+          while (true) {
+            const part = await reader.read();
+            if (part.done) break;
+            size += part.value.byteLength;
+            if (size > PUBLIC_CHECK_MAX_BODY_BYTES) {
+              await reader.cancel();
+              return new Response(JSON.stringify({ valid: false, code: "PAYLOAD_TOO_LARGE" }), {
+                status: 413, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+              });
+            }
+            chunks.push(part.value);
+          }
+        }
+        const payload = new Uint8Array(size);
+        let offset = 0;
+        for (const part of chunks) { payload.set(part, offset); offset += part.byteLength; }
+        input = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(payload));
+      } catch {
+        return new Response(JSON.stringify({ valid: false, code: "INVALID_REQUEST" }), {
+          status: 400, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+        });
+      }
+    }
+    const checkEnabled = env?.PUBLIC_LICENSE_CHECK_ENABLED ??
+      (typeof process !== "undefined" ? process.env.PUBLIC_LICENSE_CHECK_ENABLED : undefined);
+    const checkRateSecret = env?.PUBLIC_LICENSE_CHECK_RATE_SECRET ??
+      (typeof process !== "undefined" ? process.env.PUBLIC_LICENSE_CHECK_RATE_SECRET : undefined);
+    if (checkEnabled !== "true" || typeof checkRateSecret !== "string" || checkRateSecret.length < 32) {
+      return new Response(JSON.stringify({ valid: false, code: "UNAVAILABLE" }), {
+        status: 503, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+      });
+    }
+    const result = await runRestrictedPublicLicenseCheck({
+      db: getDbClient(env),
+      enabled: checkEnabled,
+      rateSecret: checkRateSecret,
+      clientIp: request.headers.get("cf-connecting-ip") || "unknown",
+      authorization: request.headers.get("authorization"),
+      origin: request.headers.get("origin"),
+      contentType: request.headers.get("content-type"),
+      input,
+      method: request.method,
+    });
+    return new Response(JSON.stringify(result.body), { status: result.status, headers: result.headers });
+  }
   // 1. Handle CORS Preflight
   if (request.method === "OPTIONS") {
     return new Response(null, {

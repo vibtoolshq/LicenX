@@ -141,6 +141,16 @@ export async function migratePostgres(db: DatabaseClient): Promise<void> {
         args: [Date.now()],
       });
     }
+    const rateLimitMigration = await transaction.execute("SELECT version FROM licenx_schema_migrations WHERE version = 2");
+    if (!rateLimitMigration.rows.length) {
+      await transaction.execute(`CREATE TABLE IF NOT EXISTS public_license_check_limits (
+        bucket_key TEXT PRIMARY KEY,
+        window_start BIGINT NOT NULL,
+        requests BIGINT NOT NULL DEFAULT 0
+      )`);
+      await transaction.execute("CREATE INDEX IF NOT EXISTS idx_public_license_check_limits_window ON public_license_check_limits(window_start)");
+      await transaction.execute({ sql: "INSERT INTO licenx_schema_migrations (version, applied_at) VALUES (2, ?)", args: [Date.now()] });
+    }
     await transaction.commit();
   } catch (error) {
     await transaction.rollback();

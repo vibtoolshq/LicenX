@@ -226,6 +226,17 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
     }
 
     await db.execute(`
+      CREATE TABLE IF NOT EXISTS public_license_check_limits (
+        bucket_key TEXT PRIMARY KEY,
+        window_start INTEGER NOT NULL,
+        requests INTEGER NOT NULL DEFAULT 0
+      )
+    `);
+    await db.execute(`
+      CREATE INDEX IF NOT EXISTS idx_public_license_check_limits_window
+      ON public_license_check_limits(window_start)
+    `);
+    await db.execute(`
       CREATE TABLE IF NOT EXISTS user_control_pin_attempts (
         attempt_key TEXT PRIMARY KEY,
         window_started_at INTEGER NOT NULL,

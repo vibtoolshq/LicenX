@@ -36,6 +36,7 @@ import {
 import { getDbClient, isTursoPlaceholder } from "./db.js";
 import { validateAdminLicenseCreation } from "./adminApiInput.js";
 import { createAdminApiRateLimiter } from "./adminApiRateLimiter.js";
+import { runRestrictedPublicLicenseCheck, PUBLIC_LICENSE_CHECK_PATH } from "./restrictedPublicLicenseCheck.js";
 import {
   bindDeviceWithinLimit,
   getDeviceLeaseSeconds,
@@ -1465,6 +1466,25 @@ apiRouter.delete(
     }
   },
 );
+
+// Restricted consumer-backend membership check; intentionally separate from mutable SDK validation.
+apiRouter.all(PUBLIC_LICENSE_CHECK_PATH, async (req: Request, res: Response) => {
+  const result = await runRestrictedPublicLicenseCheck({
+    db: getDbClient(),
+    enabled: process.env.PUBLIC_LICENSE_CHECK_ENABLED,
+    rateSecret: process.env.PUBLIC_LICENSE_CHECK_RATE_SECRET,
+    clientIp: req.ip || req.socket?.remoteAddress || "unknown",
+    authorization: req.headers.authorization,
+    origin: req.headers.origin,
+    contentType: req.headers["content-type"],
+    input: req.body,
+    method: req.method,
+  });
+  // The legacy server's permissive CORS must not apply to this private server-to-server route.
+  res.removeHeader("Access-Control-Allow-Origin");
+  for (const [key, value] of Object.entries(result.headers)) res.setHeader(key, value);
+  res.status(result.status).json(result.body);
+});
 
 // -------------------------------------------------------------
 // USER PUBLIC SELF-SERVICE & LICENSE CONTROL PORTAL
