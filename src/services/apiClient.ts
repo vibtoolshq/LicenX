@@ -1,5 +1,6 @@
 import {
   AdminApiKeyRecord,
+  PublicLicenseApiDomain,
   AppItem,
   CreatedAdminApiKey,
   Device,
@@ -711,6 +712,17 @@ export const api = {
     setCached(key, data);
     return data;
   },
+  // Restricted Public License API Admin Control
+  getPublicLicenseApiControl: () =>
+    request<{ success: boolean; enabled: boolean; environment_enabled: boolean; domains: PublicLicenseApiDomain[] }>("/api/public-license-api-control"),
+  setPublicLicenseApiEnabled: (enabled: boolean) =>
+    request<{ success: boolean; enabled: boolean }>("/api/public-license-api-control", { method: "PUT", body: JSON.stringify({ enabled }) }),
+  createPublicLicenseDomain: (data: { domain_origin: string; app_id: string; name?: string }) =>
+    request<{ success: boolean; domain: PublicLicenseApiDomain; secret: string }>("/api/public-license-api-control/domains", { method: "POST", body: JSON.stringify(data) }),
+  setPublicLicenseDomainEnabled: (id: string, enabled: boolean) =>
+    request<{ success: boolean }>(`/api/public-license-api-control/domains/${id}`, { method: "PATCH", body: JSON.stringify({ enabled }) }),
+  revokePublicLicenseDomain: (id: string) =>
+    request<{ success: boolean }>(`/api/public-license-api-control/domains/${id}`, { method: "DELETE" }),
   // Admin API Keys Management
   getAdminApiKeys: () =>
     request<{ success: boolean; keys: AdminApiKeyRecord[] }>(

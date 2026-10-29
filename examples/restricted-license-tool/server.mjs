@@ -82,7 +82,7 @@ export function createToolServer({
     catch (error) { return respond(res, error.message === "TOO_LARGE" ? 413 : 400, { code: "INVALID_REQUEST" }); }
     const key = normalizeLicenseKey(input.license_key);
     if (!key) return respond(res, 400, { code: "INVALID_REQUEST" });
-    const result = await checkLicenseMembership({ apiBaseUrl, consumerToken, licenseKey: key, fetchImpl, now: now() });
+    const result = await checkLicenseMembership({ apiBaseUrl, consumerToken, toolOrigin: allowedToolOrigin, licenseKey: key, fetchImpl, now: now() });
     if (!result.allowed) {
       if (result.code === "RATE_LIMITED") return respond(res, 429, { code: "RATE_LIMITED" }, { "Retry-After": String(result.retryAfter) });
       if (result.code === "LICENSE_NOT_VALID") return respond(res, 403, { code: "LICENSE_NOT_VALID" });

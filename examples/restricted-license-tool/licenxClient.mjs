@@ -43,16 +43,17 @@ async function boundedJson(response) {
 
 /** Real-time revalidation on every gated action. Fail closed on any uncertain response. */
 export async function checkLicenseMembership({
-  apiBaseUrl, consumerToken, licenseKey, fetchImpl = fetch, now = Date.now(),
+  apiBaseUrl, consumerToken, toolOrigin, licenseKey, fetchImpl = fetch, now = Date.now(),
 } = {}) {
   const apiOrigin = allowedApiOrigin(apiBaseUrl);
   const key = normalizeLicenseKey(licenseKey);
-  if (!apiOrigin || !TOKEN_RE.test(consumerToken || "")) return { allowed: false, code: "NOT_CONFIGURED" };
+  const approvedOrigin = allowedApiOrigin(toolOrigin);
+  if (!approvedOrigin || !apiOrigin || !TOKEN_RE.test(consumerToken || "")) return { allowed: false, code: "NOT_CONFIGURED" };
   if (!key) return { allowed: false, code: "INVALID_LICENSE_KEY" };
   try {
     const response = await fetchImpl(apiOrigin + "/api/v1/public/license/check", {
       method: "POST",
-      headers: { Authorization: "Bearer " + consumerToken, "Content-Type": "application/json", Accept: "application/json" },
+      headers: { Authorization: "Bearer " + consumerToken, "X-LicenX-Tool-Origin": approvedOrigin, "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify({ license_key: key }),
       signal: AbortSignal.timeout(5000),
       redirect: "error",

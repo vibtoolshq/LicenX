@@ -19,6 +19,7 @@ import { useConfirm } from '../context/ConfirmContext';
 import { api } from '../services/apiClient';
 import { AdminApiKeyRecord, CreatedAdminApiKey } from '../types';
 import { deleteExplicitTestAdminApiKeys, getExplicitTestAdminApiKeys } from './adminApiKeySafety';
+import { PublicLicenseApiTab } from './PublicLicenseApiTab';
 
 interface AdminApisTabProps {
   onNavigateToTab?: (tab: string) => void;
@@ -33,7 +34,7 @@ export const AdminApisTab: React.FC<AdminApisTabProps> = () => {
   const [actionSuccess, setActionSuccess] = useState<string | null>(null);
 
   // Tab switcher: 'keys' | 'docs'
-  const [activeMainTab, setActiveMainTab] = useState<'keys' | 'docs'>('keys');
+  const [activeMainTab, setActiveMainTab] = useState<'keys' | 'docs' | 'public'>('keys');
 
   // Key creation modal state
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -393,7 +394,18 @@ print(license['key'], license['pin'])`;
           <BookOpen className="w-3.5 h-3.5" />
           <span>API Docs & Endpoints</span>
         </button>
+        <button
+          onClick={() => setActiveMainTab('public')}
+          className={`flex items-center gap-1.5 px-3 py-1.5 text-[11px] font-medium rounded-md transition ${activeMainTab === 'public'
+            ? 'bg-indigo-600 text-white'
+            : 'text-slate-400 hover:text-white bg-slate-900 border border-slate-800'}`}
+        >
+          <Shield className="w-3.5 h-3.5" />
+          <span>Public API</span>
+        </button>
       </div>
+
+      {activeMainTab === 'public' && <PublicLicenseApiTab apps={apps} />}
 
       {actionSuccess && (
         <div className="px-3 py-2 bg-emerald-500/10 border border-emerald-500/20 rounded-md text-emerald-400 text-[11px] flex items-center justify-between">

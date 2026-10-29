@@ -226,6 +226,27 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
     }
 
     await db.execute(`
+      CREATE TABLE IF NOT EXISTS public_license_api_settings (
+        id TEXT PRIMARY KEY,
+        enabled INTEGER NOT NULL DEFAULT 0,
+        secret_key TEXT NOT NULL
+      )
+    `);
+    await db.execute({
+      sql: "INSERT INTO public_license_api_settings (id, enabled, secret_key) VALUES ('main', 0, ?) ON CONFLICT(id) DO NOTHING",
+      args: [crypto.randomBytes(32).toString("hex")],
+    });
+    await db.execute(`
+      CREATE TABLE IF NOT EXISTS public_license_api_domains (
+        id TEXT PRIMARY KEY,
+        domain_origin TEXT UNIQUE NOT NULL,
+        app_id TEXT NOT NULL,
+        key_id TEXT UNIQUE NOT NULL,
+        enabled INTEGER NOT NULL DEFAULT 1,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    await db.execute(`
       CREATE TABLE IF NOT EXISTS public_license_check_limits (
         bucket_key TEXT PRIMARY KEY,
         window_start INTEGER NOT NULL,

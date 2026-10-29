@@ -125,7 +125,7 @@ The SDK does not persist license keys automatically. Login requires online valid
 | POST | `/api/v1/admin/licenses/:key/reset` | Scoped device reset |
 | PATCH | `/api/v1/admin/licenses/:key/status` | Scoped license status update |
 
-Admin routes require a session or a scope-authorized Bearer key; do not expose tokens in browser logs or code repositories. The restricted membership check requires a separate app-scoped `licenses:check`-only key on an approved **server-side** tool; CORS or an `Origin` header is not client authentication. Its operational guide and safe activation boundary are documented in [the backend example](examples/restricted-license-tool/README.md). The source handlers remain authoritative for detailed field contracts.
+Admin routes require a session or a scope-authorized Bearer key; do not expose tokens in browser logs or code repositories. Use **Admin Panel → Admin APIs → Public API** to approve HTTPS domains, bind each to an application, issue one-time private tokens and enable/disable or revoke access. The global API defaults OFF after migration; `PUBLIC_LICENSE_CHECK_ENABLED=false` remains an operator emergency override. The restricted membership check requires a dedicated app-scoped `licenses:check`-only key on an approved **server-side** tool; CORS, an `Origin` header or a claimed domain is not authentication. Its operational guide and safe activation boundary are documented in [the backend example](examples/restricted-license-tool/README.md). The source handlers remain authoritative for detailed field contracts.
 
 ## Backup and restore
 

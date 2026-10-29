@@ -33,6 +33,7 @@ import { getDbClient, initDatabaseSchema, isTursoPlaceholder } from "./db.js";
 import { decodeAdminLicensePathKey, validateAdminLicenseCreation } from "./adminApiInput.js";
 import { createAdminApiRateLimiter } from "./adminApiRateLimiter.js";
 import { runRestrictedPublicLicenseCheck, PUBLIC_CHECK_MAX_BODY_BYTES } from "./restrictedPublicLicenseCheck.js";
+import { createPublicApiDomain, getPublicApiControl, PublicApiControlError, revokePublicApiDomain, setPublicApiEnabled, updatePublicApiDomain } from "./publicLicenseApiControl.js";
 import {
   bindDeviceWithinLimit,
   getDeviceLeaseSeconds,
@@ -441,7 +442,7 @@ export async function handleCloudflareApi(
       (typeof process !== "undefined" ? process.env.PUBLIC_LICENSE_CHECK_ENABLED : undefined);
     const checkRateSecret = env?.PUBLIC_LICENSE_CHECK_RATE_SECRET ??
       (typeof process !== "undefined" ? process.env.PUBLIC_LICENSE_CHECK_RATE_SECRET : undefined);
-    if (checkEnabled !== "true" || typeof checkRateSecret !== "string" || checkRateSecret.length < 32) {
+    if (checkEnabled === "false") {
       return new Response(JSON.stringify({ valid: false, code: "UNAVAILABLE" }), {
         status: 503, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
       });
@@ -453,6 +454,7 @@ export async function handleCloudflareApi(
       clientIp: request.headers.get("cf-connecting-ip") || "unknown",
       authorization: request.headers.get("authorization"),
       origin: request.headers.get("origin"),
+      claimedToolOrigin: request.headers.get("x-licenx-tool-origin"),
       contentType: request.headers.get("content-type"),
       input,
       method: request.method,
@@ -2997,6 +2999,31 @@ export async function handleCloudflareApi(
       } catch (error) {
         const failure = storageError(error);
         return errorResponse(failure.message, failure.status);
+      }
+    }
+
+    // Restricted Public API controls — admin session only.
+    if (normalizedPath === "/public-license-api-control" ||
+        normalizedPath.startsWith("/public-license-api-control/domains")) {
+      const auth = await verifyAdminAuth(request, env);
+      if (!auth.authorized) return errorResponse(auth.error || "Unauthorized", auth.status || 401);
+      try {
+        if (normalizedPath === "/public-license-api-control") {
+          if (method === "GET") return jsonResponse({ success: true, ...await getPublicApiControl(db), environment_enabled: (env?.PUBLIC_LICENSE_CHECK_ENABLED ?? (typeof process !== 'undefined' ? process.env.PUBLIC_LICENSE_CHECK_ENABLED : undefined)) !== 'false' });
+          if (method === "PUT") return jsonResponse(await setPublicApiEnabled(db, body?.enabled));
+        }
+        if (normalizedPath === "/public-license-api-control/domains" && method === "POST") {
+          return jsonResponse(await createPublicApiDomain(db, body || {}), 201);
+        }
+        const match = normalizedPath.match(/^\/public-license-api-control\/domains\/([a-zA-Z0-9-]{1,128})$/);
+        if (match) {
+          if (method === "PATCH") return jsonResponse(await updatePublicApiDomain(db, match[1], body?.enabled));
+          if (method === "DELETE") return jsonResponse(await revokePublicApiDomain(db, match[1]));
+        }
+        return errorResponse("Method not allowed", 405);
+      } catch (error) {
+        return errorResponse(error instanceof PublicApiControlError ? error.message : SAFE_SERVER_ERROR,
+          error instanceof PublicApiControlError ? error.status : 500);
       }
     }
 

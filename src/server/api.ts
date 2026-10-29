@@ -37,6 +37,7 @@ import { getDbClient, isTursoPlaceholder } from "./db.js";
 import { validateAdminLicenseCreation } from "./adminApiInput.js";
 import { createAdminApiRateLimiter } from "./adminApiRateLimiter.js";
 import { runRestrictedPublicLicenseCheck, PUBLIC_LICENSE_CHECK_PATH } from "./restrictedPublicLicenseCheck.js";
+import { createPublicApiDomain, getPublicApiControl, PublicApiControlError, revokePublicApiDomain, setPublicApiEnabled, updatePublicApiDomain } from "./publicLicenseApiControl.js";
 import {
   bindDeviceWithinLimit,
   getDeviceLeaseSeconds,
@@ -1476,6 +1477,7 @@ apiRouter.all(PUBLIC_LICENSE_CHECK_PATH, async (req: Request, res: Response) => 
     clientIp: req.ip || req.socket?.remoteAddress || "unknown",
     authorization: req.headers.authorization,
     origin: req.headers.origin,
+    claimedToolOrigin: req.headers["x-licenx-tool-origin"] as string | undefined,
     contentType: req.headers["content-type"],
     input: req.body,
     method: req.method,
@@ -3429,6 +3431,38 @@ apiRouter.patch(
     }
   },
 );
+
+// Restricted Public API controls — existing admin session/CSRF protection.
+const publicApiControlFailure = (res: Response, error: unknown) => {
+  const status = error instanceof PublicApiControlError ? error.status : 500;
+  const message = error instanceof PublicApiControlError ? error.message : SAFE_SERVER_ERROR;
+  res.status(status).json({ success: false, error: message });
+};
+
+apiRouter.get("/public-license-api-control", requireAdminAuth, async (_req: Request, res: Response) => {
+  try { res.json({ success: true, ...await getPublicApiControl(getDbClient()), environment_enabled: process.env.PUBLIC_LICENSE_CHECK_ENABLED !== 'false' }); }
+  catch (error) { publicApiControlFailure(res, error); }
+});
+
+apiRouter.put("/public-license-api-control", requireAdminAuth, async (req: Request, res: Response) => {
+  try { res.json(await setPublicApiEnabled(getDbClient(), req.body?.enabled)); }
+  catch (error) { publicApiControlFailure(res, error); }
+});
+
+apiRouter.post("/public-license-api-control/domains", requireAdminAuth, async (req: Request, res: Response) => {
+  try { res.status(201).json(await createPublicApiDomain(getDbClient(), req.body || {})); }
+  catch (error) { publicApiControlFailure(res, error); }
+});
+
+apiRouter.patch("/public-license-api-control/domains/:id", requireAdminAuth, async (req: Request, res: Response) => {
+  try { res.json(await updatePublicApiDomain(getDbClient(), req.params.id, req.body?.enabled)); }
+  catch (error) { publicApiControlFailure(res, error); }
+});
+
+apiRouter.delete("/public-license-api-control/domains/:id", requireAdminAuth, async (req: Request, res: Response) => {
+  try { res.json(await revokePublicApiDomain(getDbClient(), req.params.id)); }
+  catch (error) { publicApiControlFailure(res, error); }
+});
 
 // -------------------------------------------------------------
 // ADMIN PANEL API KEY MANAGEMENT ENDPOINTS (Session Authenticated)

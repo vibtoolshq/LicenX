@@ -12,6 +12,7 @@ const mock = (data, status = 200, headers = {}) => async (_url, init) => {
   assert.equal(_url, API + "/api/v1/public/license/check");
   assert.equal(init.method, "POST");
   assert.equal(init.headers.Authorization, "Bearer " + TOKEN);
+  assert.equal(init.headers["X-LicenX-Tool-Origin"], TOOL);
   assert.equal(JSON.parse(init.body).license_key, "ABC-123");
   return new Response(JSON.stringify(data), { status, headers });
 };
@@ -32,7 +33,7 @@ test("connector rejects unsafe upstream URLs, missing credentials and unauthoriz
   assert.equal(allowedApiOrigin("http://licenx.example"), null);
   assert.equal(allowedApiOrigin("https://someone:password@licenx.example/"), null);
   assert.equal(allowedApiOrigin("http://127.0.0.1:3000"), "http://127.0.0.1:3000");
-  const base = { apiBaseUrl: API, consumerToken: TOKEN, licenseKey: "abc-123", now: NOW };
+  const base = { apiBaseUrl: API, consumerToken: TOKEN, toolOrigin: TOOL, licenseKey: "abc-123", now: NOW };
   assert.equal((await checkLicenseMembership({ ...base, consumerToken: "" })).code, "NOT_CONFIGURED");
   assert.deepEqual(await checkLicenseMembership({ ...base, fetchImpl: mock(valid) }), { allowed: true, code: "OK" });
   assert.equal((await checkLicenseMembership({ ...base, fetchImpl: mock({ valid: false, status: "not_valid" }) })).code, "LICENSE_NOT_VALID");

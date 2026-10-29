@@ -33,22 +33,19 @@ The service listens on `127.0.0.1:3001`, not on a public interface. Publish only
 
 The built-in sample also applies a small **per-socket-IP 10/minute** in-memory limit, a 1 KiB input limit, no CORS wildcard, no-store responses, 5-second LicenX timeout and strict no-redirect upstream requests. It does not provide a multi-instance shared rate limit: use the tool's trusted proxy/edge protections for larger deployments.
 
-## Provision exactly one restricted consumer (authorized administrator only)
+## Admin Panel: approve domains and control access
 
-1. In LicenX Admin, identify the exact intended `app_id` and approved tool backend (DNS and TLS).
-2. Use the **existing authenticated** `POST /api/admin-api-keys` manager operation (admin session plus CSRF) with this request **body**:
-   ```json
-   {"name":"Approved tool backend","prefix":"check","permissions":["licenses:check"],"app_id":"EXISTING_APP_ID"}
-   ```
-3. Store the returned one-time `secret` in the **tool backend's** secret manager, never in Git, HTML, JavaScript, CDN, source map or request logs. It is a privileged membership credential. Existing ordinary Admin APIs `licenses:read` or `admin:*` keys **cannot** access this new route.
-4. Test only with synthetic, explicitly authorized test licenses in an isolated environment. Revoke by deleting the consumer key through the existing authenticated Admin API management route. No actual production key is created by this repository example.
+1. Open **Admin Panel → Admin APIs → Public API**. The global Public API switch is **OFF by default**. Use a verified HTTPS domain (e.g., `https://tools.example.com`) and choose the associated LicenX application.
+2. Click **Add Domain & Generate Token**. The server creates an app-scoped `licenses:check`-only consumer credential, stores its hash and returns the token **once**. Save it in the approved tool backend's private secret manager.
+3. Put exactly that domain origin in the tool server's `TOOL_PUBLIC_ORIGIN` setting. The sample connector automatically sends `X-LicenX-Tool-Origin` with the private Bearer credential. An unknown domain, disabled domain, revoked credential or wrong app is denied.
+4. From the same panel, enable/disable the global API, disable individual domains, or permanently revoke domains/credentials. A revoked domain must be re-registered to receive a new token. No production token is created by checking out this example.
 
-The current Admin APIs UI may not list `licenses:check` as a preset; using the existing authenticated creation API is intentional. No management UI was added.
+**Security boundary:** The domain claim is supplied by the calling backend and can be forged. Access security comes from the unique, server-held, revocable credential bound to its registered domain and app. Do not put the token in Git, HTML, public JS or logs.
 
 ## Controlled server rollout
 
 1. Ensure the GitHub commit passed required CI, have a backup and rollback reference, and safely fast-forward the VPS checkout.
-2. With `PUBLIC_LICENSE_CHECK_ENABLED` **unset or `false`**, run `docker compose config -q`, rebuild only the app and check `https://YOUR_LICENX_DOMAIN/api/ready`. This safely deploys the route in **disabled** mode, without provisioning credentials.
+2. With the admin database's new Public API switch **OFF** (the migration default), run `docker compose config -q`, rebuild only the app and check `https://YOUR_LICENX_DOMAIN/api/ready`. This safely deploys the route in **disabled** mode, without provisioning credentials.
 3. Disabled-route smoke (no credentials or real license key; use a fictitious key) must return HTTP `503` with `UNAVAILABLE`, no sensitive data. Example:
    ```bash
    curl --fail-with-body -i -X POST https://YOUR_LICENX_DOMAIN/api/v1/public/license/check \
@@ -56,7 +53,7 @@ The current Admin APIs UI may not list `licenses:check` as a preset; using the e
      --data '{"license_key":"DEMO-INVALID-KEY"}'
    ```
    `curl` exits nonzero for expected `503`; inspect the printed status/body.
-4. **Only when an approved real tool backend and app are identified**, install a random server-only `PUBLIC_LICENSE_CHECK_RATE_SECRET` of at least 32 characters in private VPS configuration and set `PUBLIC_LICENSE_CHECK_ENABLED=true`; restart only the app as a controlled change. The Compose defaults remain disabled. On Cloudflare configure equivalent *private* binding values separately.
+4. **Admin-controlled activation:** the database migration generates a private random rate-limit secret automatically. Once the approved domain and app-scoped token are registered through **Admin APIs → Public API**, use that panel's global enable switch. Compose permits control by default but the database flag starts **disabled**. The deployment owner may set `PUBLIC_LICENSE_CHECK_ENABLED=false` as an emergency override; an explicitly configured `PUBLIC_LICENSE_CHECK_RATE_SECRET` is optional. Cloudflare requires its own migrated database/bindings.
 5. Run an authorized own-app positive/negative test from the approved tool server, verify no license/device mutations, rate limits, key revocation and `no-store` headers, then enable the tool action at the trusted backend.
 
 **Never paste any real consumer token, backup recovery key or license key into ChatGPT, GitHub, screenshots or an exported log.** Do not auto-enable the feature or create a default credential. Disable with `PUBLIC_LICENSE_CHECK_ENABLED=false` and recreate only the app if unexpected behavior is observed.

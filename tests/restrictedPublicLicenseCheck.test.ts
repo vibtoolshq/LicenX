@@ -77,6 +77,10 @@ test("restricted check is disabled by default; scoped auth, read-only status and
       });
     }
 
+    await db.execute({
+      sql: "INSERT INTO public_license_api_domains (id, domain_origin, app_id, key_id, enabled, created_at) VALUES (?, ?, ?, ?, 1, ?)",
+      args: ["domain-test", "https://tools.example", appA, scoped.id, now],
+    });
     const app = express();
     app.use(PATH, express.json({ limit: "1kb" }));
     app.use("/api", apiRouter);
@@ -85,19 +89,22 @@ test("restricted check is disabled by default; scoped auth, read-only status and
     const addr = server.address() as AddressInfo;
     const url = "http://127.0.0.1:" + addr.port;
     const request = (key: string, bearer = scoped.secret, extra: Record<string, string> = {}) =>
-      fetch(url + PATH, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + bearer, ...extra }, body: JSON.stringify({ license_key: key }) });
+      fetch(url + PATH, { method: "POST", headers: { "Content-Type": "application/json", "X-LicenX-Tool-Origin": "https://tools.example", Authorization: "Bearer " + bearer, ...extra }, body: JSON.stringify({ license_key: key }) });
     const edge = (key: string, bearer = scoped.secret, extra: Record<string, string> = {}) =>
-      handleCloudflareApi(new Request("https://licenx.test" + PATH, { method: "POST", headers: { "Content-Type": "application/json", Authorization: "Bearer " + bearer, ...extra }, body: JSON.stringify({ license_key: key }) }), undefined);
+      handleCloudflareApi(new Request("https://licenx.test" + PATH, { method: "POST", headers: { "Content-Type": "application/json", "X-LicenX-Tool-Origin": "https://tools.example", Authorization: "Bearer " + bearer, ...extra }, body: JSON.stringify({ license_key: key }) }), undefined);
 
     assert.equal((await request("OWN-KEY")).status, 503, "disabled by default");
     assert.equal((await edge("OWN-KEY")).status, 503, "edge disabled by default");
 
     process.env.PUBLIC_LICENSE_CHECK_ENABLED = "true";
+    await db.execute("UPDATE public_license_api_settings SET enabled=1 WHERE id='main'");
     for (const target of [request, edge]) {
       assert.equal((await target("OWN-KEY", normal.secret)).status, 401, "admin read key not authorized");
       assert.equal((await target("OWN-KEY", mixed.secret)).status, 401, "mixed wildcard key not authorized");
       assert.equal((await target("OWN-KEY", globalKey.secret)).status, 401, "global key not authorized");
       assert.equal((await target("OWN-KEY", scoped.secret, { Origin: "https://untrusted.test" })).status, 403, "browser calls refused");
+      assert.equal((await target("OWN-KEY", scoped.secret, { "X-LicenX-Tool-Origin": "https://other-tool.example" })).status, 403, "wrong domain denied");
+      assert.equal((await target("OWN-KEY", scoped.secret, { "X-LicenX-Tool-Origin": "" })).status, 403, "missing claimed domain denied");
       const accepted = await target("OWN-KEY");
       assert.equal(accepted.status, 200);
       assert.equal(accepted.headers.get("cache-control"), "no-store");

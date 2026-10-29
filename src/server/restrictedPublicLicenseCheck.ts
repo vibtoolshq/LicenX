@@ -2,6 +2,7 @@
 import crypto from "node:crypto";
 import type { DatabaseClient } from "./database/contracts.js";
 import { hashAdminApiSecret } from "./crypto.js";
+import { normalizeAllowedToolOrigin } from "./publicLicenseApiControl.js";
 
 export const PUBLIC_LICENSE_CHECK_PATH = "/v1/public/license/check";
 export const PUBLIC_CHECK_MAX_BODY_BYTES = 1024;
@@ -24,6 +25,7 @@ type CheckParams = {
   clientIp: string;
   authorization?: string | null;
   origin?: string | null;
+  claimedToolOrigin?: string | null;
   contentType?: string | null;
   input: unknown;
   method?: string;
@@ -94,17 +96,23 @@ export function evaluatePublicLicense(
 export async function runRestrictedPublicLicenseCheck(params: CheckParams): Promise<CheckResponse> {
   const { db, clientIp, authorization, origin, contentType, input } = params;
   const now = params.now ?? Date.now();
-  if (params.enabled !== "true" || !params.rateSecret || params.rateSecret.length < 32) {
+  if (params.enabled === "false") {
     return output(503, { valid: false, code: "UNAVAILABLE" });
   }
   if ((params.method ?? "POST") !== "POST") return output(405, { code: "METHOD_NOT_ALLOWED" }, { Allow: "POST" });
   // Static browsers cannot hold a private consumer credential. Require backend-to-backend requests.
   if (origin) return output(403, { valid: false, code: "FORBIDDEN" });
+  const requestedDomain = normalizeAllowedToolOrigin(params.claimedToolOrigin);
+  if (!requestedDomain) return output(403, { valid: false, code: "FORBIDDEN" });
   if (!/^application\/json(?:\s*;|$)/i.test(contentType || "")) {
     return output(400, { valid: false, code: "INVALID_REQUEST" });
   }
-  const rateKey = params.rateSecret;
   try {
+    const config = await db.execute("SELECT enabled, secret_key FROM public_license_api_settings WHERE id='main' LIMIT 1");
+    if (Number(config.rows[0]?.enabled || 0) !== 1) return output(503, { valid: false, code: "UNAVAILABLE" });
+    const rateKey = params.rateSecret && params.rateSecret.length >= 32
+      ? params.rateSecret : String(config.rows[0]?.secret_key || "");
+    if (rateKey.length < 32) return output(503, { valid: false, code: "UNAVAILABLE" });
     if (!(await consumePublicCheckQuota(db, rateKey, "ip", clientIp || "unknown", 20, 60_000, now)) ||
         !(await consumePublicCheckQuota(db, rateKey, "global", "all", 10000, 60_000, now))) {
       return output(429, { valid: false, code: "RATE_LIMITED" }, { "Retry-After": "60" });
@@ -126,6 +134,12 @@ export async function runRestrictedPublicLicenseCheck(params: CheckParams): Prom
         !Array.isArray(permissions) || permissions.length !== 1 || permissions[0] !== "licenses:check") {
       return output(401, { valid: false, code: "UNAUTHORIZED" });
     }
+    const domain = await db.execute({
+      sql: "SELECT d.id FROM public_license_api_domains d JOIN apps a ON a.id=d.app_id " +
+           "WHERE d.key_id=? AND d.app_id=? AND d.domain_origin=? AND d.enabled=1 AND a.status='active' LIMIT 1",
+      args: [consumer.id, consumer.app_id, requestedDomain],
+    });
+    if (!domain.rows.length) return output(403, { valid: false, code: "FORBIDDEN" });
     const id = String(consumer.id);
     if (!(await consumePublicCheckQuota(db, rateKey, "consumer", id, 120, 60_000, now)) ||
         !(await consumePublicCheckQuota(db, rateKey, "consumer-ip", id + "\0" + clientIp, 60, 60_000, now))) {

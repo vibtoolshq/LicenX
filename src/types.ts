@@ -163,6 +163,16 @@ export type ActiveTab =
   | "backup"
   | "settings";
 
+export interface PublicLicenseApiDomain {
+  id: string;
+  domain_origin: string;
+  app_id: string;
+  app_name: string;
+  key_id: string;
+  enabled: boolean;
+  created_at: number;
+}
+
 export interface AdminApiKeyRecord {
   id: string;
   name: string;

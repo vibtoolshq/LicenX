@@ -1,4 +1,5 @@
 import type { DatabaseClient } from "./contracts.js";
+import crypto from "node:crypto";
 
 const initialSchema = [
   `CREATE TABLE IF NOT EXISTS user_control_pin_attempts (
@@ -150,6 +151,21 @@ export async function migratePostgres(db: DatabaseClient): Promise<void> {
       )`);
       await transaction.execute("CREATE INDEX IF NOT EXISTS idx_public_license_check_limits_window ON public_license_check_limits(window_start)");
       await transaction.execute({ sql: "INSERT INTO licenx_schema_migrations (version, applied_at) VALUES (2, ?)", args: [Date.now()] });
+    }
+    const domainMigration = await transaction.execute("SELECT version FROM licenx_schema_migrations WHERE version = 3");
+    if (!domainMigration.rows.length) {
+      await transaction.execute(`CREATE TABLE IF NOT EXISTS public_license_api_settings (
+        id TEXT PRIMARY KEY, enabled INTEGER NOT NULL DEFAULT 0, secret_key TEXT NOT NULL
+      )`);
+      await transaction.execute({
+        sql: "INSERT INTO public_license_api_settings (id, enabled, secret_key) VALUES ('main', 0, ?) ON CONFLICT(id) DO NOTHING",
+        args: [crypto.randomBytes(32).toString("hex")],
+      });
+      await transaction.execute(`CREATE TABLE IF NOT EXISTS public_license_api_domains (
+        id TEXT PRIMARY KEY, domain_origin TEXT UNIQUE NOT NULL, app_id TEXT NOT NULL,
+        key_id TEXT UNIQUE NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, created_at BIGINT NOT NULL
+      )`);
+      await transaction.execute({ sql: "INSERT INTO licenx_schema_migrations (version, applied_at) VALUES (3, ?)", args: [Date.now()] });
     }
     await transaction.commit();
   } catch (error) {
