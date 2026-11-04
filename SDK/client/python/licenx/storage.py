@@ -24,6 +24,9 @@ TRANSIENT_HEARTBEAT_CODES = {
     "SERVICE_UNAVAILABLE",
 }
 
+# Retry only while a verified transient outage is within offline grace.
+HEARTBEAT_RETRY_INTERVAL_SECONDS = 30
+
 
 class BackgroundLicenseWorker:
     def __init__(
@@ -131,9 +134,11 @@ class BackgroundLicenseWorker:
         """Periodic background heartbeat runner (RAM & CPU friendly)"""
         while self._running and not self._stop_event.is_set():
             remaining_grace = self._remaining_grace_seconds()
-            wait_seconds = self.ping_interval_seconds
-            if remaining_grace is not None:
-                wait_seconds = min(wait_seconds, remaining_grace)
+            wait_seconds = (
+                self.ping_interval_seconds
+                if remaining_grace is None
+                else min(HEARTBEAT_RETRY_INTERVAL_SECONDS, remaining_grace)
+            )
 
             interrupted = self._stop_event.wait(timeout=wait_seconds)
             if interrupted or not self._running:
@@ -163,8 +168,8 @@ class BackgroundLicenseWorker:
                 if self.on_heartbeat_success:
                     try:
                         self.on_heartbeat_success(data)
-                    except Exception as error:
-                        print(f"[VCON-SDK] Heartbeat success callback warning: {error}")
+                    except Exception:
+                        print("[VCON-SDK] Heartbeat success callback failed")
                 continue
 
             reason = (

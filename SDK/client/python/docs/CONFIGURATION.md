@@ -21,5 +21,8 @@ app_config = {
 | `public_key_pem` | Administrator-provided trusted RSA/Ed25519 public verification key |
 | `ping_interval_seconds` | 60–1,200 seconds; default 1,200 |
 | `offline_grace_seconds` | 0–3,600 seconds; default 0; never authorizes offline initial login |
+| `request_timeout_seconds` | Request timeout setting (default 35); heartbeat calls clamp each attempt to 1–20 seconds to bound offline recovery delays |
+
+After an online login, a verified transient heartbeat outage within the configured offline grace triggers recovery attempts about every 30 seconds (plus bounded network request time); successful signed heartbeats reset the grace timer. Heartbeat and GET transports retry temporary connection/timeout failures at most twice with 1s/2s backoff; other POST operations retain their prior single retry. TLS verification errors, revoked licenses and invalid/mismatched signatures **never** receive offline grace. Sending workloads still need application-level pause/retry/resume for their own network connections.
 
 The SDK fails closed on invalid signed responses and untrusted verification keys. Sensitive license keys are not persisted by this SDK. See [English guide](../licenx/docs/GUIDE_EN.md) or [বাংলা guide](../licenx/docs/GUIDE_BN.md).

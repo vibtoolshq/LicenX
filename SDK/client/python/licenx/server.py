@@ -167,11 +167,12 @@ class ServerCommunicator:
     def _http_post(self, url: str, json_data: Dict[str, Any], timeout: int) -> Tuple[int, Dict[str, Any]]:
         """
         Universal HTTP POST supporting requests and native urllib fallback.
-        Includes automatic 1-time retry for transient network/timeout stalls.
+        Preserves the existing single retry for normal POSTs; allows two bounded retries for heartbeat.
         Returns (status_code, response_json_dict).
         """
+        retry_delays = (1.0, 2.0) if urlsplit(url).path.endswith("/api/v1/license/ping") else (0.5,)
         if HAS_REQUESTS:
-            for attempt in range(2):
+            for attempt in range(len(retry_delays) + 1):
                 try:
                     resp = requests.post(
                         url,
@@ -190,8 +191,8 @@ class ServerCommunicator:
                 except requests.exceptions.SSLError:
                     return 495, {"error": "SSL handshake with license server failed", "code": "SSL_ERROR"}
                 except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                    if attempt == 0:
-                        time.sleep(0.5)
+                    if attempt < len(retry_delays):
+                        time.sleep(retry_delays[attempt])
                         continue
                     if isinstance(e, requests.exceptions.Timeout):
                         return 408, {"error": "Connection to license server timed out", "code": "TIMEOUT"}
@@ -211,7 +212,7 @@ class ServerCommunicator:
             method="POST",
         )
         ctx = ssl.create_default_context()
-        for attempt in range(2):
+        for attempt in range(len(retry_delays) + 1):
             try:
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
                     status_code = response.getcode()
@@ -234,13 +235,13 @@ class ServerCommunicator:
                         "error": "SSL handshake with license server failed",
                         "code": "SSL_ERROR",
                     }
-                if attempt == 0:
-                    time.sleep(0.5)
+                if attempt < len(retry_delays):
+                    time.sleep(retry_delays[attempt])
                     continue
                 return 503, {"error": "Cannot connect to license server", "code": "SERVER_UNREACHABLE"}
             except socket.timeout:
-                if attempt == 0:
-                    time.sleep(0.5)
+                if attempt < len(retry_delays):
+                    time.sleep(retry_delays[attempt])
                     continue
                 return 408, {"error": "Connection to license server timed out", "code": "TIMEOUT"}
             except Exception:
@@ -249,11 +250,12 @@ class ServerCommunicator:
     def _http_get(self, url: str, timeout: int) -> Tuple[int, Dict[str, Any]]:
         """
         Universal HTTP GET supporting requests and native urllib fallback.
-        Includes automatic 1-time retry for transient network/timeout stalls.
+        Includes at most three attempts with bounded backoff on transport failures.
         Returns (status_code, response_json_dict).
         """
+        retry_delays = (1.0, 2.0)
         if HAS_REQUESTS:
-            for attempt in range(2):
+            for attempt in range(len(retry_delays) + 1):
                 try:
                     resp = requests.get(
                         url,
@@ -270,8 +272,8 @@ class ServerCommunicator:
                 except requests.exceptions.SSLError:
                     return 495, {"error": "SSL handshake with license server failed", "code": "SSL_ERROR"}
                 except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-                    if attempt == 0:
-                        time.sleep(0.5)
+                    if attempt < len(retry_delays):
+                        time.sleep(retry_delays[attempt])
                         continue
                     if isinstance(e, requests.exceptions.Timeout):
                         return 408, {"error": "Connection to license server timed out", "code": "TIMEOUT"}
@@ -288,7 +290,7 @@ class ServerCommunicator:
             method="GET",
         )
         ctx = ssl.create_default_context()
-        for attempt in range(2):
+        for attempt in range(len(retry_delays) + 1):
             try:
                 with urllib.request.urlopen(req, timeout=timeout, context=ctx) as response:
                     status_code = response.getcode()
@@ -305,14 +307,16 @@ class ServerCommunicator:
                 except Exception:
                     data = None
                 return status_code, self._safe_response(status_code, data)
-            except urllib.error.URLError:
-                if attempt == 0:
-                    time.sleep(0.5)
+            except urllib.error.URLError as error:
+                if isinstance(error.reason, ssl.SSLError):
+                    return 495, {"error": "SSL handshake with license server failed", "code": "SSL_ERROR"}
+                if attempt < len(retry_delays):
+                    time.sleep(retry_delays[attempt])
                     continue
                 return 503, {"error": "Cannot connect to license server", "code": "SERVER_UNREACHABLE"}
             except socket.timeout:
-                if attempt == 0:
-                    time.sleep(0.5)
+                if attempt < len(retry_delays):
+                    time.sleep(retry_delays[attempt])
                     continue
                 return 408, {"error": "Connection to license server timed out", "code": "TIMEOUT"}
             except Exception:
@@ -387,7 +391,11 @@ class ServerCommunicator:
             "nonce": nonce,
         }
 
-        status_code, data = self._http_post(url, body, 10)
+        # Honor the SDK request timeout, but bound heartbeat attempts so that
+        # a network outage does not stall the grace recovery worker indefinitely.
+        configured_timeout = self.config.request_timeout_seconds
+        heartbeat_timeout = min(20, max(1, configured_timeout)) if type(configured_timeout) is int else 10
+        status_code, data = self._http_post(url, body, heartbeat_timeout)
         if not isinstance(data, dict):
             return False, {"error": "Invalid heartbeat response", "code": "INVALID_RESPONSE"}
 
