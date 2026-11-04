@@ -78,9 +78,9 @@ class HeartbeatRecoveryTests(unittest.TestCase):
         worker._current_hwid = "HWID"
         worker._running = True
 
-        def fake_wait(seconds):
-            waits.append(seconds)
-            clock[0] += seconds
+        def fake_wait(timeout):
+            waits.append(timeout)
+            clock[0] += timeout
             # Once supplied response sequence is exhausted, stop before another ping.
             return len(waits) > len(steps) and worker._remaining_grace_seconds() is None
 
