@@ -70,6 +70,9 @@ class BackgroundLicenseWorker:
         self._realtime_enabled = False
         self._realtime_connected = False
         self._realtime_paused = False
+        # Default is the original strict invalidation. Only a trusted signed
+        # per-App snapshot may enable keeping a UI-only session on an outage.
+        self._keep_login_on_network_error = False
         self._realtime_state = "HTTP_ONLY"
         self._realtime_wake = threading.Event()
         self._on_realtime_state: Optional[Callable[[str], None]] = None
@@ -117,6 +120,7 @@ class BackgroundLicenseWorker:
         if self._realtime_enabled:
             self._realtime_paused = False
             self._realtime_connected = False
+            self._keep_login_on_network_error = False
             self._realtime_wake.clear()
             self._set_realtime_state("CONNECTING")
         self._stop_event.clear()
@@ -203,6 +207,13 @@ class BackgroundLicenseWorker:
         self._on_realtime_state = on_state_change
         self._set_realtime_state("HTTP_FALLBACK")
 
+    def apply_signed_realtime_policy(self, keep_login: bool) -> None:
+        """Trust only the verified signed and bound server snapshot caller."""
+        if type(keep_login) is not bool:
+            raise ValueError("Signed network policy must be Boolean")
+        with self._state_lock:
+            self._keep_login_on_network_error = keep_login
+
     def _set_realtime_state(self, state: str) -> None:
         if self._realtime_state == state:
             return
@@ -273,6 +284,11 @@ class BackgroundLicenseWorker:
                 self._realtime_paused = True
             self._realtime_connected = False
         # Do not wake the fallback worker from its own failed poll: retry in 30s.
+        if expired and not self._keep_login_on_network_error:
+            # OFF = historical logout semantics after grace. Never keep a
+            # logged-in state against a signed server policy that disallows it.
+            self._invalidate("NETWORK_GRACE_EXPIRED")
+            return False
         self._set_realtime_state("PAUSED_UNVERIFIED" if expired else "OFFLINE_GRACE")
         return False
 

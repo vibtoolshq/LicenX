@@ -42,10 +42,18 @@ export function createRealtimeEventPublisher(db: DatabaseClient, clients: WsClie
   }
   function stop() { if (timer) clearInterval(timer); timer = undefined; }
   async function snapshot(identity: RealtimeIdentity) {
+    // Signed per-App policy is authoritative; the SDK must never infer
+    // network-error UI continuity from an unsigned admin request or WS welcome.
+    const app = await db.execute({
+      sql: "SELECT keep_login_on_network_error FROM apps WHERE id = ? AND status = 'active'",
+      args: [identity.appId],
+    });
+    if (!app.rows[0]) throw new Error("Realtime app policy unavailable");
     const payload = {
       type: "license.snapshot", version: await currentRealtimeCursor(db),
       app_id: identity.appId, license_id: identity.licenseId,
       device_id: identity.deviceId, valid: true, server_time: Date.now(),
+      keep_login_on_network_error: Number(app.rows[0].keep_login_on_network_error) === 1,
     };
     const result = await db.execute("SELECT ed25519_private_key FROM admin_config LIMIT 1");
     const key = result.rows[0]?.ed25519_private_key;

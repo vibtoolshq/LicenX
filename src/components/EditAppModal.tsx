@@ -207,8 +207,8 @@ export const EditAppModal: React.FC<EditAppModalProps> = ({ app, onClose, onUpda
               </label>
             </div>
             <div className="mt-2 text-[10px] leading-relaxed text-slate-500">
-              Network preference is saved on the server; SDK-side enforcement is not yet connected.
-              Revoked/expired licenses still deny access. WebSocket also requires the server transport and an opted-in SDK.
+              After a verified WebSocket snapshot, new SDK follows this signed policy: OFF logs out after network grace; ON retains UI session only while unverified actions stay blocked.
+              Without a snapshot, safety defaults OFF. Older SDKs stay HTTP-only; revoke/expiry always deny access.
             </div>
             <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400" aria-live="polite">
               {presence ? (

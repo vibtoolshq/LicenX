@@ -135,6 +135,11 @@ class RealtimeLicenseWorker:
                 or (self._identity is not None and self._identity != identity)
                 or (self._version >= 0 and data["version"] < self._version)):
             raise _RealtimeSecurityError("REALTIME_BINDING_MISMATCH")
+        policy = data.get("keep_login_on_network_error", False)
+        if type(policy) is not bool:
+            raise _RealtimeSecurityError("REALTIME_POLICY_INVALID")
+        # Bound snapshot signature is checked before policy can take effect.
+        self.storage.apply_signed_realtime_policy(policy)
         self._identity = identity
         self._version = data["version"]
         return data
@@ -181,7 +186,10 @@ class RealtimeLicenseWorker:
             # A disabled WebSocket app is not an invalid license; verify through
             # the existing signed heartbeat if the server explicitly denies WSS.
             if status in (401, 403):
-                self._signed_check()
+                if self._signed_check():
+                    # A forbidden ticket must not retain a stale server-side
+                    # Keep Login preference from an earlier App configuration.
+                    self.storage.apply_signed_realtime_policy(False)
             return
         socket = websocket.create_connection(
             self._socket_url(), timeout=8,
@@ -225,6 +233,9 @@ class RealtimeLicenseWorker:
                 if self._verify_event(packet):
                     # Events are notifications, never an offline authorization.
                     if not self._signed_check():
+                        return
+                    if packet.get("event_type") == "app.changed":
+                        # Reconnect for a fresh signed App policy snapshot.
                         return
         finally:
             with self._socket_lock:

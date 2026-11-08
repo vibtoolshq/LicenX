@@ -25,6 +25,9 @@ on:
       - "src/server/**"
       - "src/**"
       - "scripts/buildPythonSdkArchive.mjs"
+      - "scripts/loadRealtime.mjs"
+      - "tests/realtimeIntegration.test.ts"
+      - "tests/verifyRealtimeClient.py"
       - "SDK/x_license_python/**"
       - "vite.config.ts"
       - "index.html"
@@ -89,6 +92,8 @@ jobs:
           echo "::add-mask::${owner_code}"
           echo "OWNER_CODE=${owner_code}" >> "$GITHUB_ENV"
           echo "OWNER_SETUP_CODE_SHA256=${owner_hash}" >> "$GITHUB_ENV"
+          # CI-only opt-in. Production Compose remains OFF by default.
+          echo "LICENX_REALTIME_TRANSPORT_ENABLED=true" >> "$GITHUB_ENV"
 
       - name: Check Ubuntu quick-installer preflight without changing host
         run: |
@@ -272,6 +277,28 @@ jobs:
           curl --insecure --silent --show-error --fail \
             https://localhost/ | grep -q 'id="root"'
           echo "PASS local HTTPS reverse proxy and SPA"
+
+      - name: Verify synthetic WSS through trusted Caddy and bounded 100-client load
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Explicit CI isolation: scripts reject ordinary host/customer use.
+          docker compose exec -T -e GITHUB_ACTIONS=true -e WS05_CI_RUN=1 -e WS05_MODE=stage -e WS05_CLIENTS=100 app node --input-type=module - < scripts/loadRealtime.mjs
+          docker compose exec -T -e GITHUB_ACTIONS=true -e WS05_CI_RUN=1 -e WS05_MODE=direct -e WS05_CLIENTS=100 app node --input-type=module - < scripts/loadRealtime.mjs
+          docker compose cp app:/tmp/ws05-public-key.pem "$RUNNER_TEMP/ws05-public-key.pem"
+          docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt "$RUNNER_TEMP/ws05-caddy-ca.pem"
+          WS05_CI_RUN=1 WS05_MODE=proxy WS05_CLIENTS=1 WS05_PUBLIC_KEY_FILE="$RUNNER_TEMP/ws05-public-key.pem" WS05_CA_FILE="$RUNNER_TEMP/ws05-caddy-ca.pem" NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/ws05-caddy-ca.pem" node scripts/loadRealtime.mjs
+          python -m pip install "websocket-client>=1.7,<2"
+          WS05_CI_RUN=1 WS05_CA_FILE="$RUNNER_TEMP/ws05-caddy-ca.pem" WS05_PUBLIC_KEY_FILE="$RUNNER_TEMP/ws05-public-key.pem" REQUESTS_CA_BUNDLE="$RUNNER_TEMP/ws05-caddy-ca.pem" PYTHONPATH=SDK/client/python python tests/verifyRealtimeClient.py
+          # New ticket and signed snapshot must work after an actual restart.
+          docker compose restart app
+          docker compose --profile standalone-https up --detach --wait --wait-timeout 90 app
+          WS05_CI_RUN=1 WS05_MODE=proxy WS05_CLIENTS=1 WS05_PUBLIC_KEY_FILE="$RUNNER_TEMP/ws05-public-key.pem" WS05_CA_FILE="$RUNNER_TEMP/ws05-caddy-ca.pem" NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/ws05-caddy-ca.pem" node scripts/loadRealtime.mjs
+          # Rollback exercise: remove the gateway without changing customer data/SDKs.
+          LICENX_REALTIME_TRANSPORT_ENABLED=false docker compose --profile standalone-https up --detach --no-deps --force-recreate --wait --wait-timeout 90 app
+          docker compose exec -T -e GITHUB_ACTIONS=true -e WS05_CI_RUN=1 -e WS05_MODE=rollback app node --input-type=module - < scripts/loadRealtime.mjs
+          docker compose --profile standalone-https up --detach --no-deps --force-recreate --wait --wait-timeout 90 app
+          echo "PASS synthetic 100 concurrent WS, trusted localhost WSS, replay/scope, restart and HTTP-only rollback"
 
       - name: Inspect runtime image and persistent volumes
         shell: bash

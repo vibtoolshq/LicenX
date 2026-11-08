@@ -143,7 +143,7 @@ test("WS-04: existing compact UI retains layout and differentiates policy from p
   assert.match(modal,/License Session Policy/);
   assert.match(modal,/realtime_websocket_enabled: webSocketEnabled/);
   assert.match(modal,/keep_login_on_network_error: keepLoginOnNetworkError/);
-  assert.match(modal,/SDK-side enforcement is not yet connected/);
+  assert.match(modal,/After a verified WebSocket snapshot, new SDK follows this signed policy/);
   assert.match(devices,/Force logout/);
   assert.match(devices,/Connected/);
   assert.match(devices,/No WS/);

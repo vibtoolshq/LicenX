@@ -52,3 +52,16 @@ On an opted-in new SDK, `client.is_authenticated()` and `client.is_valid()` indi
 Signed revoked/expired/reset/unbound denials, invalid RSA/Ed25519 signature, TLS errors and wrong App/device scope are never grace-eligible. Resuming from `PAUSED_UNVERIFIED` always requires a fresh signed HTTPS heartbeat. Logout or application exit stops the realtime daemon and existing logout/unbind behavior continues. `SDKConfig.export_to_file` omits `useWebSocket` when disabled for backwards-compatible old exports; do not deliver an opted-in new Python config to a strict old SDK parser.
 
 **Security / production limits:** SDK WS-03 uses the existing WS-02 server ticket contract and does not change it. WS-02 global/per-App switches default OFF, tickets are Node-process-local, and Cloudflare is HTTP-only. Live WSS proxy, rolling deployment and capacity verification are WS-05 gates. The server-side stored `keep_login_on_network_error` flag does not yet control host GUI behavior; WS-04 will expose this policy in Admin. UI-continuity changes are opt-in through this new SDK only.
+
+## WS-05: Verified server Keep Login policy (new opt-in SDK only)
+
+With `useWebSocket=True`, the Admin App's `keep_login_on_network_error` setting is now a Boolean field in the signed, device-bound `license.snapshot` from the Node gateway. This supersedes the earlier WS-03 documentation stating the policy was storage-only. **Only after an authenticated WSS snapshot** does the SDK adopt it; missing/unsigned/tampered policy defaults OFF. A signed App change triggers HTTP revalidation and reconnect for the latest signed policy.
+
+- **OFF (default):** transient network errors are subject to existing bounded `offline_grace_seconds`; after expiry the SDK invalidates the session (legacy logout semantics).
+- **ON:** after grace, SDK retains an in-memory login UI hint, but `is_authenticated()` and `is_valid()` are false until a fresh nonce-bound signed HTTPS check succeeds. `has_login_session()` never authorizes protected operations.
+- **No WSS/signed policy:** default OFF, even if the Admin checkbox was saved ON, because an unsigned source cannot safely grant a retention policy. Existing HTTP-only/legacy clients are unchanged.
+- **Admin revoke/reset/expiry/bad RSA/Ed25519 signature:** always invalidates regardless of this toggle.
+
+Actual GUI persistence and background send queue pausing remain the host application's responsibility. `pip install 'licenx[realtime]'` installs the optional transport; ordinary installs do not change. No ticket/license keys are saved to disk.
+
+See `deploy/WS05_RELEASE_GATE.md` for explicit rollout/rollback safety requirements.

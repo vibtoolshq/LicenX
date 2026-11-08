@@ -227,6 +227,7 @@ class RealtimeSdkTests(unittest.TestCase):
 
     def test_transient_network_outage_retains_ui_session_but_pauses_operations(self):
         self.storage.offline_grace_seconds = 0
+        self.storage.apply_signed_realtime_policy(True)  # simulate verified ON policy
         client = XLicenseClient.__new__(XLicenseClient)
         client.config = self.config
         client.storage = self.storage
@@ -248,6 +249,7 @@ class RealtimeSdkTests(unittest.TestCase):
 
     def test_grace_is_bounded_and_revocation_never_gets_grace(self):
         self.storage.offline_grace_seconds = 20
+        self.storage.apply_signed_realtime_policy(True)  # verified ON retains UI after grace
         with patch("licenx.storage.time.monotonic", side_effect=[100.0, 121.0]):
             self.storage.realtime_signed_heartbeat(False, {"code":"SERVER_UNREACHABLE"})
             self.assertEqual(self.storage.get_realtime_state(), "OFFLINE_GRACE")
@@ -261,6 +263,64 @@ class RealtimeSdkTests(unittest.TestCase):
         revoked.assert_called_once_with("LICENSE_INACTIVE")
         self.assertEqual(self.storage.get_realtime_state(), "INVALIDATED")
         self.assertFalse(self.storage.is_authorized())
+
+    def test_signed_app_policy_changes_network_error_continuity(self):
+        snapshot = {
+            "type": "license.snapshot", "app_id": "app-one",
+            "license_id": "lic-1", "device_id": "device-1",
+            "version": 3, "valid": True, "server_time": int(time.time() * 1000),
+            "keep_login_on_network_error": True,
+        }
+        self.worker._verify_snapshot(signed(snapshot, self.key))
+        self.assertTrue(self.storage._keep_login_on_network_error)
+        # App policy is part of the signature: payload tampering is rejected.
+        forged = signed(snapshot, self.key)
+        forged["keep_login_on_network_error"] = False
+        with self.assertRaises(_RealtimeSecurityError):
+            self.worker._verify_snapshot(forged)
+        snapshot["version"] = 4
+        snapshot["keep_login_on_network_error"] = False
+        self.worker._verify_snapshot(signed(snapshot, self.key))
+        self.assertFalse(self.storage._keep_login_on_network_error)
+        snapshot["version"] = 5
+        snapshot["keep_login_on_network_error"] = "true"
+        with self.assertRaises(_RealtimeSecurityError):
+            self.worker._verify_snapshot(signed(snapshot, self.key))
+
+    def test_policy_off_invalidates_after_network_grace_and_policy_on_pauses(self):
+        invalidated = Mock()
+        self.storage.on_invalidated = invalidated
+        self.storage.offline_grace_seconds = 0
+        self.assertFalse(self.storage._keep_login_on_network_error)
+        self.storage.realtime_signed_heartbeat(False, {"code": "TIMEOUT"})
+        invalidated.assert_called_once_with("NETWORK_GRACE_EXPIRED")
+        self.assertEqual(self.storage.get_realtime_state(), "INVALIDATED")
+        self.assertFalse(self.storage.is_authorized())
+
+        # A second opt-in session has a signed ON policy and retains UI only.
+        fresh = BackgroundLicenseWorker("policy-on", offline_grace_seconds=0)
+        fresh.enable_realtime()
+        fresh._running = True
+        fresh.apply_signed_realtime_policy(True)
+        fresh.on_invalidated = Mock()
+        fresh.realtime_signed_heartbeat(False, {"code": "SERVER_UNREACHABLE"})
+        self.assertEqual(fresh.get_realtime_state(), "PAUSED_UNVERIFIED")
+        fresh.on_invalidated.assert_not_called()
+        self.assertFalse(fresh.is_authorized())
+        fresh.realtime_signed_heartbeat(True, {"valid": True})
+        self.assertTrue(fresh.is_authorized())
+        fresh.stop_monitoring()
+
+    def test_old_snapshot_without_policy_defaults_secure_off(self):
+        self.storage.apply_signed_realtime_policy(True)
+        snap = {
+            "type": "license.snapshot", "app_id": "app-one",
+            "license_id": "lic-1", "device_id": "device-1",
+            "version": 1, "valid": True,
+            "server_time": int(time.time() * 1000),
+        }
+        self.worker._verify_snapshot(signed(snap, self.key))
+        self.assertFalse(self.storage._keep_login_on_network_error)
 
     def test_stop_is_idempotent_and_does_not_persist_tokens(self):
         sock = FakeWebSocket([])

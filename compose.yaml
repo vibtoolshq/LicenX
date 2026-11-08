@@ -28,6 +28,8 @@ services:
       OWNER_SETUP_CODE_SHA256: ${OWNER_SETUP_CODE_SHA256:-}
       PUBLIC_LICENSE_CHECK_ENABLED: ${PUBLIC_LICENSE_CHECK_ENABLED:-true}
       PUBLIC_LICENSE_CHECK_RATE_SECRET: ${PUBLIC_LICENSE_CHECK_RATE_SECRET:-}
+      # WS-05: existing port 3000/Caddy upgrade; OFF unless explicitly approved.
+      LICENX_REALTIME_TRANSPORT_ENABLED: ${LICENX_REALTIME_TRANSPORT_ENABLED:-false}
     volumes:
       - app-storage:/var/lib/licenx/storage
     depends_on:

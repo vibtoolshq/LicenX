@@ -150,3 +150,11 @@ Tests must use disposable datasets. A successful isolated CI workflow does not i
 Keep admin credentials, license keys, signing keys, backup recovery keys and private storage outside Git. Use HTTPS, least-privilege API scopes and regular encrypted backups. Report vulnerabilities via [SECURITY.md](SECURITY.md). The project's non-negotiable development rules remain in [AGENTS.md](AGENTS.md) and [AI_INSTRUCTIONS.md](AI_INSTRUCTIONS.md).
 
 **License:** [MIT](LICENSE).
+
+## Realtime license WS-05 release gate (no automatic VPS deployment)
+
+The optional realtime stack uses the existing HTTPS listener and is **OFF by default** through both `LICENX_REALTIME_TRANSPORT_ENABLED=false` (Docker Compose) and each App's `realtime_websocket_enabled=false`. New Python SDKs must opt in; old SDKs keep using signed HTTPS.
+
+The saved Admin **Keep Login on Network Error** switch is now delivered **only** in a trusted signed realtime snapshot. If the SDK has no trusted snapshot, the safe default is OFF. When ON, offline grace expiry preserves only the UI login session hint; it never permits unverified licensed operations. Admin reset/revoke and expiry still deny authorization.
+
+WS-05 adds disposable trusted-localhost Caddy WSS, real Python WS client, bounded synthetic-load, restart and HTTP-only rollback gates to GitHub Phase-05 CI. **Successful CI is not approval for live deployment or 1k–10k devices.** See [WS-05 release, preflight, operational risks and rollback](deploy/WS05_RELEASE_GATE.md). No customer database/DNS/VPS is touched by this source update.
