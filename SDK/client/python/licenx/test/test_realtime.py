@@ -98,9 +98,11 @@ class RealtimeSdkTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             path = os.path.join(d, "old.json")
             old.export_to_file(path)
-            self.assertNotIn("useWebSocket", json.load(open(path, encoding="utf-8")))
+            with open(path, encoding="utf-8") as handle:
+                self.assertNotIn("useWebSocket", json.load(handle))
             self.config.export_to_file(path)
-            self.assertTrue(json.load(open(path, encoding="utf-8"))["useWebSocket"])
+            with open(path, encoding="utf-8") as handle:
+                self.assertTrue(json.load(handle)["useWebSocket"])
         with self.assertRaisesRegex(ValueError, "useWebSocket must be a boolean"):
             SDKConfig(useWebSocket="true")
 

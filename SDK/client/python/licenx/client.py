@@ -129,7 +129,8 @@ class XLicenseClient:
             worker.stop()
 
     def _start_realtime(self, result: LoginResult) -> None:
-        if not self.config.useWebSocket:
+        # Legacy callers and minimal fixture clients have no realtime config.
+        if not getattr(getattr(self, "config", None), "useWebSocket", False):
             return
         self._stop_realtime()
         # Global/no-App licenses cannot be ticketed by the WS-02 gateway;
