@@ -9,9 +9,23 @@ export interface AppItem {
   device_lease_seconds: number;
   ping_interval_seconds: number;
   offline_grace_seconds: number;
+  realtime_websocket_enabled?: 0 | 1 | boolean;
+  keep_login_on_network_error?: 0 | 1 | boolean;
   created_at: number;
   updated_at: number;
   licenses_count?: number;
+}
+
+/** Node gateway presence: a live socket is not proof of ongoing license validity. */
+export interface RealtimePresenceReport {
+  transportEnabled: boolean;
+  connectedNow: number;
+  activeSockets: number;
+  boundActive: number;
+  staleBound: number;
+  connectedDeviceIds: string[];
+  observedAt: number;
+  scope: string | null;
 }
 
 export interface License {

@@ -2,6 +2,7 @@ import {
   AdminApiKeyRecord,
   PublicLicenseApiDomain,
   AppItem,
+  RealtimePresenceReport,
   CreatedAdminApiKey,
   Device,
   License,
@@ -627,6 +628,14 @@ export const api = {
     return request<{ success: boolean }>(`/api/licenses/${licenseId}/devices`, {
       method: "DELETE",
     });
+  },
+
+  // WS-04: uncached admin-only presence (fast, bounded, no raw secrets).
+  getRealtimePresence: (params: { appId?: string; deviceIds?: string[] } = {}) => {
+    const query = new URLSearchParams();
+    if (params.appId) query.set("app_id", params.appId);
+    if (params.deviceIds?.length) query.set("device_ids", params.deviceIds.slice(0, 100).join(","));
+    return request<RealtimePresenceReport>("/api/realtime/presence?" + query.toString());
   },
 
   // Global Devices

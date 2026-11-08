@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { Laptop, Search, Trash2, RefreshCw, Key } from 'lucide-react';
 import { api } from '../services/apiClient';
-import { Device } from '../types';
+import { Device, RealtimePresenceReport } from '../types';
 import { TablePagination } from './TablePagination';
 import { useConfirm } from '../context/ConfirmContext';
 
@@ -12,6 +12,7 @@ export const DevicesTab: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
+  const [presence, setPresence] = useState<RealtimePresenceReport | null>(null);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(() => {
@@ -49,6 +50,19 @@ export const DevicesTab: React.FC = () => {
     loadDevices();
   }, []);
 
+  // Only while this tab is mounted; bounded one admin-only status request/15s.
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void api.getRealtimePresence({ deviceIds: devices.map(device => device.id).slice(0, 100) })
+        .then(result => { if (active) setPresence(result); })
+        .catch(() => { if (active) setPresence(null); });
+    };
+    refresh();
+    const interval = setInterval(refresh, 15000);
+    return () => { active = false; clearInterval(interval); };
+  }, [devices]);
+
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setCurrentPage(1);
@@ -63,12 +77,15 @@ export const DevicesTab: React.FC = () => {
   }, [devices, safeCurrentPage, pageSize]);
 
   const handleUnbind = async (id: string) => {
-    const ok = await confirm('Unbind this hardware device? The client slot will be freed immediately.');
+    const connected = presence?.connectedDeviceIds.includes(id) ?? false;
+    const ok = await confirm(connected
+      ? 'Force logout this connected device? Its binding will be revoked, live WebSocket closed, and it must authenticate again.'
+      : 'Unbind this hardware device? It will be denied at its next signed license check.');
     if (!ok) return;
     try {
       setActionLoading(true);
       await api.unbindDevice(id);
-      await loadDevices();
+      await loadDevices(true);
     } catch (err: any) {
       alert(err.message || 'Unbind failed');
     } finally {
@@ -110,6 +127,14 @@ export const DevicesTab: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-mono text-slate-400">Total Bound: {total}</span>
+          {presence ? (
+            <span className="text-[10px] font-mono text-slate-400" aria-live="polite"
+              title="Connected means verified WebSocket session, not merely a bound device. Stale is derived from last lease update.">
+              WS: <span className="text-emerald-400">{presence.connectedNow}</span>
+              <span className="mx-1 text-slate-600">|</span>Bound active: {presence.boundActive}
+              <span className="mx-1 text-slate-600">|</span>Stale: {presence.staleBound}
+            </span>
+          ) : <span className="text-[10px] text-slate-500">Live report unavailable</span>}
           <button
             onClick={() => loadDevices(true)}
             className="p-1 rounded bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
@@ -129,6 +154,7 @@ export const DevicesTab: React.FC = () => {
                 <th className="py-2 px-2.5">Client Device</th>
                 <th className="py-2 px-2.5">IP Address</th>
                 <th className="py-2 px-2.5">Status</th>
+                <th className="py-2 px-2.5">WS Session</th>
                 <th className="py-2 px-2.5">Last Heartbeat</th>
                 <th className="py-2 px-2.5 text-right">Action</th>
               </tr>
@@ -136,7 +162,7 @@ export const DevicesTab: React.FC = () => {
             <tbody className="divide-y divide-slate-800/40 text-slate-300 text-[11px]">
               {devices.length === 0 ? (
                 <tr>
-                  <td colSpan={7} className="py-8 text-center text-slate-500">
+                  <td colSpan={8} className="py-8 text-center text-slate-500">
                     {loading ? 'Loading devices...' : 'No active hardware bindings found.'}
                   </td>
                 </tr>
@@ -170,15 +196,27 @@ export const DevicesTab: React.FC = () => {
                         </span>
                       )}
                     </td>
+                    <td className="py-2 px-2.5">
+                      {presence?.connectedDeviceIds.includes(dev.id) ? (
+                        <span className="text-emerald-400 text-[10px]" title="Authenticated WebSocket connection">Connected</span>
+                      ) : (
+                        <span className="text-slate-500 text-[10px]"
+                          title="Not connected to this Node WebSocket gateway; may be HTTP-only, reconnecting or offline">
+                          {presence ? 'No WS' : 'Unknown'}
+                        </span>
+                      )}
+                    </td>
                     <td className="py-2 px-2.5 text-slate-400">{formatTime(dev.last_ping_at)}</td>
                     <td className="py-2 px-2.5 text-right">
                       <button
                         onClick={() => handleUnbind(dev.id)}
                         disabled={actionLoading}
                         className="px-2 py-0.5 text-[10px] rounded bg-slate-900 hover:bg-rose-950/40 text-rose-400 border border-slate-800 hover:border-rose-900/50 transition-colors"
-                        title="Unbind hardware slot"
+                        title="Revoke device binding; close authenticated live WebSocket after DB commit"
                       >
-                        {dev.status === 'active' ? 'Unbind HWID' : 'Remove'}
+                        {presence?.connectedDeviceIds.includes(dev.id)
+                          ? 'Force logout'
+                          : dev.status === 'active' ? 'Unbind HWID' : 'Remove'}
                       </button>
                     </td>
                   </tr>

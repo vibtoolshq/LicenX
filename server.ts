@@ -11,6 +11,7 @@ import { registerBackupRoutes, initializeBackupScheduler, isBackupRestoreRunning
 import { createRealtimeTickets, validateRealtimeDevice } from './src/server/realtime/sessionTickets.js';
 import { createRealtimeLeaseManager } from './src/server/realtime/leaseManager.js';
 import { createRealtimeEventPublisher } from './src/server/realtime/eventPublisher.js';
+import { setRealtimePresenceEnabled, registerRealtimePresence } from './src/server/realtime/presence.js';
 import type { RealtimeIdentity } from './src/server/realtime/sessionTickets.js';
 
 dotenv.config();
@@ -132,6 +133,7 @@ async function main() {
         timeouts: { shutdownDrainMs: 3_000 },
       })
     : null;
+  setRealtimePresenceEnabled(Boolean(realtimeTransport));
   const realtimeLease = realtimeTransport && realtimeDb
     ? createRealtimeLeaseManager(realtimeDb, realtimeTransport.connectionManager)
     : null;
@@ -146,7 +148,7 @@ async function main() {
     realtimeTransport.register('license.hello', async (ctx: {
       clientId: string;
       identity: RealtimeIdentity;
-      client: { ws: { close(code: number, reason: string): void } };
+      client: { ws: { close(code: number, reason: string): void; readyState: number; once(event: 'close' | 'error', listener: () => void): unknown; off(event: 'close' | 'error', listener: () => void): unknown } };
       reply(message: unknown): unknown;
       subscribe(group: string): Promise<boolean>;
     }) => {
@@ -160,10 +162,15 @@ async function main() {
         ctx.client.ws.close(4003, 'license revalidation required');
         return;
       }
+      const snapshot = await publisher.snapshot(identity);
       lease.register(ctx.clientId, identity);
-      await ctx.subscribe('license:' + identity.licenseId);
-      await ctx.subscribe('app:' + identity.appId);
-      ctx.reply(await publisher.snapshot(identity));
+      const licenseSubscribed = await ctx.subscribe('license:' + identity.licenseId);
+      const appSubscribed = await ctx.subscribe('app:' + identity.appId);
+      if (!licenseSubscribed || !appSubscribed || ctx.reply(snapshot) === false) {
+        ctx.client.ws.close(1011, 'snapshot unavailable');
+        return;
+      }
+      registerRealtimePresence(ctx.clientId, identity, ctx.client.ws);
     });
   }
   const server = app.listen(port, '0.0.0.0', () => {
@@ -187,6 +194,7 @@ async function main() {
     if (realtimeTransport) {
       realtimePublisher?.stop();
       realtimeLease?.stop();
+      setRealtimePresenceEnabled(false);
       realtimeTickets = null;
       void realtimeTransport.stop()
         .catch(() => console.error('[LicenX] Realtime transport shutdown failed'))

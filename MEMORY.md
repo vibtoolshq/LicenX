@@ -209,3 +209,11 @@ RDP root local `vcon_data.db` was protected before HEAD deletion with verified p
 - Verification status pending exact-commit Linux CI. Connected Windows RDP has no `python` or `py` on PATH, so do not pretend local Python suite ran. See ignored `notes/WS_03_EXECUTION_SCOPE_20261109.md` for actual test/commit/status. Host UI still cannot automatically retain screen state; Admin keep-login toggle remains future WS-04 server/SDK policy contract.
 
 - WS-03 focused CI legacy-compatibility correction: primary Python 148-test suite initially had 2 mock-client __new__ tests failing because new _start_realtime read missing config; corrected with getattr default-False guard. New test fixture context-managed JSON readers. No WSS protocol, old login flow or server changes. Final exact-commit CI in private WS-03 receipt.
+
+
+## WS-04 Admin Policy & Authenticated Presence (2026-11-09)
+- Scope only: EditAppModal.tsx, DevicesTab.tsx, src/types.ts, src/services/apiClient.ts, src/server/api.ts, new src/server/realtime/presence.ts, minimal Node gateway server.ts authenticated license.hello/close wiring, tests/realtimeAdmin.test.ts. No SDK/old API/schema/deploy changes.
+- Compact saved App WebSocket enable/disable and Keep Login on Network Error bool toggles at original License Session Policy. WebSocket server/App defaults OFF. Existing SDK WS-03 has NOT been updated to consume the stored keep-login flag; UI warns that it is a persisted policy preference, not yet remote-enforced. License revoke/expiry still denies.
+- New admin session protected GET /api/realtime/presence returns only scoped app/device counts and explicitly requested IDs; Node-memory verified-hello connected sessions distinct from DB bound-active and stale-lease; 15s Admin UI refresh while mounted. No new license key/HWID/IP leakage.
+- Existing authenticated DELETE /api/devices/:id reused for Force logout, with minimal post-DB-commit socket close and WS-02 signed device event journal for reconnecters. Not an instant offline-client push.
+- Local scope audit, TypeScript, Vite and esbuild build PASS. Windows @libsql native DLL cannot load for DB test; GitHub exact-commit Linux CI is authoritative. No live VPS/production client touched. See private notes/WS_04_EXECUTION_SCOPE_20261109.md for final SHA/CI.

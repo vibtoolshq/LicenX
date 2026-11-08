@@ -34,6 +34,7 @@ import {
   verifySessionToken,
 } from "./crypto.js";
 import { getDbClient, isTursoPlaceholder } from "./db.js";
+import { closeRealtimeDeviceSessions, getRealtimePresenceReport } from "./realtime/presence.js";
 import { validateAdminLicenseCreation } from "./adminApiInput.js";
 import { createAdminApiRateLimiter } from "./adminApiRateLimiter.js";
 import { runRestrictedPublicLicenseCheck, PUBLIC_LICENSE_CHECK_PATH } from "./restrictedPublicLicenseCheck.js";
@@ -1414,6 +1415,41 @@ apiRouter.delete(
 // GLOBAL DEVICES MANAGEMENT (ADMIN)
 // -------------------------------------------------------------
 
+// WS-04: authorized read-only presence, separate from database-bound counts.
+// Admin sessions only; public license/API-key clients never gain report access.
+apiRouter.get(
+  "/realtime/presence",
+  requireAdminAuth,
+  async (req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "no-store");
+    const appId = req.query.app_id;
+    const requestedIds = req.query.device_ids;
+    const safeId = (value: string) => /^[A-Za-z0-9_-]{1,128}$/.test(value);
+    if (appId !== undefined && (typeof appId !== "string" || !safeId(appId))) {
+      res.status(400).json({ code: "INVALID_APP_SCOPE" });
+      return;
+    }
+    if (requestedIds !== undefined &&
+        (typeof requestedIds !== "string" || requestedIds.length > 8192)) {
+      res.status(400).json({ code: "INVALID_DEVICE_SCOPE" });
+      return;
+    }
+    const ids = requestedIds ? requestedIds.split(",") : [];
+    if (ids.length > 100 || ids.some(id => !safeId(id))) {
+      res.status(400).json({ code: "INVALID_DEVICE_SCOPE" });
+      return;
+    }
+    try {
+      res.json(await getRealtimePresenceReport(getDbClient(), {
+        appId: typeof appId === "string" ? appId : undefined,
+        deviceIds: ids,
+      }));
+    } catch {
+      res.status(503).json({ code: "REALTIME_REPORT_UNAVAILABLE" });
+    }
+  },
+);
+
 apiRouter.get(
   "/devices",
   requireAdminAuth,
@@ -1479,6 +1515,8 @@ apiRouter.delete(
       const { id } = req.params;
       const db = getDbClient();
       await db.execute({ sql: "DELETE FROM devices WHERE id = ?", args: [id] });
+      // Close only AFTER the admin's trusted device unbind has committed.
+      closeRealtimeDeviceSessions(id);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: SAFE_SERVER_ERROR });

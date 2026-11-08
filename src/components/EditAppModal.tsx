@@ -1,7 +1,7 @@
 import { Loader2, X } from 'lucide-react';
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { api } from '../services/apiClient';
-import { AppItem } from '../types';
+import { AppItem, RealtimePresenceReport } from '../types';
 
 interface EditAppModalProps {
   app: AppItem;
@@ -17,6 +17,22 @@ export const EditAppModal: React.FC<EditAppModalProps> = ({ app, onClose, onUpda
   const [deviceLeaseSeconds, setDeviceLeaseSeconds] = useState(app.device_lease_seconds ?? 7200);
   const [pingIntervalSeconds, setPingIntervalSeconds] = useState(app.ping_interval_seconds ?? 1200);
   const [offlineGraceSeconds, setOfflineGraceSeconds] = useState(app.offline_grace_seconds ?? 0);
+  const [webSocketEnabled, setWebSocketEnabled] = useState(Number(app.realtime_websocket_enabled ?? 0) === 1);
+  const [keepLoginOnNetworkError, setKeepLoginOnNetworkError] = useState(Number(app.keep_login_on_network_error ?? 0) === 1);
+  const [presence, setPresence] = useState<RealtimePresenceReport | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    const refresh = () => {
+      void api.getRealtimePresence({ appId: app.id })
+        .then(report => { if (active) setPresence(report); })
+        .catch(() => { if (active) setPresence(null); });
+    };
+    refresh();
+    const interval = setInterval(refresh, 15000);
+    return () => { active = false; clearInterval(interval); };
+  }, [app.id]);
+
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
 
@@ -52,6 +68,8 @@ export const EditAppModal: React.FC<EditAppModalProps> = ({ app, onClose, onUpda
         device_lease_seconds: deviceLeaseSeconds,
         ping_interval_seconds: pingIntervalSeconds,
         offline_grace_seconds: offlineGraceSeconds,
+        realtime_websocket_enabled: webSocketEnabled,
+        keep_login_on_network_error: keepLoginOnNetworkError,
       });
 
       onUpdated();
@@ -171,6 +189,35 @@ export const EditAppModal: React.FC<EditAppModalProps> = ({ app, onClose, onUpda
                   required
                 />
               </div>
+            </div>
+            <div className="grid grid-cols-2 gap-2.5 mt-2.5">
+              <label className="flex items-center justify-between gap-2 rounded border border-slate-800 bg-slate-900/50 p-2 cursor-pointer">
+                <span className="text-[11px] text-slate-300">WebSocket realtime</span>
+                <input type="checkbox" checked={webSocketEnabled}
+                  onChange={e => setWebSocketEnabled(e.target.checked)}
+                  aria-label="Enable WebSocket for this application"
+                  className="accent-indigo-500" />
+              </label>
+              <label className="flex items-center justify-between gap-2 rounded border border-slate-800 bg-slate-900/50 p-2 cursor-pointer">
+                <span className="text-[11px] text-slate-300">Keep login on network error</span>
+                <input type="checkbox" checked={keepLoginOnNetworkError}
+                  onChange={e => setKeepLoginOnNetworkError(e.target.checked)}
+                  aria-label="Keep login policy on network error"
+                  className="accent-indigo-500" />
+              </label>
+            </div>
+            <div className="mt-2 text-[10px] leading-relaxed text-slate-500">
+              Network preference is saved on the server; SDK-side enforcement is not yet connected.
+              Revoked/expired licenses still deny access. WebSocket also requires the server transport and an opted-in SDK.
+            </div>
+            <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400" aria-live="polite">
+              {presence ? (
+                <>
+                  <span>WS connected: <strong className="text-emerald-400">{presence.connectedNow}</strong></span>
+                  <span>Bound active: <strong className="text-slate-200">{presence.boundActive}</strong></span>
+                  <span>Stale lease: <strong className="text-amber-400">{presence.staleBound}</strong></span>
+                </>
+              ) : <span>Live status unavailable</span>}
             </div>
           </div>
 
