@@ -31,6 +31,9 @@ communicator = ServerCommunicator(config)
 storage = BackgroundLicenseWorker("ws05-py-ci", offline_grace_seconds=1200)
 storage.enable_realtime()
 storage._running = True
+# CI-only failure classification: an internal constant code, never keys/tokens/URL.
+invalidated_codes = []
+storage.on_invalidated = invalidated_codes.append
 
 # For a local Caddy-generated CA; production TLS uses normal system trust.
 real_connect = websocket.create_connection
@@ -55,7 +58,7 @@ try:
             print("WS05_PYTHON_SDK_REAL_WSS=PASS signed_policy=ON secure_TLS=CA_VALIDATED")
             break
         if state == "INVALIDATED":
-            raise AssertionError("Python realtime worker invalidated unexpectedly")
+            raise AssertionError("Python realtime worker invalidated: " + (invalidated_codes[-1] if invalidated_codes else "UNKNOWN"))
         time.sleep(0.2)
     else:
         raise AssertionError("Python SDK did not authenticate over trusted Caddy WSS")
