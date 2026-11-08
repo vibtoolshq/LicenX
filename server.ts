@@ -86,18 +86,40 @@ async function main() {
     app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
   }
   app.use(errorHandler);
+  // WS-01 transport gate: off by default. Until WS-02 issues bound session tickets,
+  // every upgrade must be rejected rather than granting an unsigned session.
+  const realtimeTransport = process.env.LICENX_REALTIME_TRANSPORT_ENABLED === 'true'
+    ? (await import('./engine/socketcore/index.js')).createEngine({
+        path: '/api/realtime',
+        authenticate: async () => null,
+        authorizeSubscription: async () => false,
+        limits: { maxPendingUpgrades: 128 },
+        timeouts: { shutdownDrainMs: 3_000 },
+      })
+    : null;
   const server = app.listen(port, '0.0.0.0', () => {
     ready = true;
     console.log('[LicenX] Server listening on port', port);
   });
+  if (realtimeTransport) {
+    realtimeTransport.attach(server);
+    realtimeTransport.start();
+  }
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
     ready = false;
-    server.close(async () => {
+    const closeHttpServer = () => server.close(async () => {
       try { await getDbClient().close(); process.exit(0); }
       catch { process.exit(1); }
     });
+    if (realtimeTransport) {
+      void realtimeTransport.stop()
+        .catch(() => console.error('[LicenX] Realtime transport shutdown failed'))
+        .finally(closeHttpServer);
+    } else {
+      closeHttpServer();
+    }
     setTimeout(() => process.exit(1), 10_000).unref();
   };
   process.on('SIGTERM', shutdown);
