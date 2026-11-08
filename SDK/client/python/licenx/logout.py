@@ -8,7 +8,7 @@ so the license can be activated on another PC immediately.
 import atexit
 import os
 import signal
-from typing import Optional
+from typing import Optional, Callable
 from .device import DeviceManager
 from .server import ServerCommunicator
 from .storage import BackgroundLicenseWorker
@@ -27,9 +27,13 @@ class LogoutManager:
         self._current_license_key: Optional[str] = None
         self._exit_hook_registered = False
         self._exit_cleanup_started = False
+        self._stop_realtime_callback: Optional[Callable[[], None]] = None
 
         if self.auto_logout_on_exit:
             self._register_exit_hooks()
+
+    def set_realtime_stop_callback(self, callback: Callable[[], None]) -> None:
+        self._stop_realtime_callback = callback
 
     def set_active_session(self, license_key: Optional[str]) -> None:
         """Sets active license key for exit cleanup"""
@@ -42,6 +46,12 @@ class LogoutManager:
         key = license_key or self._current_license_key
         hwid = DeviceManager.get_hwid()
 
+        # Stop WSS before unbinding the device, including automatic exit paths.
+        if self._stop_realtime_callback:
+            try:
+                self._stop_realtime_callback()
+            except Exception:
+                pass
         # Stop background worker thread
         self.storage.stop_monitoring()
 

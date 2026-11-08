@@ -66,6 +66,13 @@ class BackgroundLicenseWorker:
         self._current_hwid: Optional[str] = None
         self._state_lock = threading.Lock()
         self._offline_since: Optional[float] = None
+        # WS-03 opt-in state only; the original heartbeat loop is unchanged by default.
+        self._realtime_enabled = False
+        self._realtime_connected = False
+        self._realtime_paused = False
+        self._realtime_state = "HTTP_ONLY"
+        self._realtime_wake = threading.Event()
+        self._on_realtime_state: Optional[Callable[[str], None]] = None
         self._session_file = os.path.join(
             tempfile.gettempdir(), f".vcon_session_{self.app_name}.dat"
         )
@@ -107,6 +114,11 @@ class BackgroundLicenseWorker:
         self._current_license_key = license_key
         self._current_hwid = hwid
         self.record_heartbeat_success()
+        if self._realtime_enabled:
+            self._realtime_paused = False
+            self._realtime_connected = False
+            self._realtime_wake.clear()
+            self._set_realtime_state("CONNECTING")
         self._stop_event.clear()
         self._running = True
 
@@ -121,6 +133,7 @@ class BackgroundLicenseWorker:
         """Stops background thread safely"""
         self._running = False
         self._stop_event.set()
+        self._realtime_wake.set()
         worker_thread = self._thread
         self._thread = None
         if (
@@ -132,6 +145,9 @@ class BackgroundLicenseWorker:
 
     def _worker_loop(self) -> None:
         """Periodic background heartbeat runner (RAM & CPU friendly)"""
+        if self._realtime_enabled:
+            self._realtime_worker_loop()
+            return
         while self._running and not self._stop_event.is_set():
             remaining_grace = self._remaining_grace_seconds()
             wait_seconds = (
@@ -181,6 +197,111 @@ class BackgroundLicenseWorker:
                 self._invalidate(reason)
                 break
 
+    def enable_realtime(self, on_state_change: Optional[Callable[[str], None]] = None) -> None:
+        """Called only for an opted-in SDK instance, before the first login."""
+        self._realtime_enabled = True
+        self._on_realtime_state = on_state_change
+        self._set_realtime_state("HTTP_FALLBACK")
+
+    def _set_realtime_state(self, state: str) -> None:
+        if self._realtime_state == state:
+            return
+        self._realtime_state = state
+        if self._on_realtime_state:
+            try:
+                self._on_realtime_state(state)
+            except Exception:
+                pass  # A host UI callback cannot break licensing.
+
+    def get_realtime_state(self) -> str:
+        return self._realtime_state
+
+    def is_authorized(self) -> bool:
+        """Only a verified/grace-valid session may unlock licensed operations."""
+        with self._state_lock:
+            return not self._realtime_paused
+
+    def set_realtime_connected(self, connected: bool) -> bool:
+        """Call TRUE only after a *signed, bound* snapshot; never from socket open."""
+        if not self._realtime_enabled or not self._running:
+            return False
+        if connected:
+            with self._state_lock:
+                if self._realtime_paused:
+                    self._realtime_wake.set()
+                    return False  # Fresh signed HTTP recovery required after grace.
+                self._realtime_connected = True
+                self._offline_since = None
+            self._set_realtime_state("CONNECTED")
+            self._realtime_wake.set()
+            return True
+        with self._state_lock:
+            self._realtime_connected = False
+            paused = self._realtime_paused
+        self._set_realtime_state("PAUSED_UNVERIFIED" if paused else "RECONNECTING")
+        self._realtime_wake.set()
+        return True
+
+    def realtime_signed_heartbeat(self, valid: bool, data: Dict[str, Any]) -> bool:
+        """Handle authoritative HTTPS heartbeat result; never trust unsigned WS messages."""
+        if not self._realtime_enabled or not self._running:
+            return False
+        if valid:
+            with self._state_lock:
+                self._offline_since = None
+                self._realtime_paused = False
+                connected = self._realtime_connected
+            self._set_realtime_state("CONNECTED" if connected else "HTTP_FALLBACK")
+            if self.on_heartbeat_success:
+                try:
+                    self.on_heartbeat_success(data)
+                except Exception:
+                    pass
+            return True
+        code = data.get("code") if isinstance(data, dict) else None
+        if code not in TRANSIENT_HEARTBEAT_CODES:
+            # A confirmed security/authorization denial is never grace-eligible.
+            self._invalidate(code if isinstance(code, str) else "LICENSE_INVALID")
+            return False
+        with self._state_lock:
+            now = time.monotonic()
+            if self._offline_since is None:
+                self._offline_since = now
+            expired = (self.offline_grace_seconds == 0 or
+                       now - self._offline_since >= self.offline_grace_seconds)
+            if expired:
+                self._realtime_paused = True
+            self._realtime_connected = False
+        # Do not wake the fallback worker from its own failed poll: retry in 30s.
+        self._set_realtime_state("PAUSED_UNVERIFIED" if expired else "OFFLINE_GRACE")
+        return False
+
+    def _realtime_worker_loop(self) -> None:
+        """Signed HTTP fallback after a WS disconnect. Never blocks the caller/UI."""
+        first = True
+        while self._running and not self._stop_event.is_set():
+            interval = 2.0 if first else HEARTBEAT_RETRY_INTERVAL_SECONDS
+            first = False
+            self._realtime_wake.wait(timeout=interval)
+            self._realtime_wake.clear()
+            if not self._running or self._stop_event.is_set():
+                break
+            with self._state_lock:
+                connected = self._realtime_connected
+            if connected:
+                continue
+            if not self._server_communicator or not self._current_license_key or not self._current_hwid:
+                break
+            try:
+                valid, data = self._server_communicator.ping_heartbeat(
+                    self._current_license_key, self._current_hwid
+                )
+            except Exception:
+                valid, data = False, {"code": "SERVER_UNREACHABLE"}
+            if not self._running or self._stop_event.is_set():
+                break
+            self.realtime_signed_heartbeat(valid, data)
+
     def should_invalidate_for_heartbeat_failure(self, data: Dict[str, Any]) -> bool:
         code = data.get("code")
         if code not in TRANSIENT_HEARTBEAT_CODES:
@@ -214,6 +335,12 @@ class BackgroundLicenseWorker:
         self.clear_session()
         self._running = False
         self._stop_event.set()
+        self._realtime_wake.set()
+        if self._realtime_enabled:
+            with self._state_lock:
+                self._realtime_paused = True
+                self._realtime_connected = False
+            self._set_realtime_state("INVALIDATED")
         self.record_heartbeat_success()
         if self.on_invalidated:
             self.on_invalidated(reason)

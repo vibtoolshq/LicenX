@@ -34,8 +34,11 @@ class SDKConfig:
     enable_background_heartbeat: bool = True
     strict_online_only: bool = True
     app_version: Optional[str] = None
+    useWebSocket: bool = False  # Optional new SDK transport; old configs remain valid
 
     def __post_init__(self) -> None:
+        if type(self.useWebSocket) is not bool:
+            raise ValueError('useWebSocket must be a boolean')
         if (
             type(self.ping_interval_seconds) is not int
             or not MIN_PING_INTERVAL_SECONDS <= self.ping_interval_seconds <= MAX_PING_INTERVAL_SECONDS
@@ -82,6 +85,7 @@ class SDKConfig:
             "auto_save_session",
             "enable_background_heartbeat",
             "strict_online_only",
+            "useWebSocket",
         }
         integer_fields = {
             "ping_interval_seconds",
@@ -390,5 +394,8 @@ class SDKConfig:
             "enable_background_heartbeat": self.enable_background_heartbeat,
             "strict_online_only": self.strict_online_only,
         }
+        # Do not inject unknown fields into legacy SDK exported configurations.
+        if self.useWebSocket:
+            payload["useWebSocket"] = True
         with open(file_path, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)

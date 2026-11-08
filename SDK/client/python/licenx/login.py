@@ -104,7 +104,7 @@ class LoginManager:
             self.storage.save_session(normalized_key, data)
 
         # Start periodic 20-min background verification thread (if enabled)
-        if getattr(self.config, "enable_background_heartbeat", True):
+        if getattr(self.config, "enable_background_heartbeat", True) or getattr(self.config, "useWebSocket", False):
             self.storage.start_monitoring(
                 server_communicator=self.communicator,
                 license_key=normalized_key,

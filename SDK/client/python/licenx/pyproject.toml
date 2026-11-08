@@ -30,6 +30,7 @@ dependencies = ["cryptography>=41.0.0"]
 
 [project.optional-dependencies]
 requests = ["requests>=2.28.0"]
+realtime = ["websocket-client>=1.7,<2"]  # Optional; old installs unchanged.
 
 [tool.setuptools]
 packages = ["licenx"]
