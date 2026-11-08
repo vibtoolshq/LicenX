@@ -211,6 +211,55 @@ async function ensureColumnExists(
   );
 }
 
+
+// WS-02: migration for SQLite/Turso and Cloudflare parity. All flags default OFF.
+// Row triggers write to the same transaction as the authoritative mutation;
+// a gateway reads only committed events, including mutations from other runtimes.
+async function ensureRealtimeSqliteSchema(db: DatabaseClient): Promise<void> {
+  await ensureColumnExists(db, "apps", "realtime_websocket_enabled", "INTEGER NOT NULL DEFAULT 0");
+  await ensureColumnExists(db, "apps", "keep_login_on_network_error", "INTEGER NOT NULL DEFAULT 0");
+  await db.execute(`CREATE TABLE IF NOT EXISTS realtime_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, event_type TEXT NOT NULL,
+    app_id TEXT, license_id TEXT, device_id TEXT, created_at INTEGER NOT NULL
+  )`);
+  await db.execute("CREATE INDEX IF NOT EXISTS idx_realtime_events_created ON realtime_events(created_at)");
+  const now = "CAST(strftime('%s','now') AS INTEGER) * 1000";
+  const sql = [
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_app_update
+      AFTER UPDATE OF status,realtime_websocket_enabled,keep_login_on_network_error,device_lease_seconds,ping_interval_seconds,offline_grace_seconds,min_version ON apps
+      WHEN OLD.status IS NOT NEW.status OR
+        OLD.realtime_websocket_enabled IS NOT NEW.realtime_websocket_enabled OR
+        OLD.keep_login_on_network_error IS NOT NEW.keep_login_on_network_error OR
+        OLD.device_lease_seconds IS NOT NEW.device_lease_seconds OR
+        OLD.ping_interval_seconds IS NOT NEW.ping_interval_seconds OR
+        OLD.offline_grace_seconds IS NOT NEW.offline_grace_seconds OR
+        OLD.min_version IS NOT NEW.min_version
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('app.changed',NEW.id,NULL,NULL,${now}); END`,
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_app_delete AFTER DELETE ON apps
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('app.deleted',OLD.id,NULL,NULL,${now}); END`,
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_license_update
+      AFTER UPDATE OF status,expires_at,app_id,device_limit,tier ON licenses
+      WHEN OLD.status IS NOT NEW.status OR OLD.expires_at IS NOT NEW.expires_at OR
+        OLD.app_id IS NOT NEW.app_id OR OLD.device_limit IS NOT NEW.device_limit OR
+        OLD.tier IS NOT NEW.tier
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('license.changed',NEW.app_id,NEW.id,NULL,${now}); END`,
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_license_delete AFTER DELETE ON licenses
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('license.deleted',OLD.app_id,OLD.id,NULL,${now}); END`,
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_device_update AFTER UPDATE OF status ON devices
+      WHEN OLD.status IS NOT NEW.status
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('device.changed',(SELECT app_id FROM licenses WHERE id = NEW.license_id),NEW.license_id,NEW.id,${now}); END`,
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_device_delete AFTER DELETE ON devices
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('device.deleted',(SELECT app_id FROM licenses WHERE id = OLD.license_id),OLD.license_id,OLD.id,${now}); END`,
+  ];
+  for (const statement of sql) await db.execute(statement);
+}
+
 export async function initDatabaseSchema(env?: any): Promise<void> {
   const db = getDbClient(env);
   if (initializedClients.has(db)) return;
@@ -351,6 +400,7 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
       await ensureColumnExists(db, "licenses", "app_id", "TEXT");
       await ensureColumnExists(db, "licenses", "pin", "TEXT");
       await ensureColumnExists(db, "validation_logs", "app_slug", "TEXT");
+      await ensureRealtimeSqliteSchema(db);
 
       // Ensure high-performance indexes exist silently
       try {
@@ -555,6 +605,7 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
     );
   `);
 
+    await ensureRealtimeSqliteSchema(db);
     initializedClients.add(db);
   })().finally(() => {
     schemaInitPromises.delete(db);

@@ -8,6 +8,10 @@ import dotenv from 'dotenv';
 import { initDatabaseSchema, getDbClient } from './src/server/db.js';
 import { apiRouter, requireAdminAuth } from './src/server/api.js';
 import { registerBackupRoutes, initializeBackupScheduler, isBackupRestoreRunning } from './src/server/backupControl.js';
+import { createRealtimeTickets, validateRealtimeDevice } from './src/server/realtime/sessionTickets.js';
+import { createRealtimeLeaseManager } from './src/server/realtime/leaseManager.js';
+import { createRealtimeEventPublisher } from './src/server/realtime/eventPublisher.js';
+import type { RealtimeIdentity } from './src/server/realtime/sessionTickets.js';
 
 dotenv.config();
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -45,10 +49,35 @@ app.get('/api/health', live);
 app.get('/api/ready', readiness);
 // Bound payloads before the general 20 MiB parser; never preflight-authorize browser callers.
 app.use('/api/v1/public/license/check', express.json({ limit: '1kb' }));
+app.use('/api/v1/realtime/ticket', express.json({ limit: '2kb' }));
 app.options('/api/v1/public/license/check', (_req, res) => res.status(405).set('Allow', 'POST').set('Cache-Control', 'no-store').json({code: 'METHOD_NOT_ALLOWED'}));
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 app.use(express.urlencoded({ extended: true, limit: '20mb' }));
+let realtimeTickets: ReturnType<typeof createRealtimeTickets> | null = null;
+// Separate additive endpoint: never changes existing signed license responses.
+// Unavailable until the WS-01 environment gate is enabled and the database is ready.
+app.post('/api/v1/realtime/ticket', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  if (isBackupRestoreRunning()) {
+    res.status(503).json({ code: 'RESTORE_IN_PROGRESS' });
+    return;
+  }
+  if (!realtimeTickets || shuttingDown || !ready) {
+    res.status(404).json({ code: 'REALTIME_DISABLED' });
+    return;
+  }
+  if (req.headers.origin) {
+    res.status(403).json({ code: 'REALTIME_BROWSER_ORIGIN_DENIED' });
+    return;
+  }
+  try {
+    const issued = await realtimeTickets.issue(req.body ?? {}, req.ip || req.socket.remoteAddress || 'unknown');
+    res.status(issued.status).json(issued.body);
+  } catch {
+    res.status(503).json({ code: 'REALTIME_UNAVAILABLE' });
+  }
+});
 app.use(['/api', '/v1'], (_req, res, next) => {
   if (isBackupRestoreRunning() && !_req.path.startsWith('/backup/')) {
     return res.status(503).set('Cache-Control', 'no-store').json({ error: 'RESTORE_IN_PROGRESS' });
@@ -86,17 +115,57 @@ async function main() {
     app.get('*', (_req, res) => res.sendFile(path.join(dist, 'index.html')));
   }
   app.use(errorHandler);
-  // WS-01 transport gate: off by default. Until WS-02 issues bound session tickets,
-  // every upgrade must be rejected rather than granting an unsigned session.
-  const realtimeTransport = process.env.LICENX_REALTIME_TRANSPORT_ENABLED === 'true'
+  // Optional WS-02 gateway: default OFF, accepts only single-use DB-bound tickets.
+  // Original HTTP license validation and old SDK flows are unchanged.
+  const realtimeEnabled = process.env.LICENX_REALTIME_TRANSPORT_ENABLED === 'true';
+  const realtimeDb = realtimeEnabled ? getDbClient() : null;
+  realtimeTickets = realtimeDb ? createRealtimeTickets(realtimeDb) : null;
+  const realtimeTransport = realtimeTickets
     ? (await import('./engine/socketcore/index.js')).createEngine({
         path: '/api/realtime',
-        authenticate: async () => null,
-        authorizeSubscription: async () => false,
+        authenticate: (req) => realtimeTickets!.authenticate(req),
+        authorizeSubscription: async (identity, group) => {
+          const user = identity as RealtimeIdentity;
+          return group === 'license:' + user.licenseId || group === 'app:' + user.appId;
+        },
         limits: { maxPendingUpgrades: 128 },
         timeouts: { shutdownDrainMs: 3_000 },
       })
     : null;
+  const realtimeLease = realtimeTransport && realtimeDb
+    ? createRealtimeLeaseManager(realtimeDb, realtimeTransport.connectionManager)
+    : null;
+  const realtimePublisher = realtimeTransport && realtimeDb
+    ? createRealtimeEventPublisher(realtimeDb, realtimeTransport.connectionManager, () => realtimeLease!.tick())
+    : null;
+  if (realtimePublisher) await realtimePublisher.init();
+  if (realtimeTransport && realtimeDb && realtimeLease && realtimePublisher) {
+    const db = realtimeDb;
+    const lease = realtimeLease;
+    const publisher = realtimePublisher;
+    realtimeTransport.register('license.hello', async (ctx: {
+      clientId: string;
+      identity: RealtimeIdentity;
+      client: { ws: { close(code: number, reason: string): void } };
+      reply(message: unknown): unknown;
+      subscribe(group: string): Promise<boolean>;
+    }) => {
+      const identity = ctx.identity as RealtimeIdentity;
+      if (lease.isRegistered(ctx.clientId)) {
+        ctx.reply({ type: 'error', code: 'REALTIME_ALREADY_REGISTERED' });
+        return;
+      }
+      if (isBackupRestoreRunning() || !(await validateRealtimeDevice(db, identity))) {
+        ctx.reply({ type: 'error', code: 'REALTIME_AUTH_REVOKED' });
+        ctx.client.ws.close(4003, 'license revalidation required');
+        return;
+      }
+      lease.register(ctx.clientId, identity);
+      await ctx.subscribe('license:' + identity.licenseId);
+      await ctx.subscribe('app:' + identity.appId);
+      ctx.reply(await publisher.snapshot(identity));
+    });
+  }
   const server = app.listen(port, '0.0.0.0', () => {
     ready = true;
     console.log('[LicenX] Server listening on port', port);
@@ -104,6 +173,8 @@ async function main() {
   if (realtimeTransport) {
     realtimeTransport.attach(server);
     realtimeTransport.start();
+    realtimeLease?.start(() => console.error('[LicenX] Realtime lease maintenance unavailable'));
+    realtimePublisher?.start(() => console.error('[LicenX] Realtime event relay unavailable'));
   }
   const shutdown = () => {
     if (shuttingDown) return;
@@ -114,6 +185,9 @@ async function main() {
       catch { process.exit(1); }
     });
     if (realtimeTransport) {
+      realtimePublisher?.stop();
+      realtimeLease?.stop();
+      realtimeTickets = null;
       void realtimeTransport.stop()
         .catch(() => console.error('[LicenX] Realtime transport shutdown failed'))
         .finally(closeHttpServer);

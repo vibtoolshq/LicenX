@@ -40,7 +40,7 @@ function resolveUpgradePath(path) {
 
 function createEngine({
   authenticate = /** @type {((req: import('node:http').IncomingMessage, options: { signal: AbortSignal }) => unknown) | undefined} */ (undefined),
-  authorizeSubscription = async () => false,
+  authorizeSubscription = /** @type {(identity: object, group: string, req?: import('node:http').IncomingMessage) => Promise<boolean>} */ (async () => false),
   allowedOrigins = [],
   path = /** @type {string | undefined} */ (undefined),
   limits = {},

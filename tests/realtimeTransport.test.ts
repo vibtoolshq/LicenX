@@ -22,12 +22,12 @@ function handshakeStatus(url: string): Promise<number> {
   });
 }
 
-test('WS-01 transport is gated OFF by default and ships no license grant', () => {
+test('WS-02 transport remains gated OFF by default and requires scoped authentication', () => {
   const source = readFileSync(new URL('../server.ts', import.meta.url), 'utf8');
   assert.match(source, /process\.env\.LICENX_REALTIME_TRANSPORT_ENABLED === 'true'/);
   assert.match(source, /path: '\/api\/realtime'/);
-  assert.match(source, /authenticate: async \(\) => null/);
-  assert.match(source, /authorizeSubscription: async \(\) => false/);
+  assert.match(source, /authenticate: \(req\) => realtimeTickets!\.authenticate\(req\)/);
+  assert.match(source, /authorizeSubscription: async \(identity, group\) =>/);
 
   const pkg = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   assert.match(pkg.dependencies.ws, /^8\.\d+\.\d+$/);

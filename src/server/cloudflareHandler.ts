@@ -991,6 +991,8 @@ export async function handleCloudflareApi(
         device_lease_seconds: DEFAULT_DEVICE_LEASE_SECONDS,
         ping_interval_seconds: DEFAULT_PING_INTERVAL_SECONDS,
         offline_grace_seconds: DEFAULT_OFFLINE_GRACE_SECONDS,
+        realtime_websocket_enabled: 0,
+        keep_login_on_network_error: 0,
         created_at: now,
         updated_at: now,
         licenses_count: 0,
@@ -1072,6 +1074,8 @@ export async function handleCloudflareApi(
           device_lease_seconds,
           ping_interval_seconds,
           offline_grace_seconds,
+          realtime_websocket_enabled,
+          keep_login_on_network_error,
         } = body;
 
         const fields: string[] = [];
@@ -1092,6 +1096,19 @@ export async function handleCloudflareApi(
         if (description !== undefined) {
           fields.push("description = ?");
           args.push(description ? description.trim() : null);
+        }
+
+        if ((realtime_websocket_enabled !== undefined && typeof realtime_websocket_enabled !== 'boolean') ||
+            (keep_login_on_network_error !== undefined && typeof keep_login_on_network_error !== 'boolean')) {
+          return errorResponse('Realtime policy fields must be booleans', 400);
+        }
+        if (realtime_websocket_enabled !== undefined) {
+          fields.push('realtime_websocket_enabled = ?');
+          args.push(realtime_websocket_enabled ? 1 : 0);
+        }
+        if (keep_login_on_network_error !== undefined) {
+          fields.push('keep_login_on_network_error = ?');
+          args.push(keep_login_on_network_error ? 1 : 0);
         }
 
         const policyFieldsProvided =
