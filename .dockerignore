@@ -2,6 +2,9 @@
 !package.json
 !package-lock.json
 !server.ts
+!engine/
+!engine/socketcore/
+!engine/socketcore/*.js
 !src/
 !src/**
 !scripts/
