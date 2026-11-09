@@ -309,6 +309,9 @@ try {
     "Overview recent activity live refresh");
   check("Logs and Overview synchronize after CI validation", true);
   await navigate(pageA, "HWID Locks");
+  // The earlier pagination check intentionally left this tab on page 8.
+  // Restore page 1 before asserting the newly bound, most-recent device.
+  await pageA.locator('main button[title="First Page"]').click();
   await poll(async () => (await pageA.locator("main").innerText()).includes("Total Bound: 151") &&
     (await pageA.locator("main tbody").innerText()).includes("ci-e2e-live-device"),
     "Devices page reflects new CI-only binding");
