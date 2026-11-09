@@ -11,8 +11,9 @@ import { registerBackupRoutes, initializeBackupScheduler, isBackupRestoreRunning
 import { createRealtimeTickets, validateRealtimeDevice } from './src/server/realtime/sessionTickets.js';
 import { createRealtimeLeaseManager } from './src/server/realtime/leaseManager.js';
 import { createRealtimeEventPublisher } from './src/server/realtime/eventPublisher.js';
-import { setRealtimePresenceEnabled, registerRealtimePresence } from './src/server/realtime/presence.js';
+import { setRealtimePresenceEnabled, registerRealtimePresence, subscribeRealtimePresence } from './src/server/realtime/presence.js';
 import { createAdminRealtimeGateway, setActiveAdminRealtimeGateway } from './src/server/realtime/adminGateway.js';
+import { createAdminEventBridge } from './src/server/realtime/adminEventBridge.js';
 import type { RealtimeIdentity } from './src/server/realtime/sessionTickets.js';
 
 dotenv.config();
@@ -106,6 +107,12 @@ async function main() {
     ? createAdminRealtimeGateway(() => ready && !shuttingDown && !isBackupRestoreRunning())
     : null;
   setActiveAdminRealtimeGateway(adminRealtime);
+  const adminBridge = adminRealtime ? createAdminEventBridge(getDbClient(), adminRealtime) : null;
+  const unsubscribeAdminPresence = adminRealtime
+    ? subscribeRealtimePresence(change => adminRealtime.publishChange({
+        type: 'presence.changed', app_id: change.appId,
+      }))
+    : null;
   if (process.env.STORAGE_PROVIDER === 'local') {
     if (!path.isAbsolute(storageRoot)) throw new Error('LOCAL_STORAGE_PATH must be absolute');
     await fs.mkdir(storageRoot, { recursive: true, mode: 0o700 });
@@ -190,7 +197,10 @@ async function main() {
     realtimeLease?.start(() => console.error('[LicenX] Realtime lease maintenance unavailable'));
     realtimePublisher?.start(() => console.error('[LicenX] Realtime event relay unavailable'));
   }
-  if (adminRealtime) adminRealtime.attach(server);
+  if (adminRealtime) {
+    adminRealtime.attach(server);
+    adminBridge?.start(() => console.error('[LicenX] Admin realtime event relay unavailable'));
+  }
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -200,6 +210,8 @@ async function main() {
       catch { process.exit(1); }
     });
     const stopAdminRealtime = () => {
+      unsubscribeAdminPresence?.();
+      adminBridge?.stop();
       setActiveAdminRealtimeGateway(null);
       if (adminRealtime) {
         void adminRealtime.stop()

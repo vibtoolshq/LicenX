@@ -18,10 +18,28 @@ type PresenceEntry = {
 const entries = new Map<string, PresenceEntry>();
 let transportEnabled = false;
 
+// Admin-only notification hook. Never expose hardware identifiers, license keys or socket data.
+export type PresenceChange = { appId: string; deviceId: string };
+type PresenceChangeListener = (change: PresenceChange) => void;
+const changeListeners = new Set<PresenceChangeListener>();
+export function subscribeRealtimePresence(listener: PresenceChangeListener): () => void {
+  changeListeners.add(listener);
+  return () => { changeListeners.delete(listener); };
+}
+function notifyPresenceChange(entry: Pick<PresenceEntry, "appId" | "deviceId">): void {
+  const change = { appId: entry.appId, deviceId: entry.deviceId };
+  for (const listener of changeListeners) {
+    try { listener(change); } catch { /* Admin reporting must never disrupt licensed SDK sockets. */ }
+  }
+}
+
 export function setRealtimePresenceEnabled(enabled: boolean): void {
   transportEnabled = enabled;
   if (!enabled) {
-    for (const entry of entries.values()) entry.cleanup();
+    for (const entry of entries.values()) {
+      entry.cleanup();
+      notifyPresenceChange(entry);
+    }
     entries.clear();
   }
 }
@@ -32,7 +50,9 @@ export function registerRealtimePresence(
   socket: PresenceSocket,
 ): void {
   if (!transportEnabled || socket.readyState !== 1) return;
-  entries.get(clientId)?.cleanup();
+  const prior = entries.get(clientId);
+  prior?.cleanup();
+  if (prior) notifyPresenceChange(prior);
   const onClose = () => unregisterRealtimePresence(clientId);
   const cleanup = () => {
     socket.off("close", onClose);
@@ -47,6 +67,7 @@ export function registerRealtimePresence(
   });
   socket.once("close", onClose);
   socket.once("error", onClose);
+  notifyPresenceChange(identity);
 }
 
 export function unregisterRealtimePresence(clientId: string): void {
@@ -54,6 +75,7 @@ export function unregisterRealtimePresence(clientId: string): void {
   if (!current) return;
   entries.delete(clientId);
   current.cleanup();
+  notifyPresenceChange(current);
 }
 
 /** Called AFTER the authenticated admin unbind has committed. */
