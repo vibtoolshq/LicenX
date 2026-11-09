@@ -36,7 +36,7 @@ try {
     await db.query(
       "INSERT INTO devices (id,license_id,hwid,device_name,first_bound_at,last_ping_at,status) VALUES ($1,$2,$3,$4,$5,$6,'active')",
       ["ci_e2e_device_" + index, license, "ci-e2e-hwid-" + index,
-        "CI Browser Fixture " + index, now - 180000, now + i * 1000],
+        "CI Browser Fixture " + index, now - 180000, now - (total - i) * 1000],
     );
   }
   // Phase-02: bounded >100 record fixtures; dates precede CI live mutations.
