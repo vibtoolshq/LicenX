@@ -208,9 +208,9 @@ try {
     ? (await pageA.locator("main").innerText()).slice(0, 350)
     : "MAIN_NOT_PRESENT";
   await pageA.screenshot({ path: "ci-admin-evidence/audit-trail-navigation.png" });
-  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail"),
+  await poll(async () => (await pageA.locator("main").innerText()).includes("AUDIT LOG TRAIL"),
     "Audit Trail view is mounted");
-  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (180)") &&
+  await poll(async () => (await pageA.locator("main").innerText()).includes("AUDIT LOG TRAIL (180)") &&
     await pageA.locator("main tbody tr").count() === 20, "180 historical logs server-paged");
   const logsLast = pageA.waitForResponse(res => res.url().includes("/api/logs?") &&
     new URL(res.url()).searchParams.get("offset") === "160", { timeout: 12000 });
@@ -224,7 +224,7 @@ try {
   await poll(async () => await pageA.locator("main tbody tr").count() === 20,
     "Logs historical last page");
   await pageA.locator('main select').first().selectOption("reject");
-  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (90)"),
+  await poll(async () => (await pageA.locator("main").innerText()).includes("AUDIT LOG TRAIL (90)"),
     "Logs action filter total");
   check("Logs action filter counts all 90 rejected rows", true);
   await pageA.locator('main select').first().selectOption("all");
@@ -290,7 +290,7 @@ try {
   check("Overview License metric synchronizes across Admin sessions", true);
 
   await navigate(pageA, "Audit Trail");
-  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (180)"),
+  await poll(async () => (await pageA.locator("main").innerText()).includes("AUDIT LOG TRAIL (180)"),
     "audit page mounted before real validation log");
   const deviceCount = a.frames.filter(f => f.type === "resource.changed" && f.resource === "devices").length;
   const validation = await ctxB.request.post(origin + "/api/v1/license/validate", {
@@ -302,7 +302,7 @@ try {
   await poll(() => a.frames.filter(f => f.type === "resource.changed" && f.resource === "devices").length > deviceCount,
     "device INSERT WSS notification", 12000);
   check("device INSERT causes sanitized Admin notification", true);
-  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (181)") &&
+  await poll(async () => (await pageA.locator("main").innerText()).includes("AUDIT LOG TRAIL (181)") &&
     (await pageA.locator("main tbody").innerText()).includes("CI-E2E-LIVE-LICENSE"),
     "Logs page live updates from CI-only validation");
   await poll(async () => (await pageB.locator("main").innerText()).includes("CI-E2E-LIVE-LICENSE"),
