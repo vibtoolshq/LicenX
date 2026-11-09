@@ -19,6 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,6 +35,11 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
           git fetch origin "+refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
           test "$(git rev-parse "${TAG_NAME}^{commit}")" = "$EXPECTED_COMMIT"
+          git fetch origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$EXPECTED_COMMIT" refs/remotes/origin/main || {
+            echo "::error::SDK release tag must target a commit already on main"
+            exit 1
+          }
           python - <<'PY'
           import ast
           import os
@@ -191,3 +197,57 @@ jobs:
           for artifact in dist/licenx/licenx-*.whl dist/licenx/licenx-*.tar.gz; do
             cmp "$artifact" "$verification_dir/$(basename "$artifact")"
           done
+
+      - name: Verify PyPI distribution metadata
+        run: |
+          python -m pip install --disable-pip-version-check twine
+          python -m twine check dist/licenx/licenx-*.whl dist/licenx/licenx-*.tar.gz
+
+      - name: Hand off exact validated distributions to isolated publisher
+        uses: actions/upload-artifact@v4
+        with:
+          name: licenx-pypi-${{ needs.validate-release.outputs.version }}
+          path: |
+            dist/licenx/licenx-*.whl
+            dist/licenx/licenx-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-pypi:
+    name: Publish verified licenx wheel and sdist to PyPI
+    needs: [validate-release, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: licenx-pypi-${{ github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - name: Download only validated release distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: licenx-pypi-${{ needs.validate-release.outputs.version }}
+          path: dist/
+
+      - name: Validate expected artifact count and token availability
+        shell: bash
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PYPI_TOKEN" || {
+            echo "::error::PYPI_API_TOKEN secret is not configured"
+            exit 1
+          }
+          test "$(find dist -maxdepth 1 -type f -name 'licenx-*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name 'licenx-*.tar.gz' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+          echo "PASS: exactly one licenx wheel and one source distribution"
+
+      - name: Publish primary SDK to PyPI with repository secret
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
+          skip-existing: false
