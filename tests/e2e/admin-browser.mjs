@@ -148,6 +148,47 @@ try {
   await pageA.screenshot({ path: "ci-admin-evidence/apps-live-refresh.png" });
   console.log("CI_MUTATION_TO_UI_MS=" + mutationToUiMs + " (one sample; NOT p95)");
 
+  // Phase-01: prove complementary display-field updates and the other
+  // transactionally created resources notify a second real browser session.
+  const newApp = (await created.json()).app;
+  check("CI app creation has an ID", typeof newApp?.id === "string");
+  const appBeforeEdit = a.frames.filter(f => f.type === "resource.changed" && f.resource === "apps").length;
+  const metadataEdit = await ctxB.request.patch(origin + "/api/apps/" + encodeURIComponent(newApp.id), {
+    headers: { origin, "x-csrf-token": csrfB.csrfToken },
+    data: { display_name: "CI E2E Metadata Updated" }
+  });
+  check("metadata-only App PATCH", metadataEdit.status() === 200);
+  await poll(() => a.frames.filter(f => f.type === "resource.changed" && f.resource === "apps").length > appBeforeEdit,
+    "metadata update event", 12000);
+  await poll(async () => (await pageA.locator("main").innerText()).includes("CI E2E Metadata Updated"),
+    "metadata update UI", 12000);
+  check("metadata-only App update reaches other browser", true);
+
+  const licenseCount = a.frames.filter(f => f.type === "resource.changed" && f.resource === "licenses").length;
+  const newLicense = await ctxB.request.post(origin + "/api/licenses", {
+    headers: { origin, "x-csrf-token": csrfB.csrfToken },
+    data: { key: "CI-E2E-LIVE-LICENSE", app_id: newApp.id,
+      device_limit: 2, customer_name: "CI-only Browser Fixture" }
+  });
+  check("CI-only license INSERT HTTP", newLicense.status() === 200);
+  await poll(() => a.frames.filter(f => f.type === "resource.changed" && f.resource === "licenses").length > licenseCount,
+    "license INSERT WSS notification", 12000);
+  check("license INSERT causes sanitized Admin notification", true);
+
+  const deviceCount = a.frames.filter(f => f.type === "resource.changed" && f.resource === "devices").length;
+  const validation = await ctxB.request.post(origin + "/api/v1/license/validate", {
+    data: { license_key: "CI-E2E-LIVE-LICENSE", hwid: "ci-e2e-live-device",
+      app_name: "ci-e2e-live-created", app_version: "1.0.0",
+      device_name: "CI-only Device", os_info: "CI test" }
+  });
+  check("synthetic SDK validation binds new device", validation.status() === 200);
+  await poll(() => a.frames.filter(f => f.type === "resource.changed" && f.resource === "devices").length > deviceCount,
+    "device INSERT WSS notification", 12000);
+  check("device INSERT causes sanitized Admin notification", true);
+  check("Admin WSS contains no license key, HWID or private payload",
+    !a.frames.some(f => JSON.stringify(f).includes("CI-E2E-LIVE-LICENSE") ||
+      JSON.stringify(f).includes("ci-e2e-live-device")));
+
   const logout = await ctxB.request.post(origin + "/api/auth/logout", {
     headers: { origin, "x-csrf-token": csrfB.csrfToken }, data: {} });
   check("logout HTTPS request", logout.status() === 200);
