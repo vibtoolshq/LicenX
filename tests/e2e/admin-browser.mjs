@@ -126,6 +126,91 @@ try {
     (await pageA.locator("main tbody").innerText()).includes("ci-e2e-hwid-00"));
   await pageA.screenshot({ path: "ci-admin-evidence/devices-page8.png" });
 
+  // Phase-02: >100 Apps and Licenses, >150 historical logs; all CI-only.
+  await navigate(pageA, "Applications");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("of 152 applications") &&
+    await pageA.locator("main tbody tr").count() === 20, "152 Apps server-paged");
+  const appsLast = pageA.waitForResponse(res => res.url().includes("/api/apps?") &&
+    new URL(res.url()).searchParams.get("offset") === "140", { timeout: 12000 });
+  await pageA.locator('main button[title="Last Page"]').click();
+  const appsLastResponse = await appsLast;
+  check("Apps last page server offset 140 and total 152",
+    appsLastResponse.status() === 200 &&
+    (await appsLastResponse.json()).total === 152);
+  await poll(async () => await pageA.locator("main tbody tr").count() === 12 &&
+    (await pageA.locator("main tbody").innerText()).includes("CI Browser App 000"),
+    "Apps page 8 of 152 records");
+  check("Apps records beyond initial 100 accessible", true);
+  await pageA.locator('main button[title="First Page"]').click();
+  await poll(async () => (await pageA.locator("main tbody").innerText()).includes("CI E2E Alpha"),
+    "Apps first page");
+  await pageA.locator('main select').first().selectOption("inactive");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("of 30 applications") &&
+    await pageA.locator("main tbody tr").count() === 20, "Apps server status filter");
+  check("Apps server filter covers all 30 inactive fixtures", true);
+  await pageA.locator('main select').first().selectOption("all");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("of 152 applications"),
+    "Apps filter cleared");
+  const appSearchForm = pageA.locator("main form").first();
+  await appSearchForm.locator('input').fill("CI Browser App 123");
+  await appSearchForm.getByRole("button", { name: "Search" }).click();
+  await poll(async () => await pageA.locator("main tbody tr").count() === 1 &&
+    (await pageA.locator("main tbody").innerText()).includes("CI Browser App 123"),
+    "Apps server search beyond 100");
+  check("Apps remote search sees filtered middle record", true);
+  await appSearchForm.locator('input').fill("");
+  await appSearchForm.getByRole("button", { name: "Search" }).click();
+  await poll(async () => (await pageA.locator("main").innerText()).includes("of 152 applications"),
+    "Apps search cleared");
+
+  await navigate(pageA, "License Keys");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("of 152 licenses") &&
+    await pageA.locator("main tbody tr").count() === 20, "152 Licenses server-paged");
+  const licenseLast = pageA.waitForResponse(res => res.url().includes("/api/licenses?") &&
+    new URL(res.url()).searchParams.get("offset") === "140", { timeout: 12000 });
+  await pageA.locator('main button[title="Last Page"]').click();
+  const licenseLastResponse = await licenseLast;
+  const licensePageData = await licenseLastResponse.json();
+  check("Licenses page 8 fetched beyond 100",
+    licenseLastResponse.status() === 200 && licensePageData.total === 152 &&
+    licensePageData.licenses.length === 12 &&
+    licensePageData.licenses.some(x => x.id === "ci_e2e_license_000"));
+  await poll(async () => await pageA.locator("main tbody tr").count() === 12, "Licenses last page");
+  await poll(async () => await pageA.locator('main select option[value="ci_e2e_app_149"]').count() === 1,
+    "License app filter has all 152 Apps");
+  await pageA.locator('main select').first().selectOption("ci_e2e_app_149");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("of 1 licenses") &&
+    await pageA.locator("main tbody tr").count() === 1, "License App-scoped filter");
+  check("License app filter works beyond first 50 Apps", true);
+  await pageA.locator('main select').first().selectOption("all");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("of 152 licenses"),
+    "License App filter cleared");
+  await pageA.locator('main select').nth(2).selectOption("Pro");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("of 38 licenses"),
+    "License tier filter across >100");
+  check("License server tier filter covers all fixtures", true);
+  await pageA.locator('main select').nth(2).selectOption("all");
+
+  await navigate(pageA, "Audit Trail");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (180)") &&
+    await pageA.locator("main tbody tr").count() === 20, "180 historical logs server-paged");
+  const logsLast = pageA.waitForResponse(res => res.url().includes("/api/logs?") &&
+    new URL(res.url()).searchParams.get("offset") === "160", { timeout: 12000 });
+  await pageA.locator('main button[title="Last Page"]').click();
+  const logsLastResponse = await logsLast;
+  const logsLastData = await logsLastResponse.json();
+  check("Logs oldest history beyond initial 150 accessible",
+    logsLastResponse.status() === 200 && logsLastData.total === 180 &&
+    logsLastData.logs.length === 20 &&
+    logsLastData.logs.some(x => x.id === "ci_e2e_log_000"));
+  await poll(async () => await pageA.locator("main tbody tr").count() === 20,
+    "Logs historical last page");
+  await pageA.locator('main select').first().selectOption("reject");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (90)"),
+    "Logs action filter total");
+  check("Logs action filter counts all 90 rejected rows", true);
+  await pageA.locator('main select').first().selectOption("all");
+
   await navigate(pageA, "Applications");
   await poll(async () => (await pageA.locator("main").innerText()).includes("CI E2E Alpha"),
     "apps initial data loaded");
@@ -150,6 +235,9 @@ try {
       f.type === "stream.resync"));
   check("browser maintains singleton Admin socket",
     a.sockets.length === 1 && b.sockets.length === 1);
+  await poll(async () => (await pageB.locator("main .cursor-pointer").filter({ hasText: "Apps" }).first().innerText()).includes("153"),
+    "second browser Overview Apps metric updates after creation");
+  check("Overview Apps metric synchronizes across Admin sessions", true);
   await pageA.screenshot({ path: "ci-admin-evidence/apps-live-refresh.png" });
   console.log("CI_MUTATION_TO_UI_MS=" + mutationToUiMs + " (one sample; NOT p95)");
 
@@ -179,7 +267,13 @@ try {
   await poll(() => a.frames.filter(f => f.type === "resource.changed" && f.resource === "licenses").length > licenseCount,
     "license INSERT WSS notification", 12000);
   check("license INSERT causes sanitized Admin notification", true);
+  await poll(async () => (await pageB.locator("main .cursor-pointer").filter({ hasText: "Total Keys" }).first().innerText()).includes("153"),
+    "second browser Overview License metric updates");
+  check("Overview License metric synchronizes across Admin sessions", true);
 
+  await navigate(pageA, "Audit Trail");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (180)"),
+    "audit page mounted before real validation log");
   const deviceCount = a.frames.filter(f => f.type === "resource.changed" && f.resource === "devices").length;
   const validation = await ctxB.request.post(origin + "/api/v1/license/validate", {
     data: { license_key: "CI-E2E-LIVE-LICENSE", hwid: "ci-e2e-live-device",
@@ -190,6 +284,17 @@ try {
   await poll(() => a.frames.filter(f => f.type === "resource.changed" && f.resource === "devices").length > deviceCount,
     "device INSERT WSS notification", 12000);
   check("device INSERT causes sanitized Admin notification", true);
+  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (181)") &&
+    (await pageA.locator("main tbody").innerText()).includes("CI-E2E-LIVE-LICENSE"),
+    "Logs page live updates from CI-only validation");
+  await poll(async () => (await pageB.locator("main").innerText()).includes("CI-E2E-LIVE-LICENSE"),
+    "Overview recent activity live refresh");
+  check("Logs and Overview synchronize after CI validation", true);
+  await navigate(pageA, "HWID Locks");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("Total Bound: 151") &&
+    (await pageA.locator("main tbody").innerText()).includes("ci-e2e-live-device"),
+    "Devices page reflects new CI-only binding");
+  check("Devices table synchronizes new binding across Admin sessions", true);
   check("Admin WSS contains no license key, HWID or private payload",
     !a.frames.some(f => JSON.stringify(f).includes("CI-E2E-LIVE-LICENSE") ||
       JSON.stringify(f).includes("ci-e2e-live-device")));

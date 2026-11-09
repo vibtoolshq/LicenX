@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Terminal, Trash2, RefreshCw } from 'lucide-react';
 import { adminRealtime, api } from '../services/apiClient';
 import { ValidationLog } from '../types';
@@ -8,6 +8,7 @@ import { useConfirm } from '../context/ConfirmContext';
 export const LogsTab: React.FC = () => {
   const confirm = useConfirm();
   const [logs, setLogs] = useState<ValidationLog[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
@@ -46,11 +47,16 @@ export const LogsTab: React.FC = () => {
       if (logs.length === 0) setLoading(true);
       const res = await api.getLogs({
         action: actionFilter !== 'all' ? actionFilter : undefined,
-        limit: 150,
+        limit: pageSize,
+        offset: (currentPage - 1) * pageSize,
       }, force);
       if (serial !== loadSerial.current) return;
       const logList = res?.logs || (Array.isArray(res) ? (res as ValidationLog[]) : []);
+      const count = typeof res?.total === 'number' ? res.total : (Array.isArray(logList) ? logList.length : 0);
       setLogs(Array.isArray(logList) ? logList : []);
+      setTotal(count);
+      const lastPage = Math.max(1, Math.ceil(count / pageSize));
+      if (currentPage > lastPage) setCurrentPage(lastPage);
       setLastUpdated(Date.now());
       setError('');
     } catch {
@@ -61,10 +67,9 @@ export const LogsTab: React.FC = () => {
   };
 
   useEffect(() => {
-    setCurrentPage(1);
     void loadLogs(true);
     return () => { loadSerial.current++; };
-  }, [actionFilter]);
+  }, [actionFilter, currentPage, pageSize]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -81,14 +86,11 @@ export const LogsTab: React.FC = () => {
           (typeof document === 'undefined' || document.visibilityState !== 'hidden')) void loadLogs(true);
     }, 30_000);
     return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(fallback); };
-  }, [actionFilter]);
+  }, [actionFilter, currentPage, pageSize]);
 
-  const totalPages = Math.max(1, Math.ceil(logs.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
-  const paginatedLogs = useMemo(() => {
-    const start = (safeCurrentPage - 1) * pageSize;
-    return logs.slice(start, start + pageSize);
-  }, [logs, safeCurrentPage, pageSize]);
+  const paginatedLogs = logs; // Server returns the requested bounded history page.
 
   const handleClearLogs = async () => {
     const ok = await confirm('Clear all audit logs permanently?');
@@ -116,14 +118,14 @@ export const LogsTab: React.FC = () => {
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="font-medium text-slate-300 uppercase tracking-wider">
-            Audit Log Trail ({(logs || []).length})
+            Audit Log Trail ({total})
           </span>
           <span className="text-[10px] text-slate-500" role="status" title={lastUpdated ? 'Last HTTP refresh: ' + new Date(lastUpdated).toLocaleString() : 'Awaiting first successful HTTP refresh'}>
             {error || (connectionState === 'CONNECTED' ? 'Live updates' : connectionState === 'AUTH_EXPIRED' ? 'Session expired' : 'HTTP fallback')}{lastUpdated ? ' · ' + new Date(lastUpdated).toLocaleTimeString() : ''}
           </span>
           <select
             value={actionFilter}
-            onChange={(e) => setActionFilter(e.target.value)}
+            onChange={(e) => { setActionFilter(e.target.value); setCurrentPage(1); }}
             className="px-2 py-1 text-xs bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none"
           >
             <option value="all">Action: All</option>
@@ -206,7 +208,7 @@ export const LogsTab: React.FC = () => {
         </div>
         <TablePagination
           currentPage={safeCurrentPage}
-          totalItems={logs.length}
+          totalItems={total}
           pageSize={pageSize}
           onPageChange={setCurrentPage}
           onPageSizeChange={(newSize) => {

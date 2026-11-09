@@ -420,12 +420,14 @@ export const api = {
       if (cached) return cached;
     }
     const data = await request<any>(`/api/logs?${q.toString()}`);
-    let result = { logs: [] as ValidationLog[] };
-    if (Array.isArray(data)) {
-      result = { logs: data };
-    } else {
-      result = { logs: Array.isArray(data?.logs) ? data.logs : [] };
-    }
+    const rows: ValidationLog[] = Array.isArray(data) ? data
+      : (Array.isArray(data?.logs) ? data.logs : []);
+    const result = {
+      logs: rows,
+      total: typeof data?.total === "number" ? data.total : rows.length,
+      limit: typeof data?.limit === "number" ? data.limit : (params.limit || 100),
+      offset: typeof data?.offset === "number" ? data.offset : (params.offset || 0),
+    };
     setCached(key, result);
     return result;
   },

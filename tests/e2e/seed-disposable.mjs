@@ -39,8 +39,35 @@ try {
         "CI Browser Fixture " + index, now - 180000, now + i * 1000],
     );
   }
+  // Phase-02: bounded >100 record fixtures; dates precede CI live mutations.
+  for (let i = 0; i < 150; i++) {
+    const index = String(i).padStart(3, "0");
+    const createdAt = now - (151 - i) * 1000;
+    await db.query(
+      "INSERT INTO apps (id,app_slug,display_name,app_secret,status,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      ["ci_e2e_app_" + index, "ci-browser-app-" + index,
+        "CI Browser App " + index, "ci-only-no-real-key",
+        i % 5 === 0 ? "inactive" : "active", createdAt, createdAt],
+    );
+    await db.query(
+      "INSERT INTO licenses (id,key,app_id,status,tier,device_limit,created_at) VALUES ($1,$2,$3,$4,$5,1,$6)",
+      ["ci_e2e_license_" + index, "CI-BROWSER-LICENSE-" + index,
+        "ci_e2e_app_" + index, i % 7 === 0 ? "suspended" : "active",
+        i % 4 === 0 ? "Pro" : "Standard", createdAt],
+    );
+  }
+  for (let i = 0; i < 180; i++) {
+    const index = String(i).padStart(3, "0");
+    await db.query(
+      "INSERT INTO validation_logs (id,license_key,app_slug,hwid,ip_address,action,status_code,message,created_at) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)",
+      ["ci_e2e_log_" + index, "CI-ONLY-LICENSE-" + index,
+        "ci-e2e-alpha", "ci-only-hwid-" + index, "127.0.0.1",
+        i % 2 === 0 ? "validate" : "reject", i % 2 === 0 ? 200 : 403,
+        "CI Synthetic Audit Log " + index, now - (181 - i) * 1000],
+    );
+  }
   await db.query("COMMIT");
-  console.log(JSON.stringify({ fixture: "ci-only", apps: 2, licenses: 2, devices: total }));
+  console.log(JSON.stringify({ fixture: "ci-only", apps: 152, licenses: 152, devices: total, logs: 180 }));
 } catch (error) {
   await db.query("ROLLBACK").catch(() => {});
   throw error;

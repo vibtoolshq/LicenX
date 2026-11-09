@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo, useRef } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   AppWindow,
   Search,
@@ -76,12 +76,16 @@ export const AppsTab: React.FC = () => {
       const res = await api.getApps({
         search: appliedSearch || undefined,
         status: statusFilter !== 'all' ? statusFilter : undefined,
-        limit: 100,
+        limit: pageSize,
+        offset: (currentPage - 1) * pageSize,
       }, force);
       if (serial !== loadSerial.current) return;
       const appList = res?.apps || (Array.isArray(res) ? (res as AppItem[]) : []);
+      const count = typeof res?.total === 'number' ? res.total : (Array.isArray(appList) ? appList.length : 0);
       setApps(Array.isArray(appList) ? appList : []);
-      setTotal(typeof res?.total === 'number' ? res.total : (Array.isArray(appList) ? appList.length : 0));
+      setTotal(count);
+      const lastPage = Math.max(1, Math.ceil(count / pageSize));
+      if (currentPage > lastPage) setCurrentPage(lastPage);
     } catch {
       // Keep existing actions available when a network refresh fails.
     } finally {
@@ -90,10 +94,9 @@ export const AppsTab: React.FC = () => {
   };
 
   useEffect(() => {
-    setCurrentPage(1);
     void loadApps(true);
     return () => { loadSerial.current++; };
-  }, [statusFilter, appliedSearch]);
+  }, [statusFilter, appliedSearch, currentPage, pageSize]);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -111,7 +114,7 @@ export const AppsTab: React.FC = () => {
           (typeof document === 'undefined' || document.visibilityState !== 'hidden')) void loadApps(true);
     }, 30_000);
     return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(fallback); };
-  }, [statusFilter, appliedSearch]);
+  }, [statusFilter, appliedSearch, currentPage, pageSize]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -121,12 +124,9 @@ export const AppsTab: React.FC = () => {
     else void loadApps(true);
   };
 
-  const totalPages = Math.max(1, Math.ceil(apps.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
-  const paginatedApps = useMemo(() => {
-    const start = (safeCurrentPage - 1) * pageSize;
-    return apps.slice(start, start + pageSize);
-  }, [apps, safeCurrentPage, pageSize]);
+  const paginatedApps = apps; // API returns exactly the requested server page.
 
   const isAllPageSelected = paginatedApps.length > 0 && paginatedApps.every((a) => selectedIds.includes(a.id));
 
@@ -220,7 +220,7 @@ export const AppsTab: React.FC = () => {
         <div className="flex items-center gap-2">
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            onChange={(e) => { setStatusFilter(e.target.value); setCurrentPage(1); }}
             className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none"
           >
             <option value="all">Status: All</option>
@@ -403,7 +403,7 @@ export const AppsTab: React.FC = () => {
       </div>
       <TablePagination
         currentPage={safeCurrentPage}
-        totalItems={apps.length}
+        totalItems={total}
         pageSize={pageSize}
         onPageChange={setCurrentPage}
         onPageSizeChange={(newSize) => {

@@ -43,6 +43,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
   const [search, setSearch] = useState('');
   const [appliedSearch, setAppliedSearch] = useState('');
   const loadSerial = useRef(0);
+  const appOptionsSerial = useRef(0);
   const [statusFilter, setStatusFilter] = useState(() => {
     try {
       return sessionStorage.getItem('vcon_licenses_status_filter') || 'all';
@@ -163,26 +164,43 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
     return licenses.find((l) => l.id === openMenuId) || null;
   }, [openMenuId, licenses]);
 
+  const loadAppOptions = async (force = false) => {
+    const serial = ++appOptionsSerial.current;
+    try {
+      const allApps: AppItem[] = [];
+      let offset = 0;
+      while (true) {
+        const res = await api.getApps({ limit: 100, offset }, force);
+        const items: AppItem[] = Array.isArray(res?.apps) ? res.apps : [];
+        allApps.push(...items);
+        offset += items.length;
+        if (items.length === 0 || offset >= res.total) break;
+      }
+      if (serial === appOptionsSerial.current) setApps(allApps);
+    } catch {
+      // Preserve existing filter choices if the App lookup is temporarily unavailable.
+    }
+  };
+
   const loadLicenses = async (force = false) => {
     const serial = ++loadSerial.current;
     try {
       if (licenses.length === 0) setLoading(true);
-      const [licRes, appRes] = await Promise.all([
-        api.getLicenses({
-          search: appliedSearch || undefined,
-          status: statusFilter !== 'all' ? statusFilter : undefined,
-          tier: tierFilter !== 'all' ? tierFilter : undefined,
-          app_id: appFilter !== 'all' ? appFilter : undefined,
-          limit: 100,
-        }, force),
-        api.getApps({}, force),
-      ]);
+      const licRes = await api.getLicenses({
+        search: appliedSearch || undefined,
+        status: statusFilter !== 'all' ? statusFilter : undefined,
+        tier: tierFilter !== 'all' ? tierFilter : undefined,
+        app_id: appFilter !== 'all' ? appFilter : undefined,
+        limit: pageSize,
+        offset: (currentPage - 1) * pageSize,
+      }, force);
       if (serial !== loadSerial.current) return;
       const licList = licRes?.licenses || (Array.isArray(licRes) ? (licRes as License[]) : []);
-      const appList = appRes?.apps || (Array.isArray(appRes) ? (appRes as AppItem[]) : []);
+      const count = typeof licRes?.total === 'number' ? licRes.total : (Array.isArray(licList) ? licList.length : 0);
       setLicenses(Array.isArray(licList) ? licList : []);
-      setTotal(typeof licRes?.total === 'number' ? licRes.total : (Array.isArray(licList) ? licList.length : 0));
-      setApps(Array.isArray(appList) ? appList : []);
+      setTotal(count);
+      const lastPage = Math.max(1, Math.ceil(count / pageSize));
+      if (currentPage > lastPage) setCurrentPage(lastPage);
     } catch {
       // Existing license edit/actions remain available if refresh fails.
     } finally {
@@ -191,10 +209,14 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
   };
 
   useEffect(() => {
-    setCurrentPage(1);
     void loadLicenses(true);
     return () => { loadSerial.current++; };
-  }, [statusFilter, tierFilter, appFilter, appliedSearch]);
+  }, [statusFilter, tierFilter, appFilter, appliedSearch, currentPage, pageSize]);
+
+  useEffect(() => {
+    void loadAppOptions(true);
+    return () => { appOptionsSerial.current++; };
+  }, []);
 
   useEffect(() => {
     let timer: ReturnType<typeof setTimeout> | undefined;
@@ -207,13 +229,20 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
         if (timer) clearTimeout(timer);
         timer = setTimeout(() => { void loadLicenses(true); }, 200);
       }
+      if (notice.type === 'resync' || notice.type === 'change' &&
+          notice.change.type === 'resource.changed' && notice.change.resource === 'apps') {
+        void loadAppOptions(true);
+      }
     });
     const fallback = setInterval(() => {
       if (!['CONNECTED', 'AUTH_EXPIRED'].includes(adminRealtime.getStatus().state) &&
-          (typeof document === 'undefined' || document.visibilityState !== 'hidden')) void loadLicenses(true);
+          (typeof document === 'undefined' || document.visibilityState !== 'hidden')) {
+        void loadLicenses(true);
+        void loadAppOptions(true);
+      }
     }, 30_000);
     return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(fallback); };
-  }, [statusFilter, tierFilter, appFilter, appliedSearch]);
+  }, [statusFilter, tierFilter, appFilter, appliedSearch, currentPage, pageSize]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -246,12 +275,9 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
   };
 
   // Pagination slicing & calculations
-  const totalPages = Math.max(1, Math.ceil(licenses.length / pageSize));
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
-  const paginatedLicenses = useMemo(() => {
-    const start = (safeCurrentPage - 1) * pageSize;
-    return licenses.slice(start, start + pageSize);
-  }, [licenses, safeCurrentPage, pageSize]);
+  const paginatedLicenses = licenses; // Server page; do not slice an incomplete first 100.
 
   const isAllPageSelected = paginatedLicenses.length > 0 && paginatedLicenses.every((l) => selectedIds.includes(l.id));
 
@@ -371,10 +397,32 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
     }
   };
 
-  const handleExportSelectedCsv = () => {
+  const handleExportSelectedCsv = async () => {
+    // Export the complete filtered result (or selected rows across pages),
+    // never silently truncate the CSV to the currently visible server page.
+    let allLicenses: License[] = [];
+    try {
+      let offset = 0;
+      while (true) {
+        const response = await api.getLicenses({
+          search: appliedSearch || undefined,
+          status: statusFilter !== 'all' ? statusFilter : undefined,
+          tier: tierFilter !== 'all' ? tierFilter : undefined,
+          app_id: appFilter !== 'all' ? appFilter : undefined,
+          limit: 100, offset,
+        }, true);
+        const batch: License[] = Array.isArray(response?.licenses) ? response.licenses : [];
+        allLicenses.push(...batch);
+        offset += batch.length;
+        if (batch.length === 0 || offset >= response.total) break;
+      }
+    } catch {
+      alert('License export unavailable — please retry.');
+      return;
+    }
     const target = selectedIds.length > 0
-      ? licenses.filter((l) => selectedIds.includes(l.id))
-      : licenses;
+      ? allLicenses.filter((l) => selectedIds.includes(l.id))
+      : allLicenses;
 
     let csv = 'key,pin,status,tier,app,device_limit,validity_type,expires_at,customer,notes\n';
     target.forEach((l) => {
@@ -388,6 +436,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
     a.href = url;
     a.download = `vcon_licenses_export_${Date.now()}.csv`;
     a.click();
+    URL.revokeObjectURL(url);
   };
 
   const formatExpiry = (license: License) => {
@@ -442,7 +491,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
           {/* App Scope Filter */}
           <select
             value={appFilter}
-            onChange={(e) => setAppFilter(e.target.value)}
+            onChange={(e) => { setAppFilter(e.target.value); setCurrentPage(1); }}
             className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none max-w-[140px] truncate"
           >
             <option value="all">App: All</option>
@@ -456,7 +505,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
 
           <select
             value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
+            onChange={(e) => { setStatusFilter(e.target.value); setCurrentPage(1); }}
             className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none"
           >
             <option value="all">Status: All</option>
@@ -468,7 +517,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
 
           <select
             value={tierFilter}
-            onChange={(e) => setTierFilter(e.target.value)}
+            onChange={(e) => { setTierFilter(e.target.value); setCurrentPage(1); }}
             className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none"
           >
             <option value="all">Tier: All</option>
@@ -736,7 +785,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
       </div>
       <TablePagination
         currentPage={safeCurrentPage}
-        totalItems={licenses.length}
+        totalItems={total}
         pageSize={pageSize}
         onPageChange={setCurrentPage}
         onPageSizeChange={(newSize) => {

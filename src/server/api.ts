@@ -578,7 +578,7 @@ apiRouter.get(
         args.push(status);
       }
 
-      query += ` ORDER BY a.created_at DESC LIMIT ? OFFSET ?`;
+      query += ` ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?`;
       args.push(Number(limit), Number(offset));
 
       const result = await db.execute({ sql: query, args });
@@ -1000,7 +1000,7 @@ apiRouter.get(
         }
       }
 
-      query += ` ORDER BY l.created_at DESC LIMIT ? OFFSET ?`;
+      query += ` ORDER BY l.created_at DESC, l.id DESC LIMIT ? OFFSET ?`;
       args.push(Number(limit), Number(offset));
 
       const result = await db.execute({ sql: query, args });
@@ -2626,21 +2626,37 @@ apiRouter.get(
     try {
       const db = getDbClient();
       const { limit = "100", offset = "0", action } = req.query;
+      // Bounded historical pagination; never modify retention or delete records.
+      const parsedLimit = Number(limit);
+      const parsedOffset = Number(offset);
+      const pageLimit = Number.isSafeInteger(parsedLimit)
+        ? Math.min(100, Math.max(1, parsedLimit)) : 100;
+      const pageOffset = Number.isSafeInteger(parsedOffset) && parsedOffset >= 0
+        ? parsedOffset : 0;
 
-      let query = "SELECT * FROM validation_logs WHERE 1=1";
-      const args: any[] = [];
-
+      let predicate = " WHERE 1=1";
+      const filterArgs: any[] = [];
       if (action && typeof action === "string" && action !== "all") {
-        query += " AND action = ?";
-        args.push(action);
+        predicate += " AND action = ?";
+        filterArgs.push(action);
       }
-
-      query += " ORDER BY created_at DESC LIMIT ? OFFSET ?";
-      args.push(Number(limit), Number(offset));
-
-      const result = await db.execute({ sql: query, args });
-
-      res.json({ logs: result.rows });
+      const [result, countResult] = await Promise.all([
+        db.execute({
+          sql: "SELECT * FROM validation_logs" + predicate +
+            " ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?",
+          args: [...filterArgs, pageLimit, pageOffset],
+        }),
+        db.execute({
+          sql: "SELECT COUNT(*) AS total FROM validation_logs" + predicate,
+          args: filterArgs,
+        }),
+      ]);
+      res.json({
+        logs: result.rows,
+        total: Number(countResult.rows[0]?.total || 0),
+        limit: pageLimit,
+        offset: pageOffset,
+      });
     } catch (error: any) {
       res.status(500).json({ error: SAFE_SERVER_ERROR });
     }
