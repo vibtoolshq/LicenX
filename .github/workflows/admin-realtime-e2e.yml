@@ -1,0 +1,146 @@
+name: Admin Realtime disposable browser acceptance
+
+# Explicit manual invocation only. Never deploy, SSH, or address production/Coolify.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/admin-realtime-e2e.yml'
+      - 'tests/e2e/**'
+      - 'server.ts'
+      - 'src/server/realtime/**'
+      - 'src/services/adminRealtime.ts'
+      - 'compose.yaml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: admin-realtime-browser-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  browser-acceptance:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    steps:
+      - name: Check out reviewed source (no push credentials)
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Node.js for ephemeral Chromium test
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install pinned browser runner (no package manifest changes)
+        run: |
+          set -euo pipefail
+          npm ci --no-audit --no-fund
+          npm install --no-save --package-lock=false playwright@1.56.1
+          npx playwright install --with-deps chromium
+
+      - name: Prepare isolated GitHub-runner-only configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          password="$(openssl rand -hex 24)"
+          owner="$(openssl rand -hex 32)"
+          admin_password="$(openssl rand -hex 20)"
+          echo "::add-mask::${password}"
+          echo "::add-mask::${owner}"
+          echo "::add-mask::${admin_password}"
+          {
+            echo "COMPOSE_PROJECT_NAME=licenx_admin_ci_${GITHUB_RUN_ID}"
+            echo "DOMAIN=localhost"
+            echo "ACME_EMAIL=ci@example.invalid"
+            echo "POSTGRES_DB=licenx_ci"
+            echo "POSTGRES_USER=licenx_ci"
+            echo "POSTGRES_PASSWORD=${password}"
+            echo "DATABASE_URL=postgresql://licenx_ci:${password}@postgres:5432/licenx_ci?sslmode=disable"
+            echo "OWNER_CODE=${owner}"
+            echo "OWNER_SETUP_CODE_SHA256=$(printf '%s' "$owner" | sha256sum | cut -d' ' -f1)"
+            echo "CI_ADMIN_PASSWORD=${admin_password}"
+            echo "LICENX_ADMIN_E2E_CI=1"
+            echo "LICENX_ADMIN_REALTIME_ENABLED=true"
+            echo "LICENX_REALTIME_TRANSPORT_ENABLED=true"
+          } >> "$GITHUB_ENV"
+          echo "CI_ONLY=true; production hostname, secrets and VPS not used"
+
+      - name: Build disposable PostgreSQL, LicenX and localhost HTTPS
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$DOMAIN" = "localhost"
+          test "$COMPOSE_PROJECT_NAME" = "licenx_admin_ci_${GITHUB_RUN_ID}"
+          docker compose --profile standalone-https config --quiet
+          docker compose --profile standalone-https up --detach --build --wait --wait-timeout 180
+          curl --insecure --silent --show-error --fail --retry 10 --retry-delay 1 --retry-all-errors https://localhost/api/ready > /dev/null
+          docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt "$RUNNER_TEMP/licenx-ci-local-ca.pem"
+          NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/licenx-ci-local-ca.pem" node --input-type=module -e '
+            const r = await fetch("https://localhost/api/ready");
+            if (!r.ok || (await r.json()).status !== "ready") process.exit(1);
+            console.log("PASS: HTTPS through isolated localhost CA without curl -k");
+          '
+          docker compose exec -T app sh -ec '
+            test "$LICENX_ADMIN_REALTIME_ENABLED" = true
+            test "$LICENX_REALTIME_TRANSPORT_ENABLED" = true
+          '
+
+      - name: Create 150 synthetic devices on CI PostgreSQL only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$COMPOSE_PROJECT_NAME" = "licenx_admin_ci_${GITHUB_RUN_ID}"
+          docker compose exec -T -e GITHUB_ACTIONS=true -e LICENX_ADMIN_E2E_CI=1 \
+            app node --input-type=module - < tests/e2e/seed-disposable.mjs
+
+      - name: Authenticate with real Chromium and exercise Admin WSS/UI
+        shell: bash
+        run: |
+          set -euo pipefail
+          node tests/e2e/admin-browser.mjs
+
+      - name: Rehearse Admin-only gate OFF (licensed SDK gate stays ON)
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$COMPOSE_PROJECT_NAME" = "licenx_admin_ci_${GITHUB_RUN_ID}"
+          LICENX_ADMIN_REALTIME_ENABLED=false \
+            docker compose --profile standalone-https up --detach --no-build --no-deps \
+            --force-recreate --wait --wait-timeout 90 app
+          docker compose exec -T app sh -ec '
+            test "$LICENX_ADMIN_REALTIME_ENABLED" = false
+            test "$LICENX_REALTIME_TRANSPORT_ENABLED" = true
+          '
+          NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/licenx-ci-local-ca.pem" node --input-type=module -e '
+            const r = await fetch("https://localhost/api/ready");
+            if (r.status !== 200) process.exit(1);
+            console.log("PASS: CI Admin gate OFF; SDK transport configuration preserved");
+          '
+
+      - name: Upload synthetic-only browser evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: admin-realtime-disposable-browser-${{ github.run_id }}
+          path: ci-admin-evidence/
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Show sanitized resource status on failure
+        if: failure()
+        run: docker compose --profile standalone-https ps || true
+
+      - name: Delete ONLY disposable GitHub-runner containers and volumes
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${COMPOSE_PROJECT_NAME:-}" == "licenx_admin_ci_${GITHUB_RUN_ID}" ]]; then
+            docker compose --profile standalone-https down --volumes --remove-orphans || true
+          else
+            echo "Cleanup skipped: CI project identity guard failed"
+          fi
