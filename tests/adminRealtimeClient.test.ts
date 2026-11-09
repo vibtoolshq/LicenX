@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import {
   adminRealtimeSocketUrl,
@@ -240,4 +241,53 @@ test("ADMIN-RT-03: stale snapshot and malformed event never grant Connected fres
   assert.equal(adminRealtimeSocketUrl("http://localhost:3000"), "ws://localhost:3000/api/admin/realtime");
   assert.throws(() => adminRealtimeSocketUrl("file:///etc/passwd"), /HTTP/);
   client.stop();
+});
+
+
+test("ADMIN-RT-05: six existing UI components retain controls and subscribe to scoped HTTP refresh", () => {
+  // Source contract only: this is NOT a substitute for browser DOM / production WSS testing.
+  const names = [
+    "AppsTab", "LicensesTab", "DevicesTab",
+    "EditAppModal", "LogsTab", "OverviewTab",
+  ] as const;
+  const sources = Object.fromEntries(names.map(name => [
+    name, readFileSync(new URL("../src/components/" + name + ".tsx", import.meta.url), "utf8"),
+  ])) as Record<(typeof names)[number], string>;
+
+  for (const name of names) {
+    const source = sources[name];
+    assert.match(source, /adminRealtime\.subscribe\(/, name + " must listen to shared Admin client");
+    assert.match(source, /unsubscribe\(\)/, name + " must detach on unmount");
+    assert.match(source, /clearTimeout\(timer\)/, name + " must cancel pending refetch");
+    assert.match(source, /clearInterval\(/, name + " must cancel page-local fallback");
+    assert.match(source, /api\.get(?:Apps|Licenses|Devices|RealtimePresence|Logs|Stats)\(/,
+      name + " must read authoritative authenticated HTTP API");
+  }
+  assert.match(sources.AppsTab, /appliedSearch/, "App search is applied only on submission");
+  assert.match(sources.AppsTab, /selectedIds/, "App selections remain intact");
+  assert.match(sources.LicensesTab, /notice\.change\.app_id === appFilter/,
+    "App-filtered license refresh is scoped");
+  assert.match(sources.LicensesTab, /editingLicense/, "Edit state remains intact");
+  assert.match(sources.EditAppModal, /notice\.change\.app_id === app\.id/,
+    "Edit modal only refetches matching App presence");
+  assert.match(sources.EditAppModal, /License Session Policy/, "Existing policy controls retained");
+  assert.match(sources.EditAppModal, /presence\.observedAt/, "Timestamp explicitly displayed");
+
+  const devices = sources.DevicesTab;
+  assert.match(devices, /offset: \(currentPage - 1\) \* pageSize/,
+    "Device offset must exceed the former first-100 cap");
+  assert.match(devices, /limit: pageSize/, "Device page is a bounded API query");
+  assert.match(devices, /totalItems=\{total\}/, "Page count must use server total");
+  assert.match(devices, /pageDeviceIds/, "Presence is requested for current page IDs only");
+  assert.match(devices, /api\.getRealtimePresence\(\{ deviceIds:/);
+  assert.match(devices, /last_ping_at/, "HTTP heartbeat timestamp retained");
+  assert.match(devices, /Connected/);
+  assert.match(devices, /No WS/);
+  assert.match(devices, /Unknown/, "Unavailable cannot be mislabeled disconnected");
+  assert.match(devices, /Last Heartbeat/, "Existing table columns retained");
+
+  assert.match(sources.LogsTab, /Log data stale/, "Log errors must not be silently shown as fresh");
+  assert.match(sources.LogsTab, /lastUpdated/, "Log freshness timestamp");
+  assert.match(sources.OverviewTab, /Recent activity unavailable/, "Overview stale report");
+  assert.match(sources.OverviewTab, /Live Client Validation Stream/, "Existing layout kept");
 });

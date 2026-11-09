@@ -141,7 +141,27 @@ test("ADMIN-RT-01 P01: one-use Admin bootstrap, secure WS, isolation and session
       Origin: origin, Cookie: newCookie + "; " + (again.headers.get("set-cookie") || "").split(";")[0],
     });
     assert.equal(next.status, 101);
-    const rotatedClose = new Promise<number>(resolve => next.socket!.once("close", resolve));
+    // Two concurrent, separately authenticated Admin browser sessions remain isolated.
+    const otherToken = createSessionToken({
+      username: "owner", exp: Math.floor(Date.now() / 1000) + 1802,
+    }, secret);
+    const otherProof = await issue({
+      ...requestHeaders, Cookie: "vcon_admin_session=" + otherToken + "; " + csrfCookie,
+    });
+    assert.equal(otherProof.status, 200);
+    const other = await openSocket(socketUrl, {
+      Origin: origin,
+      Cookie: "vcon_admin_session=" + otherToken + "; " +
+        (otherProof.headers.get("set-cookie") || "").split(";")[0],
+    });
+    assert.equal(other.status, 101);
+    assert.ok(other.socket);
+    const firstClose = new Promise<number>(resolve => next.socket!.once("close", resolve));
+    gateway.revokeSession(newToken);
+    assert.equal(await firstClose, 4003, "revocation closes only matching session");
+    assert.equal(other.socket!.readyState, WebSocket.OPEN,
+      "another authenticated Admin socket must not be revoked");
+    const rotatedClose = new Promise<number>(resolve => other.socket!.once("close", resolve));
     await db.execute({ sql: "UPDATE admin_config SET jwt_secret = ? WHERE id = ?", args: ["rotated-test-secret", "rt-p01"] });
     await gateway.sweepSessions();
     assert.equal(await rotatedClose, 4003, "rotated Admin session must close");

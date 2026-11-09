@@ -125,6 +125,48 @@ test("WS-04: authenticated scoped presence, server policy, and post-commit force
     assert.equal(after.boundActive,1);
     const event=await db.execute("SELECT COUNT(*) AS n FROM realtime_events WHERE event_type='device.deleted' AND device_id='dev-one'");
     assert.ok(Number(event.rows[0].n)>=1,"existing committed event journal covers unbind");
+    // Phase-05: exercise the REAL authorized HTTP paging contract beyond the
+    // old first-100 React slice. This is disposable in-memory fixture data.
+    const fixtureCount = 128;
+    const tuples = Array.from({ length: fixtureCount }, () => "(?,?,?,?,?,'active')").join(",");
+    const fixtureArgs: Array<string | number> = [];
+    for (let i = 0; i < fixtureCount; i++) {
+      const suffix = String(i).padStart(3, "0");
+      fixtureArgs.push("page-"+suffix, "lic-two", "page-hwid-"+suffix, now, now+i+1);
+    }
+    await db.execute({
+      sql: "INSERT INTO devices (id,license_id,hwid,first_bound_at,last_ping_at,status) VALUES "+tuples,
+      args: fixtureArgs,
+    });
+    const deniedPage = await fetch(base+"/api/devices?search=page-hwid-&limit=20&offset=100");
+    assert.equal(deniedPage.status,401, "device pages remain Admin-auth-only");
+    const pageResponse = await fetch(base+"/api/devices?search=page-hwid-&limit=20&offset=100", {
+      headers:{authorization:auth},
+    });
+    assert.equal(pageResponse.status,200);
+    const page = await pageResponse.json() as {
+      total:number; devices:Array<{id:string;hwid:string;last_ping_at:number}>;
+    };
+    assert.equal(page.total,fixtureCount, "total reflects ALL matching DB records");
+    assert.equal(page.devices.length,20, "offset is honored beyond the old 100-row cap");
+    assert.equal(new Set(page.devices.map(x => x.id)).size,20, "no duplicate page devices");
+    assert.ok(page.devices.every(x => x.hwid.startsWith("page-hwid-")));
+    assert.ok(page.devices.every(x => x.last_ping_at > now), "heartbeat returned from authoritative DB rows");
+    const pagePresence = await fetch(
+      base+"/api/realtime/presence?device_ids="+page.devices.map(x => x.id).join(","),
+      {headers:{authorization:auth}},
+    );
+    assert.equal(pagePresence.status,200);
+    const onlyVisible = await pagePresence.json() as {connectedDeviceIds:string[];connectedNow:number;boundActive:number};
+    assert.deepEqual(onlyVisible.connectedDeviceIds,[], "page-scoped sockets cannot inherit another page's WS state");
+    assert.ok(onlyVisible.boundActive >= fixtureCount, "bound is distinct from WS connected");
+    assert.equal(onlyVisible.connectedNow,1, "remaining socket belongs to a different device");
+    const empty = await fetch(base+"/api/devices?search=page-hwid-&limit=20&offset=140",{
+      headers:{authorization:auth},
+    });
+    assert.equal(empty.status,200);
+    assert.equal(((await empty.json()) as {devices:unknown[]}).devices.length,0);
+
     // Repeated closure never terminates a different app/device.
     assert.equal(closeRealtimeDeviceSessions("dev-one"),0);
   } finally {
