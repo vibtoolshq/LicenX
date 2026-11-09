@@ -191,7 +191,15 @@ try {
   check("License server tier filter covers all fixtures", true);
   await pageA.locator('main select').nth(2).selectOption("all");
 
+  // Isolate HTTP contract from browser rendering; never mask API errors.
+  const historyResponse = await ctxA.request.get(origin + "/api/logs?limit=20");
+  check("Logs authenticated history HTTP 200", historyResponse.status() === 200);
+  const historyPage = await historyResponse.json();
+  check("Logs history API returns total 180 and 20 bounded rows",
+    historyPage.total === 180 && historyPage.logs?.length === 20);
   await navigate(pageA, "Audit Trail");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail"),
+    "Audit Trail view is mounted");
   await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (180)") &&
     await pageA.locator("main tbody tr").count() === 20, "180 historical logs server-paged");
   const logsLast = pageA.waitForResponse(res => res.url().includes("/api/logs?") &&
