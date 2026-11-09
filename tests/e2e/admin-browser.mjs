@@ -130,6 +130,7 @@ try {
   await poll(async () => (await pageA.locator("main").innerText()).includes("CI E2E Alpha"),
     "apps initial data loaded");
   const csrfB = await (await ctxB.request.get(origin + "/api/auth/csrf")).json();
+  const beforeCreationFrames = a.frames.length;
   const start = performance.now();
   const created = await ctxB.request.post(origin + "/api/apps", {
     headers: { origin, "x-csrf-token": csrfB.csrfToken },
@@ -141,8 +142,12 @@ try {
     .includes("CI E2E Live Created App"), "Admin WSS-triggered UI refresh", 20000);
   const mutationToUiMs = Math.round(performance.now() - start);
   evidence.ciMutationToUiMs = mutationToUiMs;
+  // Either an App invalidation or a cursor-boundary resync is valid, but
+  // require the frame to arrive after the App POST began.
   check("live change reached other browser without reload",
-    a.frames.some(f => f.type === "resource.changed" && f.resource === "apps"));
+    a.frames.slice(beforeCreationFrames).some(f =>
+      (f.type === "resource.changed" && f.resource === "apps") ||
+      f.type === "stream.resync"));
   check("browser maintains singleton Admin socket",
     a.sockets.length === 1 && b.sockets.length === 1);
   await pageA.screenshot({ path: "ci-admin-evidence/apps-live-refresh.png" });
