@@ -1,6 +1,7 @@
 # LicenX Python SDK — Public API Reference
 
-**Primary supported package:** [`licenx`](../licenx/README.md), version 1.2.3 at the tracked manifest. `SDK/x_license_python` remains reference-only. No API behavior changed by this document.
+**Single supported Python SDK:** `licenx`, using literal app-root `licenx.config.py` and a verified wheel or primary source kit.
+
 
 ```python
 from licenx import SDKConfig, XLicenseClient, LoginResult

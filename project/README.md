@@ -37,7 +37,7 @@ finally:
 
 `licenx.config.py`-তে trusted `public_key_pem`, HTTPS `server_url`, app identifier এবং **actual app_version** দিতে হবে। `min_version` সার্ভারের policy, client version নয়। SDK license key persist করে না; online login ও signed-response verification প্রয়োজন। [English guide](../SDK/client/python/docs/GUIDE_EN.md) · [বাংলা guide](../SDK/client/python/docs/GUIDE_BN.md)।
 
-**Reference only:** `SDK/x_license_python/` একটি compatibility/reference SDK, primary নয়। বর্তমানে downloadable `x_license_python.zip` এখনো ওই reference tree থেকে build হয়; নতুন app-এর জন্য primary package wheel/source install ব্যবহার করুন।
+**Python SDK:** একটি supported SDK হলো `licenx` (`SDK/client/python/licenx/`)। Admin download-এ `licenx-python-sdk.zip` primary source kit পাওয়া যায়।
 
 ## License and device lifecycle
 
@@ -62,7 +62,7 @@ finally:
 | Primary login/session | `SDK/client/python/licenx/login.py`, `storage.py`, `logout.py` |
 | Primary config/HWID/crypto transport | `SDK/client/python/licenx/config.py`, `device.py`, `server.py` |
 | Primary SDK guide | `SDK/client/python/docs/` |
-| Reference-only compatibility SDK | `SDK/x_license_python/` |
+| Primary SDK download | `public/licenx-python-sdk.zip` |
 
 ## Developer safeguards
 

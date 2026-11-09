@@ -19,6 +19,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           ref: ${{ github.sha }}
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -34,6 +35,11 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
           git fetch origin "+refs/tags/${TAG_NAME}:refs/tags/${TAG_NAME}"
           test "$(git rev-parse "${TAG_NAME}^{commit}")" = "$EXPECTED_COMMIT"
+          git fetch origin main:refs/remotes/origin/main
+          git merge-base --is-ancestor "$EXPECTED_COMMIT" refs/remotes/origin/main || {
+            echo "::error::SDK release tag must target a commit already on main"
+            exit 1
+          }
           python - <<'PY'
           import ast
           import os
@@ -49,30 +55,13 @@ jobs:
           if match is None:
               raise SystemExit(f"Invalid Python SDK release tag: {tag_name}")
 
-          module = ast.parse(
-              Path("SDK/x_license_python/__init__.py").read_text(encoding="utf-8")
-          )
-          sdk_version = next(
-              ast.literal_eval(statement.value)
-              for statement in module.body
-              if isinstance(statement, ast.Assign)
-              and any(
-                  isinstance(target, ast.Name) and target.id == "__version__"
-                  for target in statement.targets
-              )
-          )
-          if match.group(1) != sdk_version:
-              raise SystemExit(
-                  f"Tag version {match.group(1)} does not match SDK version {sdk_version}"
-              )
-
           package_project = tomllib.loads(
               Path("SDK/client/python/licenx/pyproject.toml").read_text(encoding="utf-8")
           )
-          package_version = package_project["project"]["version"]
-          if match.group(1) != package_version:
+          sdk_version = package_project["project"]["version"]
+          if match.group(1) != sdk_version:
               raise SystemExit(
-                  f"Tag version {match.group(1)} does not match licenx package version {package_version}"
+                  f"Tag version {match.group(1)} does not match licenx package version {sdk_version}"
               )
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
@@ -102,39 +91,15 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: Install SDK test dependencies
-        run: python -m pip install -r SDK/x_license_python/requirements.txt
-
-      - name: Run SDK unit tests
-        env:
-          PYTHONPATH: SDK
-        run: python -m unittest discover -s SDK/x_license_python/test -p 'test_*.py'
-
-  licenx-tests:
-    needs: validate-release
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - name: Check out tagged source
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install licenx test dependencies
         run: python -m pip install -r SDK/client/python/licenx/requirements.txt
 
-      - name: Run licenx package tests
+      - name: Run SDK unit tests
         env:
           PYTHONPATH: SDK/client/python
         run: python -m unittest discover -s SDK/client/python/licenx/test -p 'test_*.py'
 
   release:
-    needs: [validate-release, sdk-tests, licenx-tests]
+    needs: [validate-release, sdk-tests]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -182,7 +147,7 @@ jobs:
       - name: Generate SDK archive checksum
         run: |
           cd public
-          sha256sum x_license_python.zip > x_license_python.zip.sha256
+          sha256sum licenx-python-sdk.zip > licenx-python-sdk.zip.sha256
 
       - name: Create release and upload SDK archive
         env:
@@ -202,8 +167,8 @@ jobs:
           fi
 
           gh release upload "$TAG_NAME" \
-            public/x_license_python.zip \
-            public/x_license_python.zip.sha256 \
+            public/licenx-python-sdk.zip \
+            public/licenx-python-sdk.zip.sha256 \
             dist/licenx/licenx-*.whl \
             dist/licenx/licenx-*.tar.gz \
             dist/licenx/licenx-SHA256SUMS \
@@ -217,18 +182,72 @@ jobs:
           verification_dir="$RUNNER_TEMP/release-verification"
           mkdir -p "$verification_dir"
           gh release download "$TAG_NAME" \
-            --pattern x_license_python.zip \
-            --pattern x_license_python.zip.sha256 \
+            --pattern licenx-python-sdk.zip \
+            --pattern licenx-python-sdk.zip.sha256 \
             --pattern 'licenx-*.whl' \
             --pattern 'licenx-*.tar.gz' \
             --pattern licenx-SHA256SUMS \
             --dir "$verification_dir"
           (
             cd "$verification_dir"
-            sha256sum --check x_license_python.zip.sha256
+            sha256sum --check licenx-python-sdk.zip.sha256
             sha256sum --check licenx-SHA256SUMS
           )
-          cmp public/x_license_python.zip "$verification_dir/x_license_python.zip"
+          cmp public/licenx-python-sdk.zip "$verification_dir/licenx-python-sdk.zip"
           for artifact in dist/licenx/licenx-*.whl dist/licenx/licenx-*.tar.gz; do
             cmp "$artifact" "$verification_dir/$(basename "$artifact")"
           done
+
+      - name: Verify PyPI distribution metadata
+        run: |
+          python -m pip install --disable-pip-version-check twine
+          python -m twine check dist/licenx/licenx-*.whl dist/licenx/licenx-*.tar.gz
+
+      - name: Hand off exact validated distributions to isolated publisher
+        uses: actions/upload-artifact@v4
+        with:
+          name: licenx-pypi-${{ needs.validate-release.outputs.version }}
+          path: |
+            dist/licenx/licenx-*.whl
+            dist/licenx/licenx-*.tar.gz
+          if-no-files-found: error
+          retention-days: 7
+
+  publish-pypi:
+    name: Publish verified licenx wheel and sdist to PyPI
+    needs: [validate-release, release]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    concurrency:
+      group: licenx-pypi-${{ github.ref_name }}
+      cancel-in-progress: false
+    steps:
+      - name: Download only validated release distributions
+        uses: actions/download-artifact@v4
+        with:
+          name: licenx-pypi-${{ needs.validate-release.outputs.version }}
+          path: dist/
+
+      - name: Validate expected artifact count and token availability
+        shell: bash
+        env:
+          PYPI_TOKEN: ${{ secrets.PYPI_API_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$PYPI_TOKEN" || {
+            echo "::error::PYPI_API_TOKEN secret is not configured"
+            exit 1
+          }
+          test "$(find dist -maxdepth 1 -type f -name 'licenx-*.whl' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f -name 'licenx-*.tar.gz' | wc -l)" -eq 1
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 2
+          echo "PASS: exactly one licenx wheel and one source distribution"
+
+      - name: Publish primary SDK to PyPI with repository secret
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          user: __token__
+          password: ${{ secrets.PYPI_API_TOKEN }}
+          packages-dir: dist/
+          skip-existing: false

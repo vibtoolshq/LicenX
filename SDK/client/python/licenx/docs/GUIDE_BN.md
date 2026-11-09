@@ -1,6 +1,7 @@
 # LicenX Python SDK — Integration Guide (বাংলা)
 
-**নতুন Python application-এর primary SDK হলো `licenx`**, path `SDK/client/python/licenx/`। `SDK/x_license_python/` শুধু reference/legacy compatibility-র জন্য রাখা হয়েছে।
+**একটি supported SDK:** `licenx`। Config: `licenx.config.py`; install: verified wheel অথবা primary source kit।
+
 
 ## ১. Install
 
@@ -64,8 +65,6 @@ SDK license key স্বয়ংক্রিয়ভাবে local file-এ save �
 | ব্যবহার | Path / import |
 | --- | --- |
 | নতুন production integration | `SDK/client/python/licenx/` → `import licenx` |
-| Reference/legacy compatibility | `SDK/x_license_python/` → `import x_license_python` |
-| Server-এর পুরোনো `x_license_python.zip` | Reference package archive; primary wheel নয় |
 
 আরও দেখুন: [Config guide](../../docs/CONFIGURATION.md), [API reference](../../docs/API_REFERENCE.md), [Package README](../README.md)।
 

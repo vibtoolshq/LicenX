@@ -23,7 +23,7 @@ on:
       - "src/server/**"
       - "src/**"
       - "scripts/buildPythonSdkArchive.mjs"
-      - "SDK/x_license_python/**"
+      - "SDK/client/python/**"
       - "vite.config.ts"
       - "index.html"
       - "public/**"

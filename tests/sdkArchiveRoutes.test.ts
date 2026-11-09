@@ -1,4 +1,5 @@
 import express from "express";
+import { execFileSync } from "node:child_process";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -18,6 +19,7 @@ const originalEnvironment = {
 let db: ReturnType<typeof getDbClient>;
 
 before(async () => {
+  execFileSync(process.execPath, ["scripts/buildPythonSdkArchive.mjs"], { stdio: "pipe" });
   process.env.NODE_ENV = "test";
   delete process.env.TURSO_DATABASE_URL;
   delete process.env.TURSO_AUTH_TOKEN;
@@ -57,7 +59,7 @@ test("Node SDK download still returns the named ZIP attachment", async () => {
   assert.match(response.headers.get("content-type") || "", /application\/zip/);
   assert.equal(
     response.headers.get("content-disposition"),
-    'attachment; filename="x_license_python.zip"',
+    'attachment; filename="licenx-python-sdk.zip"',
   );
   assert.deepEqual([...archive.subarray(0, 4)], [0x50, 0x4b, 0x03, 0x04]);
 });
@@ -71,6 +73,6 @@ test("Cloudflare SDK download still redirects to the public ZIP asset", async ()
   assert.equal(response.status, 302);
   assert.equal(
     response.headers.get("location"),
-    "https://licenx.test/x_license_python.zip",
+    "https://licenx.test/licenx-python-sdk.zip",
   );
 });

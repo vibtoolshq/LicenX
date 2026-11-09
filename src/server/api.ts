@@ -2533,49 +2533,23 @@ apiRouter.post("/v1/license/deactivate", handleLogoutOrDeactivate);
 // SDK DOWNLOAD ENDPOINTS
 // -------------------------------------------------------------
 
-apiRouter.get("/sdk/download/python", (req: Request, res: Response) => {
-  try {
-    const sdkDir = path.resolve(process.cwd(), "SDK", "x_license_python");
-    if (!fs.existsSync(sdkDir)) {
-      res.status(404).json({ error: "Python SDK directory not found" });
-      return;
-    }
-
-    res.setHeader("Content-Type", "application/zip");
-    res.setHeader(
-      "Content-Disposition",
-      'attachment; filename="x_license_python.zip"',
-    );
-
-    const ZipClass =
-      (archiverModule as any).ZipArchive ||
-      (archiverModule as any).default ||
-      archiverModule;
-    const archive =
-      typeof ZipClass === "function" && ZipClass.prototype?.directory
-        ? new ZipClass({ zlib: { level: 9 } })
-        : (ZipClass as any)("zip", { zlib: { level: 9 } });
-
-    archive.on("error", () => {
-      res.status(500).json({ error: SAFE_SERVER_ERROR });
-    });
-
-    archive.pipe(res);
-    archive.directory(sdkDir, "x_license_python", (entry: any) => {
-      if (
-        entry.name &&
-        (entry.name.includes("__pycache__") ||
-          entry.name.endsWith(".pyc") ||
-          entry.name.includes(".DS_Store"))
-      ) {
-        return false;
-      }
-      return entry;
-    });
-    archive.finalize();
-  } catch (error: any) {
-    res.status(500).json({ error: SAFE_SERVER_ERROR });
+apiRouter.get("/sdk/download/python", (_req: Request, res: Response) => {
+  // Stable endpoint, one primary pip-installable source package.
+  const filename = "licenx-python-sdk.zip";
+  const archivePath = [
+    path.resolve(process.cwd(), "dist", filename),
+    path.resolve(process.cwd(), "public", filename),
+  ].find(candidate => fs.existsSync(candidate) && fs.statSync(candidate).isFile());
+  if (!archivePath) {
+    res.status(503).json({ error: "Python SDK package unavailable" });
+    return;
   }
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", 'attachment; filename="' + filename + '"');
+  res.sendFile(archivePath, error => {
+    if (error && !res.headersSent)
+      res.status(500).json({ error: SAFE_SERVER_ERROR });
+  });
 });
 
 // -------------------------------------------------------------

@@ -2,7 +2,7 @@
 
 **Primary Python client SDK for LicenX applications.** Version **1.2.3**; Python **3.8+**. Package/install/import name: `licenx`. Repository overview: [LicenX README](../../../../README.md).
 
-> `SDK/x_license_python` is a **reference/compatibility implementation**. The existing admin `x_license_python.zip` download contains that reference implementation, **not** the installable `licenx` wheel.
+> **Single supported SDK:** `licenx` (installable from a verified wheel or the Admin's primary `licenx-python-sdk.zip` source kit). The reference SDK is retired. PyPI publication is not automatic.
 
 ## Installation
 
