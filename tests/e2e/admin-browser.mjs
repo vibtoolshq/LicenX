@@ -3,8 +3,9 @@
  * Never points at a supplied host, production domain, or customer data.
  */
 import assert from "node:assert/strict";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { chromium, request } from "playwright";
+import WebSocket from "ws";
 
 if (process.env.GITHUB_ACTIONS !== "true" ||
     process.env.LICENX_ADMIN_E2E_CI !== "1" ||
@@ -46,6 +47,74 @@ function captureSocket(page) {
   });
   return { sockets, frames };
 }
+
+/** CI-only WSS upgrade probe: use disposable Caddy's trusted CA. */
+async function rawUpgrade(options = {}) {
+  const ca = await readFile(process.env.RUNNER_TEMP + "/licenx-ci-local-ca.pem");
+  const headers = { Origin: options.originHeader ?? origin };
+  if (options.cookie) headers.Cookie = options.cookie;
+  return await new Promise((resolve, reject) => {
+    const ws = new WebSocket("wss://localhost" + (options.path ?? "/api/admin/realtime"), {
+      headers, ca, handshakeTimeout: 7000
+    });
+    let finished = false;
+    const timer = setTimeout(() => finish(new Error("WSS upgrade probe timed out")), 10000);
+    function finish(error, code) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      if (error) reject(error); else resolve(code);
+    }
+    ws.once("unexpected-response", (_req, res) => { res.resume(); finish(null, res.statusCode); });
+    ws.once("open", () => { ws.close(1000); finish(null, 101); });
+    ws.once("error", error => finish(error));
+  });
+}
+function sessionCookie(cookies) {
+  return cookies.find(c => c.name === "vcon_admin_session");
+}
+function proofCookieHeader(cookies) {
+  const auth = sessionCookie(cookies);
+  const proof = cookies.find(c => c.name === "vcon_admin_realtime_proof");
+  if (!auth || !proof) throw new Error("Missing CI session/proof cookie");
+  return "vcon_admin_session=" + auth.value + "; vcon_admin_realtime_proof=" + proof.value;
+}
+async function sameSecondLoginProbe(password) {
+  const contexts = await Promise.all([0, 1].map(() =>
+    request.newContext({ baseURL: origin, ignoreHTTPSErrors: true })));
+  try {
+    const csrf = await Promise.all(contexts.map(async ctx =>
+      (await (await ctx.get("/api/auth/csrf")).json()).csrfToken));
+    let unique = false;
+    let matchedSecond = false;
+    // Independent requests must agree on second-resolution expiry to prove
+    // that uniqueness does not accidentally come from different timestamps.
+    for (let attempt = 0; attempt < 3; attempt++) {
+      await new Promise(r => setTimeout(r, 1020 - (Date.now() % 1000)));
+      const replies = await Promise.all(contexts.map((ctx, i) =>
+        ctx.post("/api/auth/login", {
+          headers: { origin, "x-csrf-token": csrf[i] },
+          data: { username: "ci_owner", password }
+        })));
+      if (!replies.every(r => r.status() === 200)) throw new Error("Concurrent login non-200");
+      const cookies = await Promise.all(contexts.map(async ctx => sessionCookie((await ctx.storageState()).cookies)));
+      if (!cookies.every(Boolean)) throw new Error("Concurrent login cookie absent");
+      const claims = cookies.map(c => JSON.parse(Buffer.from(c.value.split(".")[1], "base64url").toString("utf8")));
+      if (claims[0].exp === claims[1].exp) {
+        matchedSecond = true;
+        unique = cookies[0].value !== cookies[1].value &&
+          /^[0-9a-f-]{36}$/i.test(claims[0].jti ?? "") &&
+          /^[0-9a-f-]{36}$/i.test(claims[1].jti ?? "") &&
+          claims[0].jti !== claims[1].jti;
+        break;
+      }
+    }
+    check("same-second Admin logins issue distinct signed sessions", matchedSecond && unique);
+  } finally {
+    await Promise.all(contexts.map(c => c.dispose()));
+  }
+}
+
 async function login(page, password) {
   await page.goto(origin + "/vcon", { waitUntil: "domcontentloaded" });
   await page.locator('input[type="password"]').waitFor({ timeout: 20000 });
@@ -79,6 +148,8 @@ try {
   });
   check("fresh isolated Admin initialization", initialize.status() === 200);
 
+  await sameSecondLoginProbe(process.env.CI_ADMIN_PASSWORD);
+
   browser = await chromium.launch({ headless: true });
   const ctxA = await browser.newContext({ ignoreHTTPSErrors: true });
   const ctxB = await browser.newContext({ ignoreHTTPSErrors: true });
@@ -93,10 +164,7 @@ try {
   await login(pageA, process.env.CI_ADMIN_PASSWORD);
   await poll(() => a.frames.some(f => f.type === "admin.ready"),
     "first browser Admin WSS ready");
-  // Independent browser sessions need different JWTs. Current product auth
-  // can issue the same deterministic JWT for same-username logins in one second;
-  // fixing that product defect belongs to Phase-03, outside this test-only patch.
-  await new Promise(r => setTimeout(r, 1200));
+  // Phase-03: rapid logins must also receive independent JWTs.
   await login(pageB, process.env.CI_ADMIN_PASSWORD);
   const firstSession = (await ctxA.cookies()).find(c => c.name === "vcon_admin_session");
   const secondSession = (await ctxB.cookies()).find(c => c.name === "vcon_admin_session");
@@ -122,6 +190,35 @@ try {
   const badOrigin = await ctxA.request.post(origin + "/api/admin/realtime/bootstrap", {
     headers: { origin: "https://untrusted.example.invalid", "x-csrf-token": csrfA.csrfToken }, data: {} });
   check("live browser session blocks wrong Origin", badOrigin.status() === 403);
+
+
+  // Phase-03: reject invalid/unauthorized WSS upgrades over trusted local CA.
+  const sessionHeader = "vcon_admin_session=" + session.value;
+  check("WSS upgrade without one-time proof denied",
+    await rawUpgrade({ cookie: sessionHeader }) === 401);
+  check("WSS upgrade denies wrong Origin",
+    await rawUpgrade({ cookie: sessionHeader, originHeader: "https://untrusted.example.invalid" }) === 403);
+  check("WSS upgrade denies query parameters",
+    await rawUpgrade({ cookie: sessionHeader, path: "/api/admin/realtime?unexpected=1" }) === 400);
+  check("WSS invalid bootstrap proof denied",
+    await rawUpgrade({ cookie: sessionHeader + "; vcon_admin_realtime_proof=" + "A".repeat(43) }) === 401);
+  const freshBootstrap = await ctxA.request.post(origin + "/api/admin/realtime/bootstrap", {
+    headers: { origin, "x-csrf-token": csrfA.csrfToken }, data: {}
+  });
+  check("one-use WSS bootstrap HTTP 200", freshBootstrap.status() === 200);
+  const oneUseHeader = proofCookieHeader(await ctxA.cookies());
+  check("first one-use proof grants WSS upgrade",
+    await rawUpgrade({ cookie: oneUseHeader }) === 101);
+  check("replayed WSS bootstrap proof rejected",
+    await rawUpgrade({ cookie: oneUseHeader }) === 401);
+  const expiringBootstrap = await ctxA.request.post(origin + "/api/admin/realtime/bootstrap", {
+    headers: { origin, "x-csrf-token": csrfA.csrfToken }, data: {}
+  });
+  check("expiring bootstrap proof issued", expiringBootstrap.status() === 200);
+  const expiringHeader = proofCookieHeader(await ctxA.cookies());
+  await new Promise(r => setTimeout(r, 31000));
+  check("expired WSS bootstrap proof denied",
+    await rawUpgrade({ cookie: expiringHeader }) === 401);
 
   await navigate(pageA, "HWID Locks");
   await poll(async () => (await pageA.locator("main").innerText()).includes("Total Bound: 150"),
@@ -334,6 +431,50 @@ try {
   await poll(() => b.sockets[0].isClosed(), "session B WSS close on logout", 12000);
   check("other admin session remains active", !a.sockets[0].isClosed());
   check("second browser logout isolated", b.sockets[0].isClosed());
+
+  // Phase-03: simulate an Admin WSS feature-gate outage without touching the server.
+  await navigate(pageA, "Audit Trail");
+  const socketsBeforeFallback = a.sockets.length;
+  await pageA.route("**/api/admin/realtime/bootstrap", route => route.fulfill({
+    status: 404, contentType: "application/json",
+    body: JSON.stringify({ code: "ADMIN_REALTIME_DISABLED" })
+  }));
+  await pageA.reload({ waitUntil: "domcontentloaded" });
+  await poll(async () => (await pageA.locator("main").innerText()).includes("HTTP fallback"),
+    "browser shows HTTP fallback when WSS unavailable", 15000);
+  const fallbackLogs = await ctxA.request.get(origin + "/api/logs?limit=20");
+  check("HTTP history accessible during WSS fallback",
+    fallbackLogs.status() === 200 && (await fallbackLogs.json()).total >= 181);
+  check("WSS unavailable is not misreported as a new live socket",
+    a.sockets.length === socketsBeforeFallback);
+  await pageA.unroute("**/api/admin/realtime/bootstrap");
+  await pageA.reload({ waitUntil: "domcontentloaded" });
+  await poll(() => a.sockets.length > socketsBeforeFallback,
+    "new WSS opens after transport restored", 18000);
+  await poll(async () => (await pageA.locator("main").innerText()).includes("Live updates"),
+    "browser returns to live after WSS restored", 18000);
+  check("WSS recovered without losing HTTP access", !a.sockets.at(-1).isClosed());
+
+  // Phase-03: rotating Admin signing credentials invalidates older sessions.
+  const beforeRotation = a.sockets.at(-1);
+  const rotated = await ctxA.request.post(origin + "/api/auth/update-credentials", {
+    headers: { origin, "x-csrf-token": csrfA.csrfToken },
+    data: { currentPassword: process.env.CI_ADMIN_PASSWORD }
+  });
+  check("Admin credential rotation accepted in disposable CI", rotated.status() === 200);
+  await poll(() => beforeRotation.isClosed(),
+    "previous Admin WSS closed after credential rotation", 25000);
+  check("credential rotation invalidates old WSS", beforeRotation.isClosed());
+  const oldJwtAccess = await setupClient.get("/api/auth/me", {
+    headers: { authorization: "Bearer " + firstSession.value }
+  });
+  check("credential rotation rejects old JWT", oldJwtAccess.status() === 401);
+  const freshJwtAccess = await ctxA.request.get(origin + "/api/auth/me");
+  check("credential rotation preserves new authorized HTTP session", freshJwtAccess.status() === 200);
+  await poll(async () => (await pageA.locator("main").innerText()).includes("Session expired"),
+    "browser marks prior WSS session expired", 12000);
+  check("expired realtime view is not labeled live",
+    !(await pageA.locator("main").innerText()).includes("Live updates"));
 
   evidence.acceptance = "CI_BROWSER_PARTIAL_PASS";
   evidence.publicCaddyTrust = "DISPOSABLE_LOCAL_CA_ONLY";

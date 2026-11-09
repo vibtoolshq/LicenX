@@ -304,6 +304,7 @@ apiRouter.post("/setup/init", async (req: Request, res: Response) => {
       {
         username: username.trim(),
         exp: Math.floor(Date.now() / 1000) + 86400 * 30,
+        ...{ jti: crypto.randomUUID() },
       },
       jwtSecret,
     );
@@ -434,6 +435,7 @@ apiRouter.post("/auth/login", async (req: Request, res: Response) => {
       {
         username: row.username as string,
         exp: Math.floor(Date.now() / 1000) + 86400 * 30,
+        ...{ jti: crypto.randomUUID() },
       },
       row.jwt_secret as string,
     );
@@ -532,6 +534,7 @@ apiRouter.post(
         {
           username: targetUsername,
           exp: Math.floor(Date.now() / 1000) + 86400 * 30,
+          ...{ jti: crypto.randomUUID() },
         },
         newJwtSecret,
       );
