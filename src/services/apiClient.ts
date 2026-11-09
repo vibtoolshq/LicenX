@@ -1,3 +1,5 @@
+import { createAdminRealtimeClient } from "./adminRealtime";
+import type { AdminRealtimeChange } from "../types";
 import {
   AdminApiKeyRecord,
   PublicLicenseApiDomain,
@@ -20,6 +22,8 @@ import {
 } from "../types";
 
 export function clearAuthToken(): void {
+  adminRealtime.stop();
+  csrfTokenPromise = null;
   if (typeof localStorage !== "undefined") {
     localStorage.removeItem("vcon_admin_token");
   }
@@ -248,6 +252,10 @@ async function request<T>(
   }
 
   if (!res.ok) {
+    if (res.status === 401) {
+      adminRealtime.stop("AUTH_EXPIRED");
+      invalidateCache();
+    }
     throw new ApiError(
       safeErrorMessage(res.status),
       res.status,
@@ -265,6 +273,42 @@ async function request<T>(
 
   return data as T;
 }
+
+/**
+ * Exactly one connection per authenticated browser session.
+ * Phase-04 components may subscribe to these notifications; they still fetch
+ * authoritative App/License/Device/Log/Overview rows through existing HTTP APIs.
+ */
+export const adminRealtime = createAdminRealtimeClient({
+  bootstrap: signal => request("/api/admin/realtime/bootstrap", { method: "POST", body: "{}", signal }),
+  snapshot: signal => request<RealtimePresenceReport>("/api/realtime/presence", { signal }),
+  invalidate: (change: AdminRealtimeChange | null) => {
+    if (!change || change.type === "stream.resync") {
+      invalidateCache();
+      return;
+    }
+    if (change.type === "presence.changed") {
+      invalidateCache("devices_");
+      return;
+    }
+    const cachePrefixes: Record<string, string[]> = {
+      apps: ["apps_", "system_stats"],
+      licenses: ["licenses_", "devices_", "system_stats"],
+      devices: ["devices_", "licenses_", "system_stats"],
+      logs: ["logs_", "system_stats"],
+      stats: ["system_stats"],
+    };
+    for (const prefix of cachePrefixes[change.resource]) invalidateCache(prefix);
+  },
+  socket: url => new WebSocket(url),
+  origin: () => window.location.origin,
+  isVisible: () => typeof document === "undefined" || document.visibilityState !== "hidden",
+  onVisibility: notify => {
+    if (typeof document === "undefined") return () => {};
+    document.addEventListener("visibilitychange", notify);
+    return () => document.removeEventListener("visibilitychange", notify);
+  },
+});
 
 export const api = {
   // Cache Controller
@@ -299,10 +343,12 @@ export const api = {
   },
   login: async (data: { username: string; password: string }) => {
     invalidateCache();
-    return request<{ success: boolean; username: string }>("/api/auth/login", {
+    const result = await request<{ success: boolean; username: string }>("/api/auth/login", {
       method: "POST",
       body: JSON.stringify(data),
     });
+    if (result.success) adminRealtime.start();
+    return result;
   },
   logout: async () => {
     invalidateCache();
@@ -310,6 +356,7 @@ export const api = {
       method: "POST",
       body: "{}",
     });
+    adminRealtime.stop();
   },
   getMe: async (force = false) => {
     const key = "auth_me";
@@ -328,6 +375,8 @@ export const api = {
       publicKeyPem: string;
       r2Configured: boolean;
     }>("/api/auth/me");
+    if (data.authenticated) adminRealtime.start();
+    else adminRealtime.stop("AUTH_EXPIRED");
     setCached(key, data);
     return data;
   },

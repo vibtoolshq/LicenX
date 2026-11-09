@@ -28,6 +28,29 @@ export interface RealtimePresenceReport {
   scope: string | null;
 }
 
+/** Admin browser WSS carries sanitized notifications; authoritative rows come from HTTP. */
+export type AdminRealtimeState =
+  | "CONNECTED" | "RECONNECTING" | "HTTP_FALLBACK" | "AUTH_EXPIRED" | "STALE";
+
+interface AdminRealtimeEnvelope {
+  app_id: string | null;
+  stream_id: string;
+  sequence: number;
+  observedAt: number;
+}
+
+export type AdminRealtimeChange =
+  | (AdminRealtimeEnvelope & { type: "presence.changed" })
+  | (AdminRealtimeEnvelope & {
+      type: "resource.changed";
+      resource: "apps" | "licenses" | "devices" | "logs" | "stats";
+      source_version?: number;
+    })
+  | (AdminRealtimeEnvelope & {
+      type: "stream.resync";
+      reason: "cursor" | "backlog" | "log_overflow";
+    });
+
 export interface License {
   id: string;
   key: string;
@@ -59,7 +82,7 @@ export interface Device {
   ip_address: string;
   first_bound_at: number;
   last_ping_at: number;
-  status: "active" | "blocked";
+  status: "active" | "blocked" | "logged_out";
   license_key?: string;
   license_tier?: string;
   license_status?: string;
