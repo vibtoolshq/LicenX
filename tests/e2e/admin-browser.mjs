@@ -65,8 +65,18 @@ async function rawUpgrade(options = {}) {
       clearTimeout(timer);
       if (error) reject(error); else resolve(code);
     }
-    ws.once("unexpected-response", (_req, res) => { res.resume(); finish(null, res.statusCode); });
-    ws.once("open", () => { ws.close(1000); finish(null, 101); });
+    ws.once("unexpected-response", (req, res) => {
+      // An explicit listener takes over this HTTP response from ws. Close it;
+      // otherwise the CI Node process may linger on an idle upgrade socket.
+      const status = res.statusCode;
+      finish(null, status);
+      res.destroy();
+      req.destroy();
+    });
+    ws.once("open", () => {
+      finish(null, 101);
+      ws.terminate(); // CI-only probe, never a persistent Admin session.
+    });
     ws.once("error", error => finish(error));
   });
 }
