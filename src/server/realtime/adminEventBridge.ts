@@ -91,6 +91,12 @@ export function createAdminEventBridge(db: DatabaseClient, gateway: Gateway) {
         journalCursor = version;
         logSample = new Map(logs.slice(0, MAX_LOG_SAMPLE).map(entry => [entry.id, entry]));
         initialized = true;
+        // A mutation may commit after the browser's initial HTTP snapshot but
+        // before this first subscriber-gated tick. Advancing the journal cursor
+        // would otherwise permanently skip its invalidation. Refetch once
+        // from authenticated HTTP after establishing the cursor boundary;
+        // never replay historical rows or expose customer payloads.
+        gateway.publishChange({ type: "stream.resync", app_id: null, reason: "cursor" });
         return;
       }
       const events = await eventsAfter(db, journalCursor);

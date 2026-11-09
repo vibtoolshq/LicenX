@@ -76,7 +76,8 @@ test("ADMIN-RT-02: subscriber-only committed journal, scoped log cursors and bou
   assert.equal(queries, 0, "zero subscribers must do no DB work");
   subscribers = 1;
   await bridge.tick();
-  assert.equal(delivered.length, 0, "bootstrap baseline must not replay historical customer events");
+  assert.deepEqual(delivered, [{ type: "stream.resync", app_id: null, reason: "cursor" }],
+    "first subscriber must refetch HTTP after the cursor boundary, not replay historical events");
 
   const addEvent = (id:number,type:string,appId:string|null) => events.push({
     id,event_type:type,app_id:appId,license_id:"PRIVATE-KEY",device_id:"SECRET-HWID",created_at:Date.now(),
@@ -102,7 +103,9 @@ test("ADMIN-RT-02: subscriber-only committed journal, scoped log cursors and bou
   subscribers = 1;
   addEvent(4,"app.deleted","app-one");
   await bridge.tick();
-  assert.equal(delivered.length, count, "newly connected clients use their own initial HTTP snapshot");
+  assert.equal(delivered.length, count + 1, "a reconnect gets one fresh snapshot invalidation");
+  assert.deepEqual(delivered.at(-1), { type: "stream.resync", app_id: null, reason: "cursor" },
+    "events skipped by first-tick baseline require a new HTTP snapshot");
   for(let i=5;i<=204;i++)addEvent(i,"license.changed","app-one");
   await bridge.tick();
   assert.ok(delivered.some(x=>x.type==="stream.resync" && x.reason==="backlog"));
@@ -269,5 +272,55 @@ test("ADMIN-RT remediation-01: SQLite journal covers insert/metadata without dup
       if (value === undefined) delete process.env[name];
       else process.env[name] = value;
     }
+  }
+});
+
+
+test("ADMIN-RT-01 blocker: event committed between initial HTTP snapshot and first poll forces resync", async () => {
+  let subscribers = 0;
+  const journal: Array<{
+    id: number; event_type: string; app_id: string | null;
+    license_id: string | null; device_id: string | null; created_at: number;
+  }> = [
+    { id: 41, event_type: "app.changed", app_id: "app-test",
+      license_id: null, device_id: null, created_at: Date.now() },
+  ];
+  const emitted: AdminRealtimeChange[] = [];
+  let queries = 0;
+  const db = { execute: async (stmt: any) => {
+    queries++;
+    const sql: string = typeof stmt === "string" ? stmt : stmt.sql;
+    const args: any[] = typeof stmt === "string" ? [] : stmt.args;
+    if (sql.includes("COALESCE(MAX(id)")) return { rows: [{ version: journal.at(-1)?.id ?? 0 }] };
+    if (sql.includes("FROM validation_logs ORDER BY")) return { rows: [] };
+    if (sql.includes("FROM realtime_events WHERE id >")) {
+      return { rows: journal.filter(event => event.id > Number(args[0])) };
+    }
+    throw new Error("Unexpected test DB query: " + sql);
+  } } as unknown as DatabaseClient;
+  const bridge = createAdminEventBridge(db, {
+    subscriberCount: () => subscribers,
+    publishChange: change => emitted.push(change),
+  });
+  try {
+    // Old HTTP snapshot has already completed; the simulated INSERT event
+    // exists when the first subscribed poll initializes the cursor.
+    await bridge.tick();
+    assert.equal(queries, 0, "zero subscribers do no DB reads");
+    subscribers = 1;
+    await bridge.tick();
+    assert.equal(bridge.cursor, 41);
+    assert.deepEqual(emitted, [{ type: "stream.resync", app_id: null, reason: "cursor" }],
+      "must request a fresh authoritative HTTP snapshot, not drop the intervening INSERT");
+    await bridge.tick();
+    assert.equal(emitted.length, 1, "do not replay journal history after baseline");
+    journal.push({ id: 42, event_type: "license.changed", app_id: "app-test",
+      license_id: "lic-test", device_id: null, created_at: Date.now() });
+    await bridge.tick();
+    assert.ok(emitted.some(x => x.type === "resource.changed" &&
+      x.resource === "licenses" && x.app_id === "app-test" && x.source_version === 42));
+    assert.equal(bridge.cursor, 42);
+  } finally {
+    bridge.stop();
   }
 });
