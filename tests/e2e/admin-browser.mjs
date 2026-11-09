@@ -93,7 +93,15 @@ try {
   await login(pageA, process.env.CI_ADMIN_PASSWORD);
   await poll(() => a.frames.some(f => f.type === "admin.ready"),
     "first browser Admin WSS ready");
+  // Independent browser sessions need different JWTs. Current product auth
+  // can issue the same deterministic JWT for same-username logins in one second;
+  // fixing that product defect belongs to Phase-03, outside this test-only patch.
+  await new Promise(r => setTimeout(r, 1200));
   await login(pageB, process.env.CI_ADMIN_PASSWORD);
+  const firstSession = (await ctxA.cookies()).find(c => c.name === "vcon_admin_session");
+  const secondSession = (await ctxB.cookies()).find(c => c.name === "vcon_admin_session");
+  check("independent Admin login tokens",
+    !!firstSession && !!secondSession && firstSession.value !== secondSession.value);
   await poll(() => b.frames.some(f => f.type === "admin.ready"),
     "second browser Admin WSS ready");
   check("two real browser WSS sessions", a.sockets.length === 1 && b.sockets.length === 1);
