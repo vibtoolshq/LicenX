@@ -15,14 +15,14 @@ Thanks for improving LicenX. Changes should be small, reviewable, compatible and
    npm run build
    ```
 
-4. For Python client changes, test the **primary** SDK at [`SDK/client/python/licenx`](SDK/client/python/licenx/README.md). Run reference `SDK/x_license_python` tests when compatibility or archive behavior is affected.
+4. Test the **single supported** Python SDK at [`SDK/client/python/licenx`](SDK/client/python/licenx/README.md). Verify source archive parity and wheel/sdist packaging whenever a distribution contract changes.
 5. Include a concise change explanation, regression evidence, security impact and any backward-compatibility caveat in your pull request.
 
 ## Python SDK layout
 
 - **Primary application integration:** `SDK/client/python/licenx/`, installed with `python -m pip install ./SDK/client/python/licenx`; import `licenx`.
-- **Reference/compatibility implementation:** `SDK/x_license_python/`; import `x_license_python`. Do not present it as the default for new integrations.
-- **Existing downloadable ZIP:** `public/x_license_python.zip` is generated from the reference tree. Changing its source/contract requires an explicit implementation change, not just documentation edits.
+- **Configuration:** app-root `licenx.config.py` is parsed as literal data. Protect the trusted server origin/public key independently in consuming applications.
+- **Primary SDK source archive:** `public/licenx-python-sdk.zip` comes from `SDK/client/python/licenx`. Old `x_license_python` imports are a breaking compatibility change; use `licenx`.
 
 ## Safety and documentation
 

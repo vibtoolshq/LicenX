@@ -1,6 +1,7 @@
 # LicenX Python SDK — Integration Guide (English)
 
-**Use `licenx` for production application integration.** This guide covers the installable package under `SDK/client/python/licenx/`; `SDK/x_license_python/` is a separate reference/compatibility tree.
+**Single supported Python SDK:** `licenx`, using literal app-root `licenx.config.py` and a verified wheel or primary source kit.
+
 
 ## 1. Install
 
@@ -66,8 +67,6 @@ Never print full license keys, response tokens or user HWIDs in unattended logs.
 ## 5. Distribution and compatibility
 
 - Primary package: `SDK/client/python/licenx/` → `import licenx`.
-- Legacy/reference implementation: `SDK/x_license_python/` → `import x_license_python`.
-- Existing `x_license_python.zip` download is built from the reference tree; it is **not** a `licenx` wheel.
 
 For config fields and public methods see the [configuration reference](../../docs/CONFIGURATION.md), [API reference](../../docs/API_REFERENCE.md) and [package README](../README.md).
 

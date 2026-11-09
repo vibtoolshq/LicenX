@@ -1,6 +1,7 @@
 # Primary LicenX SDK — Source and Feature Map
 
-The installable **`licenx`** package lives in `SDK/client/python/licenx/`. Import with `from licenx import XLicenseClient`. The separate `SDK/x_license_python/` tree is the **reference SDK**, not the default for new integrations.
+**Single supported Python SDK:** `licenx`, using literal app-root `licenx.config.py` and a verified wheel or primary source kit.
+
 
 ## SDK modules
 
@@ -30,4 +31,3 @@ Run the primary tests from repository root:
 python -m unittest discover -s SDK/client/python/licenx/test -p "test_*.py"
 ```
 
-For current installation instructions see the [primary SDK README](../../README.md), [English guide](../GUIDE_EN.md) and [বাংলা guide](../GUIDE_BN.md). The existing `x_license_python.zip` download is a separate **reference archive**, not the primary `licenx` wheel.
