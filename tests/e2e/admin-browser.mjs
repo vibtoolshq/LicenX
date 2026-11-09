@@ -84,6 +84,10 @@ try {
   const ctxB = await browser.newContext({ ignoreHTTPSErrors: true });
   const pageA = await ctxA.newPage();
   const pageB = await ctxB.newPage();
+  evidence.browserPageErrors = [];
+  pageA.on("pageerror", error => {
+    evidence.browserPageErrors.push(String(error.message).slice(0, 300));
+  });
   const a = captureSocket(pageA);
   const b = captureSocket(pageB);
   await login(pageA, process.env.CI_ADMIN_PASSWORD);
@@ -198,6 +202,12 @@ try {
   check("Logs history API returns total 180 and 20 bounded rows",
     historyPage.total === 180 && historyPage.logs?.length === 20);
   await navigate(pageA, "Audit Trail");
+  await new Promise(r => setTimeout(r, 750));
+  evidence.auditNavigationPath = new URL(pageA.url()).pathname;
+  evidence.auditVisibleMain = await pageA.locator("main").count()
+    ? (await pageA.locator("main").innerText()).slice(0, 350)
+    : "MAIN_NOT_PRESENT";
+  await pageA.screenshot({ path: "ci-admin-evidence/audit-trail-navigation.png" });
   await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail"),
     "Audit Trail view is mounted");
   await poll(async () => (await pageA.locator("main").innerText()).includes("Audit Log Trail (180)") &&
