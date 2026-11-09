@@ -42,42 +42,23 @@ export const ClientCodeTab: React.FC<ClientCodeTabProps> = ({ publicKeyPem }) =>
 
   const pythonQuickExample = `#!/usr/bin/env python3
 """
-VCON Python Client SDK - Quick Integration Example
-Module: x_license_python
+Primary LicenX Python SDK
+Install from a verified wheel or extracted licenx-python-sdk.zip:
+    python -m pip install .
+Create app-root licenx.config.py with literal app_config, app_version,
+trusted HTTPS server URL and the administrator-provisioned public key.
 """
 
-import sys
-from x_license_python import XLicenseClient
+from licenx import XLicenseClient
 
-def on_revoked(reason: str):
-    print(f"\\n[CRITICAL] License terminated remotely by server: {reason}")
-    sys.exit(1)
-
-# Replace this with your application's release version.
-APP_VERSION = "2.4.1"
-
-# 1. Initialize Client (Auto-loads <app_name>_vcon_config.json from project folder)
-client = XLicenseClient(app_version=APP_VERSION, on_license_revoked=on_revoked)
-
-# 2. Try saved session Auto-Login first (Strict online validation enforced)
-res = client.auto_login()
-
-if not res.success:
-    # Prompt user for license key
-    key = input("Please enter License Key: ").strip()
-    res = client.login(key)
-
-if res.success:
-    print(f"[+] Access Granted! Tier: {client.get_tier()}")
-    print(f"[+] Bound HWID: {res.hwid}")
-    print(f"[+] Background Heartbeat Worker: Active (20-minute cycle)")
-else:
-    print(f"[-] Access Denied: {res.message} (Code: {res.code})")
-    sys.exit(1)
-
-# 3. Main Application Logic
-# Note: When app terminates or exits, auto-logout automatically unbinds the hardware slot!
-print("[*] Running core application logic...")
+client = XLicenseClient()  # Reads app-root licenx.config.py, no JSON required
+key = input("License key: ").strip()
+result = client.login(key)
+if not result.success:
+    raise SystemExit("License denied: " + str(result.code))
+print("Signed license validated. Tier: " + str(client.get_tier()))
+# Keep the client alive during licensed work; explicit logout releases a device.
+# client.logout()
 `;
 
   const curlCode = `# 1. Validate & Auto-bind Hardware Device with Multi-App Scoping
@@ -217,7 +198,7 @@ public class VconLicenseClient
           </div>
           <div>
             <div className="font-semibold text-slate-200 text-xs">
-              Python Client Protection SDK (`x_license_python`)
+              Python Client Protection SDK (`licenx`)
             </div>
             <div className="text-[11px] text-slate-400">
               Modular Python package with HWID lock, Ed25519 signing, 20min daemon thread & auto slot release.
@@ -242,7 +223,7 @@ public class VconLicenseClient
             <FileCode className="w-3.5 h-3.5 text-indigo-400" />
             <span>config.py</span>
           </div>
-          <p className="text-[10px] text-slate-400">Auto-loads downloaded global JSON configuration files.</p>
+          <p className="text-[10px] text-slate-400">Loads app-root literal licenx.config.py without executing Python code.</p>
         </div>
 
         <div className="p-2.5 rounded bg-slate-900/40 border border-slate-800 space-y-1">

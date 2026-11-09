@@ -2,6 +2,15 @@ name: Phase-05 integration and security CI
 
 on:
   workflow_dispatch:
+  pull_request:
+    paths:
+      - "SDK/client/python/**"
+      - "scripts/buildPythonSdkArchive.mjs"
+      - "tests/**"
+      - "src/**"
+      - "Dockerfile"
+      - ".dockerignore"
+      - ".github/workflows/phase05-security.yml"
   push:
     branches: [main]
     paths:
@@ -28,7 +37,7 @@ on:
       - "scripts/loadRealtime.mjs"
       - "tests/realtimeIntegration.test.ts"
       - "tests/verifyRealtimeClient.py"
-      - "SDK/x_license_python/**"
+      - "SDK/client/python/**"
       - "vite.config.ts"
       - "index.html"
       - "public/**"
@@ -68,8 +77,7 @@ jobs:
           npm run verify:sdk-archive
       - name: Verify Python SDK regressions
         run: |
-          python -m pip install -r SDK/x_license_python/requirements.txt
-          PYTHONPATH=SDK python -m unittest discover -s SDK/x_license_python/test -p "test_*.py"
+          python -m pip install -r SDK/client/python/licenx/requirements.txt
           PYTHONPATH=SDK/client/python python -m unittest discover -s SDK/client/python/licenx/test -p "test_*.py"
 
       - name: Generate disposable CI-only database configuration
@@ -212,28 +220,25 @@ jobs:
           set -euo pipefail
           docker compose exec -T app node --input-type=module - < tests/phase05Integration.mjs
 
-      - name: Verify actual Node Unicode RSA signature with both Python SDKs
+      - name: Verify actual Node Unicode RSA signature with primary licenx SDK
         shell: bash
         run: |
           set -euo pipefail
           docker compose cp app:/tmp/licenx-phase05-vector.json "$RUNNER_TEMP/licenx-phase05-vector.json"
-          PYTHONPATH=SDK:SDK/client/python python - "$RUNNER_TEMP/licenx-phase05-vector.json" <<'PY'
+          PYTHONPATH=SDK/client/python python - "$RUNNER_TEMP/licenx-phase05-vector.json" <<'PY'
           import json
           import sys
-          from x_license_python.config import SDKConfig as RefConfig
-          from x_license_python.server import ServerCommunicator as RefServer
-          from licenx.config import SDKConfig as AltConfig
-          from licenx.server import ServerCommunicator as AltServer
+          from licenx.config import SDKConfig
+          from licenx.server import ServerCommunicator
 
           with open(sys.argv[1], "r", encoding="utf-8") as inp:
               vector = json.load(inp)
-          for config, cls in [(RefConfig, RefServer), (AltConfig, AltServer)]:
-              verifier = cls(config(public_key_pem=vector["public_key"]))
-              assert verifier.verify_signature(vector["payload"], vector["signature"])
-              tampered = dict(vector["payload"])
-              tampered["app_name"] = "tampered"
-              assert not verifier.verify_signature(tampered, vector["signature"])
-          print("PASS live server Unicode signature accepted by both SDKs; tampering denied")
+          verifier = ServerCommunicator(SDKConfig(public_key_pem=vector["public_key"]))
+          assert verifier.verify_signature(vector["payload"], vector["signature"])
+          tampered = dict(vector["payload"])
+          tampered["app_name"] = "tampered"
+          assert not verifier.verify_signature(tampered, vector["signature"])
+          print("PASS primary licenx signed Unicode response and tamper rejection")
           PY
           rm -f "$RUNNER_TEMP/licenx-phase05-vector.json"
 

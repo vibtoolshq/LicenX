@@ -19,8 +19,11 @@
 !public/_redirects
 !public/_routes.json
 !SDK/
-!SDK/x_license_python/
-!SDK/x_license_python/**
+!SDK/client/
+!SDK/client/python/
+!SDK/client/python/licenx/
+!SDK/client/python/licenx/**
+!SDK/client/python/licenx.config.py
 !tests/
 !tests/verify_sdk_archive.py
 !.npmrc

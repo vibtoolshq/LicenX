@@ -240,7 +240,7 @@ export const AppsTab: React.FC = () => {
             onClick={handleDownloadSdk}
             disabled={downloadingSdk}
             className="flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded bg-slate-900 hover:bg-slate-850 text-slate-300 border border-slate-800 hover:border-slate-700 transition-colors"
-            title="Download Python Client SDK (x_license_python.zip)"
+            title="Download primary licenx SDK source kit (licenx-python-sdk.zip)"
           >
             <Download className={`w-3.5 h-3.5 ${downloadingSdk ? 'animate-bounce' : ''}`} />
             Download Python SDK

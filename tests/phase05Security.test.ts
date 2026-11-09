@@ -31,7 +31,7 @@ test("app scoped heartbeats deny disabled or missing parent in both runtimes", (
   }
 });
 test("Python SDK signed payload stays UTF-8 and local discovery closes sockets", () => {
-  for (const dir of ["SDK/x_license_python", "SDK/client/python/licenx"]) {
+  for (const dir of ["SDK/client/python/licenx"]) {
     assert.match(source(dir + "/server.py"), /ensure_ascii=False/);
     assert.match(source(dir + "/device.py"), /with socket.socket\(/);
   }

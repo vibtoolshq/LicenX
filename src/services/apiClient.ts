@@ -937,7 +937,7 @@ export const api = {
     const url = window.URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = "x_license_python.zip";
+    a.download = "licenx-python-sdk.zip";
     document.body.appendChild(a);
     a.click();
     window.URL.revokeObjectURL(url);

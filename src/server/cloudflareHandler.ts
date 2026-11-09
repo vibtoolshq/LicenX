@@ -561,7 +561,7 @@ export async function handleCloudflareApi(
     // -----------------------------------------------------------------
     if (normalizedPath === "/sdk/download/python") {
       // Redirect to static zip asset deployed in dist/
-      const zipUrl = new URL("/x_license_python.zip", request.url).toString();
+      const zipUrl = new URL("/licenx-python-sdk.zip", request.url).toString();
       return Response.redirect(zipUrl, 302);
     }
 

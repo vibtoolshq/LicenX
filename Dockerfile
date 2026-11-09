@@ -13,8 +13,7 @@ COPY package.json package-lock.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 COPY --from=build /app/build ./build
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/SDK/x_license_python ./SDK/x_license_python
-COPY --from=build /app/public/x_license_python.zip ./public/x_license_python.zip
+COPY --from=build /app/public/licenx-python-sdk.zip ./public/licenx-python-sdk.zip
 RUN mkdir -p /var/lib/licenx/storage && chown -R node:node /var/lib/licenx /app
 USER node
 EXPOSE 3000
