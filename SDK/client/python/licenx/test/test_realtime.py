@@ -192,7 +192,9 @@ class RealtimeSdkTests(unittest.TestCase):
             "license_id": "lic-one", "device_id": None,
             "issued_at": now, "expires_at": now + 30_000,
         }, self.key)
-        sock = FakeWebSocket([{"type":"welcome"}, snap, event])
+        # Real SocketCore sends unsigned connected BEFORE signed snapshot.
+        # Both pre-auth transport notifications must grant no authorization.
+        sock = FakeWebSocket([{"type":"connected", "clientId":"synthetic"}, {"type":"welcome"}, snap, event])
         mod = FakeWebSocketModule(sock)
         def ping(_key, _hwid):
             self.worker._stop_event.set()

@@ -210,8 +210,10 @@ class RealtimeLicenseWorker:
                     packet = self._receive(socket)
                 except websocket.WebSocketTimeoutException:
                     continue
-                if packet.get("type") == "welcome":
-                    continue  # SocketCore's unsigned welcome grants NO access.
+                if packet.get("type") in ("connected", "welcome"):
+                    # SocketCore emits unsigned transport "connected" before hello.
+                    # Never treat it as signed authorization or a license grant.
+                    continue
                 self._verify_snapshot(packet)
                 # After grace expiry a signed WSS snapshot alone cannot
                 # resume protected operations; nonce-bound HTTP proof required.
