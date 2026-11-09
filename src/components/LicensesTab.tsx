@@ -17,10 +17,10 @@ import {
   Settings,
   Trash2,
 } from 'lucide-react';
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useConfirm } from '../context/ConfirmContext';
-import { api } from '../services/apiClient';
+import { adminRealtime, api } from '../services/apiClient';
 import { AppItem, License } from '../types';
 import { TablePagination } from './TablePagination';
 
@@ -41,6 +41,8 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const loadSerial = useRef(0);
   const [statusFilter, setStatusFilter] = useState(() => {
     try {
       return sessionStorage.getItem('vcon_licenses_status_filter') || 'all';
@@ -162,11 +164,12 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
   }, [openMenuId, licenses]);
 
   const loadLicenses = async (force = false) => {
+    const serial = ++loadSerial.current;
     try {
       if (licenses.length === 0) setLoading(true);
       const [licRes, appRes] = await Promise.all([
         api.getLicenses({
-          search: search.trim() || undefined,
+          search: appliedSearch || undefined,
           status: statusFilter !== 'all' ? statusFilter : undefined,
           tier: tierFilter !== 'all' ? tierFilter : undefined,
           app_id: appFilter !== 'all' ? appFilter : undefined,
@@ -174,27 +177,50 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
         }, force),
         api.getApps({}, force),
       ]);
-      const licList = licRes?.licenses || (Array.isArray(licRes) ? (licRes as any) : []);
-      const appList = appRes?.apps || (Array.isArray(appRes) ? (appRes as any) : []);
+      if (serial !== loadSerial.current) return;
+      const licList = licRes?.licenses || (Array.isArray(licRes) ? (licRes as License[]) : []);
+      const appList = appRes?.apps || (Array.isArray(appRes) ? (appRes as AppItem[]) : []);
       setLicenses(Array.isArray(licList) ? licList : []);
       setTotal(typeof licRes?.total === 'number' ? licRes.total : (Array.isArray(licList) ? licList.length : 0));
       setApps(Array.isArray(appList) ? appList : []);
     } catch {
-      // ignore
+      // Existing license edit/actions remain available if refresh fails.
     } finally {
-      setLoading(false);
+      if (serial === loadSerial.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     setCurrentPage(1);
-    loadLicenses();
-  }, [statusFilter, tierFilter, appFilter]);
+    void loadLicenses(true);
+    return () => { loadSerial.current++; };
+  }, [statusFilter, tierFilter, appFilter, appliedSearch]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = adminRealtime.subscribe(notice => {
+      const relevant = notice.type === 'resync' || notice.type === 'change' &&
+        notice.change.type === 'resource.changed' &&
+        ['licenses', 'apps', 'devices'].includes(notice.change.resource) &&
+        (appFilter === 'all' || notice.change.app_id === null || notice.change.app_id === appFilter);
+      if (relevant) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { void loadLicenses(true); }, 200);
+      }
+    });
+    const fallback = setInterval(() => {
+      if (!['CONNECTED', 'AUTH_EXPIRED'].includes(adminRealtime.getStatus().state) &&
+          (typeof document === 'undefined' || document.visibilityState !== 'hidden')) void loadLicenses(true);
+    }, 30_000);
+    return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(fallback); };
+  }, [statusFilter, tierFilter, appFilter, appliedSearch]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setCurrentPage(1);
-    loadLicenses();
+    const term = search.trim();
+    if (term !== appliedSearch) setAppliedSearch(term);
+    else void loadLicenses(true);
   };
 
   const handleCopyKey = (lic: License) => {

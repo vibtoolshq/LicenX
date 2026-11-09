@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import {
   AppWindow,
   Search,
@@ -10,7 +10,7 @@ import {
   Power,
   Key,
 } from 'lucide-react';
-import { api } from '../services/apiClient';
+import { adminRealtime, api } from '../services/apiClient';
 import { AppItem } from '../types';
 import { CreateAppModal } from './CreateAppModal';
 import { EditAppModal } from './EditAppModal';
@@ -23,6 +23,8 @@ export const AppsTab: React.FC = () => {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const loadSerial = useRef(0);
   const [statusFilter, setStatusFilter] = useState(() => {
     try {
       return sessionStorage.getItem('vcon_apps_status_filter') || 'all';
@@ -68,32 +70,55 @@ export const AppsTab: React.FC = () => {
   };
 
   const loadApps = async (force = false) => {
+    const serial = ++loadSerial.current;
     try {
       if (apps.length === 0) setLoading(true);
       const res = await api.getApps({
-        search: search.trim() || undefined,
+        search: appliedSearch || undefined,
         status: statusFilter !== 'all' ? statusFilter : undefined,
         limit: 100,
       }, force);
-      const appList = res?.apps || (Array.isArray(res) ? (res as any) : []);
+      if (serial !== loadSerial.current) return;
+      const appList = res?.apps || (Array.isArray(res) ? (res as AppItem[]) : []);
       setApps(Array.isArray(appList) ? appList : []);
       setTotal(typeof res?.total === 'number' ? res.total : (Array.isArray(appList) ? appList.length : 0));
     } catch {
-      // ignore
+      // Keep existing actions available when a network refresh fails.
     } finally {
-      setLoading(false);
+      if (serial === loadSerial.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     setCurrentPage(1);
-    loadApps();
-  }, [statusFilter]);
+    void loadApps(true);
+    return () => { loadSerial.current++; };
+  }, [statusFilter, appliedSearch]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = adminRealtime.subscribe(notice => {
+      const relevant = notice.type === 'resync' || notice.type === 'change' &&
+        notice.change.type === 'resource.changed' &&
+        (notice.change.resource === 'apps' || notice.change.resource === 'licenses');
+      if (relevant) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { void loadApps(true); }, 200);
+      }
+    });
+    const fallback = setInterval(() => {
+      if (!['CONNECTED', 'AUTH_EXPIRED'].includes(adminRealtime.getStatus().state) &&
+          (typeof document === 'undefined' || document.visibilityState !== 'hidden')) void loadApps(true);
+    }, 30_000);
+    return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(fallback); };
+  }, [statusFilter, appliedSearch]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setCurrentPage(1);
-    loadApps();
+    const term = search.trim();
+    if (term !== appliedSearch) setAppliedSearch(term);
+    else void loadApps(true);
   };
 
   const totalPages = Math.max(1, Math.ceil(apps.length / pageSize));

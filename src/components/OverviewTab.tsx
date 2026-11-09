@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   Key,
   CheckCircle,
@@ -12,7 +12,7 @@ import {
   Terminal,
   AppWindow,
 } from 'lucide-react';
-import { api } from '../services/apiClient';
+import { adminRealtime, api } from '../services/apiClient';
 import { SystemStats, ValidationLog } from '../types';
 
 interface OverviewTabProps {
@@ -29,23 +29,50 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
   const [stats, setStats] = useState<SystemStats | null>(null);
   const [logs, setLogs] = useState<ValidationLog[]>([]);
   const [loading, setLoading] = useState(!stats);
+  const [loadError, setLoadError] = useState('');
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [connectionState, setConnectionState] = useState(adminRealtime.getStatus().state);
+  const loadSerial = useRef(0);
 
   const loadData = async (force = false) => {
+    const serial = ++loadSerial.current;
     try {
       if (!stats) setLoading(true);
       const [sRes, lRes] = await Promise.all([api.getStats(force), api.getLogs({ limit: 8 }, force)]);
+      if (serial !== loadSerial.current) return;
       if (sRes) setStats(sRes);
-      const logList = lRes?.logs || (Array.isArray(lRes) ? (lRes as any) : []);
+      const logList = lRes?.logs || (Array.isArray(lRes) ? (lRes as ValidationLog[]) : []);
       setLogs(Array.isArray(logList) ? logList : []);
+      setLastUpdated(Date.now());
+      setLoadError('');
     } catch {
-      // ignore
+      if (serial === loadSerial.current) setLoadError('Recent activity unavailable — showing last verified data');
     } finally {
-      setLoading(false);
+      if (serial === loadSerial.current) setLoading(false);
     }
   };
 
   useEffect(() => {
-    loadData();
+    void loadData(true);
+    return () => { loadSerial.current++; };
+  }, []);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = adminRealtime.subscribe(notice => {
+      if (notice.type === 'state') setConnectionState(notice.state);
+      if (notice.type === 'resync' || notice.type === 'change' &&
+        notice.change.type === 'resource.changed' &&
+        ['logs', 'stats', 'apps', 'licenses', 'devices'].includes(notice.change.resource)) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { void loadData(true); }, 200);
+      }
+    });
+    const fallback = setInterval(() => {
+      if (!['CONNECTED', 'AUTH_EXPIRED'].includes(adminRealtime.getStatus().state) &&
+          (typeof document === 'undefined' || document.visibilityState !== 'hidden')) void loadData(true);
+    }, 30_000);
+    return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(fallback); };
   }, []);
 
   const formatLogTime = (ms: number) => {
@@ -183,6 +210,9 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({
             <Terminal className="w-3.5 h-3.5 text-indigo-400/90" />
             Live Client Validation Stream
           </div>
+          <span className="text-[10px] text-slate-500" role="status" title={lastUpdated ? 'Last successful HTTP refresh: ' + new Date(lastUpdated).toLocaleString() : 'No successful HTTP refresh yet'}>
+            {loadError || (connectionState === 'CONNECTED' ? 'Live updates' : connectionState === 'AUTH_EXPIRED' ? 'Session expired' : 'HTTP fallback')}{lastUpdated ? ' · ' + new Date(lastUpdated).toLocaleTimeString() : ''}
+          </span>
           <button
             onClick={() => onNavigateTab('logs')}
             className="text-[11px] font-medium text-indigo-400/90 hover:text-indigo-300 transition-colors font-sans"

@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import { Laptop, Search, Trash2, RefreshCw, Key } from 'lucide-react';
-import { api } from '../services/apiClient';
+import { adminRealtime, api } from '../services/apiClient';
 import { Device, RealtimePresenceReport } from '../types';
 import { TablePagination } from './TablePagination';
 import { useConfirm } from '../context/ConfirmContext';
@@ -13,6 +13,10 @@ export const DevicesTab: React.FC = () => {
   const [search, setSearch] = useState('');
   const [actionLoading, setActionLoading] = useState(false);
   const [presence, setPresence] = useState<RealtimePresenceReport | null>(null);
+  const [appliedSearch, setAppliedSearch] = useState('');
+  const [loadError, setLoadError] = useState('');
+  const [realtimeState, setRealtimeState] = useState(adminRealtime.getStatus().state);
+  const loadSerial = useRef(0);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(() => {
@@ -33,48 +37,116 @@ export const DevicesTab: React.FC = () => {
   }, [currentPage]);
 
   const loadDevices = async (force = false) => {
+    const serial = ++loadSerial.current;
     try {
       if (devices.length === 0) setLoading(true);
-      const res = await api.getDevices({ search: search.trim() || undefined, limit: 100 }, force);
-      const devList = res?.devices || (Array.isArray(res) ? (res as any) : []);
-      setDevices(Array.isArray(devList) ? devList : []);
-      setTotal(typeof res?.total === 'number' ? res.total : (Array.isArray(devList) ? devList.length : 0));
+      const res = await api.getDevices({
+        search: appliedSearch || undefined,
+        limit: pageSize,
+        offset: (currentPage - 1) * pageSize,
+      }, force);
+      if (serial !== loadSerial.current) return;
+      const devList = res?.devices || (Array.isArray(res) ? (res as Device[]) : []);
+      const list: Device[] = Array.isArray(devList) ? devList : [];
+      const count = typeof res?.total === 'number' ? res.total : list.length;
+      setDevices(list);
+      setTotal(count);
+      setLoadError('');
+      if (currentPage > Math.max(1, Math.ceil(count / pageSize))) {
+        setCurrentPage(Math.max(1, Math.ceil(count / pageSize)));
+      }
     } catch {
-      // ignore
+      if (serial === loadSerial.current) setLoadError('Device data unavailable — retry refresh');
     } finally {
-      setLoading(false);
+      if (serial === loadSerial.current) setLoading(false);
     }
   };
 
+  // Server-side pagination: never load only the first 100 and slice locally.
   useEffect(() => {
-    loadDevices();
-  }, []);
+    void loadDevices(true);
+    return () => { loadSerial.current++; };
+  }, [appliedSearch, currentPage, pageSize]);
 
-  // Only while this tab is mounted; bounded one admin-only status request/15s.
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = adminRealtime.subscribe(notice => {
+      if (notice.type === 'state') {
+        setRealtimeState(notice.state);
+        return;
+      }
+      const relevant = notice.type === 'resync' || (
+        notice.type === 'change' && (
+          notice.change.type === 'presence.changed' ||
+          notice.change.type === 'resource.changed' &&
+          ['devices', 'licenses', 'apps'].includes(notice.change.resource)
+        )
+      );
+      if (relevant) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { void loadDevices(true); }, 200);
+      }
+    });
+    // Signed HTTP heartbeat writes do not always publish journal events.
+    // Refresh just the mounted page, and only while visible, to keep last_ping_at fresh.
+    const heartbeat = setInterval(() => {
+      if ((typeof document === 'undefined' || document.visibilityState !== 'hidden') &&
+          adminRealtime.getStatus().state !== 'AUTH_EXPIRED') {
+        void loadDevices(true);
+      }
+    }, 30_000);
+    return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(heartbeat); };
+  }, [appliedSearch, currentPage, pageSize]);
+
+  const pageDeviceIds = devices.map(device => device.id).slice(0, 100).join(',');
   useEffect(() => {
     let active = true;
+    let serial = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const refresh = () => {
-      void api.getRealtimePresence({ deviceIds: devices.map(device => device.id).slice(0, 100) })
-        .then(result => { if (active) setPresence(result); })
-        .catch(() => { if (active) setPresence(null); });
+      const request = ++serial;
+      void api.getRealtimePresence({ deviceIds: pageDeviceIds ? pageDeviceIds.split(',') : [] })
+        .then(result => { if (active && request === serial) setPresence(result); })
+        .catch(() => { if (active && request === serial) setPresence(null); });
     };
     refresh();
-    const interval = setInterval(refresh, 15000);
-    return () => { active = false; clearInterval(interval); };
-  }, [devices]);
+    const unsubscribe = adminRealtime.subscribe(notice => {
+      if (notice.type === 'state') setRealtimeState(notice.state);
+      if (notice.type === 'resync' || notice.type === 'change' && (
+          notice.change.type === 'presence.changed' ||
+          notice.change.type === 'resource.changed' &&
+          ['devices', 'licenses', 'apps'].includes(notice.change.resource)
+        ) || notice.type === 'snapshot' && adminRealtime.getStatus().state !== 'CONNECTED') {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(refresh, 150);
+      }
+    });
+    let ticks = 0;
+    const interval = setInterval(() => {
+      const state = adminRealtime.getStatus().state;
+      if ((typeof document === 'undefined' || document.visibilityState !== 'hidden') &&
+          state !== 'AUTH_EXPIRED' && (state !== 'CONNECTED' || ++ticks % 4 === 0)) refresh();
+    }, 15_000);
+    return () => {
+      active = false; serial++; unsubscribe();
+      if (timer) clearTimeout(timer);
+      clearInterval(interval);
+    };
+  }, [pageDeviceIds]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setCurrentPage(1);
-    loadDevices();
+    const term = search.trim();
+    if (term !== appliedSearch) setAppliedSearch(term);
+    else void loadDevices(true);
   };
 
-  const totalPages = Math.max(1, Math.ceil(devices.length / pageSize));
+  const presenceFresh = presence && realtimeState !== 'AUTH_EXPIRED' &&
+    Date.now() - presence.observedAt < 60_000;
+  const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
-  const paginatedDevices = useMemo(() => {
-    const start = (safeCurrentPage - 1) * pageSize;
-    return devices.slice(start, start + pageSize);
-  }, [devices, safeCurrentPage, pageSize]);
+  const paginatedDevices = devices;
 
   const handleUnbind = async (id: string) => {
     const connected = presence?.connectedDeviceIds.includes(id) ?? false;
@@ -127,14 +199,16 @@ export const DevicesTab: React.FC = () => {
 
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-mono text-slate-400">Total Bound: {total}</span>
-          {presence ? (
+          {loadError && <span role="status" className="text-[10px] text-amber-400">{loadError}</span>}
+          {presenceFresh ? (
             <span className="text-[10px] font-mono text-slate-400" aria-live="polite"
               title="Connected means verified WebSocket session, not merely a bound device. Stale is derived from last lease update.">
               WS: <span className="text-emerald-400">{presence.connectedNow}</span>
               <span className="mx-1 text-slate-600">|</span>Bound active: {presence.boundActive}
               <span className="mx-1 text-slate-600">|</span>Stale: {presence.staleBound}
+              <span className="mx-1 text-slate-600">|</span>{realtimeState} · {new Date(presence.observedAt).toLocaleTimeString()} · {presence.transportEnabled ? 'SDK WS ON' : 'SDK WS OFF'}
             </span>
-          ) : <span className="text-[10px] text-slate-500">Live report unavailable</span>}
+          ) : <span className="text-[10px] text-slate-500">Live report unavailable · {realtimeState}</span>}
           <button
             onClick={() => loadDevices(true)}
             className="p-1 rounded bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
@@ -160,7 +234,7 @@ export const DevicesTab: React.FC = () => {
               </tr>
             </thead>
             <tbody className="divide-y divide-slate-800/40 text-slate-300 text-[11px]">
-              {devices.length === 0 ? (
+              {paginatedDevices.length === 0 ? (
                 <tr>
                   <td colSpan={8} className="py-8 text-center text-slate-500">
                     {loading ? 'Loading devices...' : 'No active hardware bindings found.'}
@@ -197,12 +271,12 @@ export const DevicesTab: React.FC = () => {
                       )}
                     </td>
                     <td className="py-2 px-2.5">
-                      {presence?.connectedDeviceIds.includes(dev.id) ? (
+                      {presenceFresh && presence.connectedDeviceIds.includes(dev.id) ? (
                         <span className="text-emerald-400 text-[10px]" title="Authenticated WebSocket connection">Connected</span>
                       ) : (
                         <span className="text-slate-500 text-[10px]"
                           title="Not connected to this Node WebSocket gateway; may be HTTP-only, reconnecting or offline">
-                          {presence ? 'No WS' : 'Unknown'}
+                          {presenceFresh ? 'No WS' : 'Unknown'}
                         </span>
                       )}
                     </td>
@@ -227,7 +301,7 @@ export const DevicesTab: React.FC = () => {
         </div>
         <TablePagination
           currentPage={safeCurrentPage}
-          totalItems={devices.length}
+          totalItems={total}
           pageSize={pageSize}
           onPageChange={setCurrentPage}
           onPageSizeChange={(newSize) => {

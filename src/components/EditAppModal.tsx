@@ -1,6 +1,6 @@
 import { Loader2, X } from 'lucide-react';
 import React, { useEffect, useState } from 'react';
-import { api } from '../services/apiClient';
+import { adminRealtime, api } from '../services/apiClient';
 import { AppItem, RealtimePresenceReport } from '../types';
 
 interface EditAppModalProps {
@@ -20,17 +20,43 @@ export const EditAppModal: React.FC<EditAppModalProps> = ({ app, onClose, onUpda
   const [webSocketEnabled, setWebSocketEnabled] = useState(Number(app.realtime_websocket_enabled ?? 0) === 1);
   const [keepLoginOnNetworkError, setKeepLoginOnNetworkError] = useState(Number(app.keep_login_on_network_error ?? 0) === 1);
   const [presence, setPresence] = useState<RealtimePresenceReport | null>(null);
+  const [connectionState, setConnectionState] = useState(adminRealtime.getStatus().state);
 
   useEffect(() => {
     let active = true;
+    let serial = 0;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const refresh = () => {
+      const request = ++serial;
       void api.getRealtimePresence({ appId: app.id })
-        .then(report => { if (active) setPresence(report); })
-        .catch(() => { if (active) setPresence(null); });
+        .then(report => { if (active && request === serial) setPresence(report); })
+        .catch(() => { if (active && request === serial) setPresence(null); });
     };
     refresh();
-    const interval = setInterval(refresh, 15000);
-    return () => { active = false; clearInterval(interval); };
+    const unsubscribe = adminRealtime.subscribe(notice => {
+      if (notice.type === 'state') setConnectionState(notice.state);
+      const relevant = notice.type === 'resync' || notice.type === 'change' &&
+        (notice.change.app_id === null || notice.change.app_id === app.id) &&
+        (notice.change.type === 'presence.changed' ||
+         notice.change.type === 'resource.changed' &&
+         ['apps', 'licenses', 'devices'].includes(notice.change.resource));
+      if (relevant || notice.type === 'snapshot' &&
+          adminRealtime.getStatus().state !== 'CONNECTED') {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(refresh, 150);
+      }
+    });
+    // Existing 15-second HTTP fallback remains while Admin transport is unavailable.
+    let ticks = 0;
+    const interval = setInterval(() => {
+      const state = adminRealtime.getStatus().state;
+      if ((typeof document === 'undefined' || document.visibilityState !== 'hidden') &&
+          state !== 'AUTH_EXPIRED' && (state !== 'CONNECTED' || ++ticks % 4 === 0)) refresh();
+    }, 15_000);
+    return () => {
+      active = false; serial++; unsubscribe(); if (timer) clearTimeout(timer);
+      clearInterval(interval);
+    };
   }, [app.id]);
 
   const [loading, setLoading] = useState(false);
@@ -216,8 +242,13 @@ export const EditAppModal: React.FC<EditAppModalProps> = ({ app, onClose, onUpda
                   <span>WS connected: <strong className="text-emerald-400">{presence.connectedNow}</strong></span>
                   <span>Bound active: <strong className="text-slate-200">{presence.boundActive}</strong></span>
                   <span>Stale lease: <strong className="text-amber-400">{presence.staleBound}</strong></span>
+                  <span>WS sockets: {presence.activeSockets}</span>
+                  <span>SDK transport: {presence.transportEnabled ? 'ON' : 'OFF'}</span>
+                  <span title={'Observed: ' + new Date(presence.observedAt).toLocaleString()}>
+                    Admin: {connectionState} · {new Date(presence.observedAt).toLocaleTimeString()}
+                  </span>
                 </>
-              ) : <span>Live status unavailable</span>}
+              ) : <span>Live status unavailable · Admin: {connectionState}</span>}
             </div>
           </div>
 

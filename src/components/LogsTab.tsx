@@ -1,6 +1,6 @@
-import React, { useEffect, useState, useMemo } from 'react';
+import React, { useEffect, useState, useMemo, useRef } from 'react';
 import { Terminal, Trash2, RefreshCw } from 'lucide-react';
-import { api } from '../services/apiClient';
+import { adminRealtime, api } from '../services/apiClient';
 import { ValidationLog } from '../types';
 import { TablePagination } from './TablePagination';
 import { useConfirm } from '../context/ConfirmContext';
@@ -9,6 +9,10 @@ export const LogsTab: React.FC = () => {
   const confirm = useConfirm();
   const [logs, setLogs] = useState<ValidationLog[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [connectionState, setConnectionState] = useState(adminRealtime.getStatus().state);
+  const loadSerial = useRef(0);
   const [actionFilter, setActionFilter] = useState(() => {
     try {
       return sessionStorage.getItem('vcon_logs_action_filter') || 'all';
@@ -37,24 +41,46 @@ export const LogsTab: React.FC = () => {
   }, [actionFilter, currentPage]);
 
   const loadLogs = async (force = false) => {
+    const serial = ++loadSerial.current;
     try {
       if (logs.length === 0) setLoading(true);
       const res = await api.getLogs({
         action: actionFilter !== 'all' ? actionFilter : undefined,
         limit: 150,
       }, force);
-      const logList = res?.logs || (Array.isArray(res) ? (res as any) : []);
+      if (serial !== loadSerial.current) return;
+      const logList = res?.logs || (Array.isArray(res) ? (res as ValidationLog[]) : []);
       setLogs(Array.isArray(logList) ? logList : []);
+      setLastUpdated(Date.now());
+      setError('');
     } catch {
-      // ignore
+      if (serial === loadSerial.current) setError('Log data stale — refresh unavailable');
     } finally {
-      setLoading(false);
+      if (serial === loadSerial.current) setLoading(false);
     }
   };
 
   useEffect(() => {
     setCurrentPage(1);
-    loadLogs();
+    void loadLogs(true);
+    return () => { loadSerial.current++; };
+  }, [actionFilter]);
+
+  useEffect(() => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = adminRealtime.subscribe(notice => {
+      if (notice.type === 'state') setConnectionState(notice.state);
+      if (notice.type === 'resync' || notice.type === 'change' &&
+        notice.change.type === 'resource.changed' && notice.change.resource === 'logs') {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { void loadLogs(true); }, 200);
+      }
+    });
+    const fallback = setInterval(() => {
+      if (!['CONNECTED', 'AUTH_EXPIRED'].includes(adminRealtime.getStatus().state) &&
+          (typeof document === 'undefined' || document.visibilityState !== 'hidden')) void loadLogs(true);
+    }, 30_000);
+    return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(fallback); };
   }, [actionFilter]);
 
   const totalPages = Math.max(1, Math.ceil(logs.length / pageSize));
@@ -91,6 +117,9 @@ export const LogsTab: React.FC = () => {
         <div className="flex items-center gap-2">
           <span className="font-medium text-slate-300 uppercase tracking-wider">
             Audit Log Trail ({(logs || []).length})
+          </span>
+          <span className="text-[10px] text-slate-500" role="status" title={lastUpdated ? 'Last HTTP refresh: ' + new Date(lastUpdated).toLocaleString() : 'Awaiting first successful HTTP refresh'}>
+            {error || (connectionState === 'CONNECTED' ? 'Live updates' : connectionState === 'AUTH_EXPIRED' ? 'Session expired' : 'HTTP fallback')}{lastUpdated ? ' · ' + new Date(lastUpdated).toLocaleTimeString() : ''}
           </span>
           <select
             value={actionFilter}
