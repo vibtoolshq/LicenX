@@ -390,6 +390,48 @@ try {
     "metadata update UI", 12000);
   check("metadata-only App update reaches other browser", true);
 
+  // Phase-04: repeated synthetic HTTP mutation -> visible other-Chromium UI.
+  // Nearest-rank percentiles characterize this small disposable CI sample only.
+  const uiSamplesMs = [];
+  for (let i = 0; i < 12; i++) {
+    const displayName = "CI E2E P04 Pulse " + String(i).padStart(2, "0");
+    const t0 = performance.now();
+    const updated = await ctxB.request.patch(
+      origin + "/api/apps/" + encodeURIComponent(newApp.id), {
+        headers: { origin, "x-csrf-token": csrfB.csrfToken },
+        data: { display_name: displayName }
+      });
+    if (updated.status() !== 200) throw new Error("Phase-04 synthetic metadata PATCH failed");
+    await poll(async () =>
+      (await pageA.locator("main tbody").innerText()).includes(displayName),
+      "Phase-04 HTTP-to-Chromium visible event " + i, 16000);
+    uiSamplesMs.push(Math.round(performance.now() - t0));
+  }
+  const orderedSamples = [...uiSamplesMs].sort((x, y) => x - y);
+  const percentile = p => orderedSamples[Math.ceil(p * orderedSamples.length) - 1];
+  evidence.performance = {
+    scope: "DISPOSABLE_CI_ONLY",
+    series: "authenticated App PATCH start -> other Chromium table shows new value",
+    sampleCount: uiSamplesMs.length,
+    samplesMs: uiSamplesMs,
+    p50Ms: percentile(0.50),
+    p95Ms: percentile(0.95),
+    minMs: orderedSamples[0],
+    maxMs: orderedSamples.at(-1),
+    estimator: "nearest-rank small-sample percentiles; not production latency",
+    cpu: "SEPARATELY_MEASURED_IN_LOAD_ARTIFACT",
+    databaseQps: "SEPARATELY_MEASURED_IN_LOAD_ARTIFACT"
+  };
+  check("12 measured cross-browser UI latency observations",
+    uiSamplesMs.length === 12 && uiSamplesMs.every(x => Number.isFinite(x) && x >= 0));
+  check("bounded CI-only p50/p95 derived from observed samples",
+    evidence.performance.p50Ms <= evidence.performance.p95Ms &&
+    evidence.performance.p95Ms <= evidence.performance.maxMs);
+  console.log("CI_ONLY_UI_LATENCY " + JSON.stringify({
+    n: 12, p50Ms: evidence.performance.p50Ms,
+    p95Ms: evidence.performance.p95Ms
+  }));
+
   const licenseCount = a.frames.filter(f => f.type === "resource.changed" && f.resource === "licenses").length;
   const newLicense = await ctxB.request.post(origin + "/api/licenses", {
     headers: { origin, "x-csrf-token": csrfB.csrfToken },

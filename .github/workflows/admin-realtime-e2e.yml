@@ -104,6 +104,14 @@ jobs:
           set -euo pipefail
           node tests/e2e/admin-browser.mjs
 
+      - name: Measure bounded 32 Admin WSS sockets, 33rd rejection and resources
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$DOMAIN" = "localhost"
+          test "$COMPOSE_PROJECT_NAME" = "licenx_admin_ci_${GITHUB_RUN_ID}"
+          node tests/e2e/admin-load.mjs
+
       - name: Rehearse Admin-only gate OFF (licensed SDK gate stays ON)
         shell: bash
         run: |
@@ -117,8 +125,18 @@ jobs:
             test "$LICENX_REALTIME_TRANSPORT_ENABLED" = true
           '
           NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/licenx-ci-local-ca.pem" node --input-type=module -e '
+            import { writeFile } from "node:fs/promises";
             const r = await fetch("https://localhost/api/ready");
-            if (r.status !== 200) process.exit(1);
+            const body = r.ok ? await r.json() : {};
+            if (r.status !== 200 || body.status !== "ready") process.exit(1);
+            await writeFile("ci-admin-evidence/rollback.json",
+              JSON.stringify({
+                scope: "DISPOSABLE_CI_ONLY",
+                adminRealtimeGate: "OFF",
+                licensedSdkTransport: "ON",
+                authenticatedAppHttpReady: true,
+                production: "NOT_TOUCHED"
+              }, null, 2) + "\n", { mode: 0o600 });
             console.log("PASS: CI Admin gate OFF; SDK transport configuration preserved");
           '
 
@@ -140,7 +158,17 @@ jobs:
         shell: bash
         run: |
           if [[ "${COMPOSE_PROJECT_NAME:-}" == "licenx_admin_ci_${GITHUB_RUN_ID}" ]]; then
-            docker compose --profile standalone-https down --volumes --remove-orphans || true
+            docker compose --profile standalone-https down --volumes --remove-orphans
+            if [[ -n "$(docker ps -aq --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}")" ]]; then
+              echo "CI cleanup FAILED: isolated project containers remain"
+              exit 1
+            fi
+            if [[ -n "$(docker volume ls -q --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}")" ]]; then
+              echo "CI cleanup FAILED: isolated project volumes remain"
+              exit 1
+            fi
+            echo "PASS: disposable CI containers and volumes removed"
           else
-            echo "Cleanup skipped: CI project identity guard failed"
+            echo "CI cleanup FAILED: isolated project identity guard not met"
+            exit 1
           fi
