@@ -291,10 +291,15 @@ class XLicenseClient:
         self._license_payload = None
         self._current_key = None
         try:
+            # An automatic local invalidation (e.g. WSS TLS/security failure)
+            # cannot justify deleting an active server-side device binding.
+            # Deny locally, stop workers and clear local state without remote
+            # unbind. Explicit user logout retains its original unbind path.
+            self.logout_manager.set_active_session(None)
             self.logout_manager.logout(clear_saved_data=True)
         except Exception:
             pass
-        print(f"\n[VCON-SDK] CRITICAL: License session invalidated. Reason: {reason}")
+        print("\n[VCON-SDK] CRITICAL: License session invalidated; local authorization denied")
         if self.on_license_revoked:
             self.on_license_revoked(reason)
 

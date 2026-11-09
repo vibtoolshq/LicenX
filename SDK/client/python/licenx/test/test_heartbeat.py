@@ -180,6 +180,49 @@ class HeartbeatVerificationTests(unittest.TestCase):
         client.logout_manager.logout.assert_called_once_with(clear_saved_data=True)
         client.on_license_revoked.assert_called_once()
 
+    def test_automatic_invalidation_denies_locally_without_remote_unbind(self):
+        # A TLS/signed-proof failure is not an authorized server decision to
+        # release the user's device binding. Explicit manual logout still is.
+        from licenx.device import DeviceManager
+        from licenx.logout import LogoutManager
+
+        for reason in ("REALTIME_TLS_ERROR", "NETWORK_GRACE_EXPIRED", "DEVICE_UNBOUND"):
+            with self.subTest(reason=reason):
+                transport = Mock()
+                storage = Mock()
+                manager = LogoutManager(transport, storage, auto_logout_on_exit=False)
+                manager.set_active_session("SYNTHETIC-LICENSE")
+                client = XLicenseClient.__new__(XLicenseClient)
+                client._stop_realtime = Mock()
+                client.logout_manager = manager
+                client.on_license_revoked = Mock()
+                client._current_key = "SYNTHETIC-LICENSE"
+                client._authenticated = True
+                client._license_payload = {"valid": True}
+
+                with patch.object(DeviceManager, "get_hwid", return_value="SYNTHETIC-HWID"), \
+                     patch("builtins.print") as logger:
+                    client._handle_license_revoked(reason)
+
+                self.assertFalse(client._authenticated)
+                self.assertIsNone(client._current_key)
+                self.assertIsNone(client._license_payload)
+                client._stop_realtime.assert_called_once_with()
+                storage.stop_monitoring.assert_called_once_with()
+                storage.clear_session.assert_called_once_with()
+                transport.send_logout.assert_not_called()
+                self.assertIsNone(manager._current_license_key)
+                client.on_license_revoked.assert_called_once_with(reason)
+                self.assertNotIn(reason, str(logger.call_args))
+
+                transport.send_logout.return_value = True
+                manager.set_active_session("SYNTHETIC-MANUAL")
+                with patch.object(DeviceManager, "get_hwid", return_value="SYNTHETIC-HWID"):
+                    self.assertTrue(manager.logout())
+                transport.send_logout.assert_called_once_with(
+                    "SYNTHETIC-MANUAL", "SYNTHETIC-HWID"
+                )
+
     def test_transient_failure_is_allowed_until_offline_grace_expires(self):
         communicator = Mock()
         communicator.ping_heartbeat.return_value = (
