@@ -261,11 +261,22 @@ class SDKConfig:
         except (OSError, TypeError, ValueError):
             pass
 
-        def _canonical(p: str) -> str:
+        def _canonical(p: str) -> tuple:
+            # macOS can use case-insensitive APFS while os.path.normcase()
+            # leaves case untouched on POSIX. Identify actual filesystem
+            # objects so two casing aliases or symlinks are one candidate.
+            # Keep distinct files distinct: never lowercase all POSIX paths.
             try:
-                return os.path.normcase(os.path.realpath(os.path.abspath(p)))
-            except Exception:
-                return os.path.normcase(os.path.abspath(p))
+                info = os.stat(p)
+                if info.st_ino:
+                    return ("inode", info.st_dev, info.st_ino)
+            except (OSError, ValueError):
+                pass
+            try:
+                canonical = os.path.normcase(os.path.realpath(os.path.abspath(p)))
+            except (OSError, TypeError, ValueError):
+                canonical = os.path.normcase(os.path.abspath(p))
+            return ("path", canonical)
 
         seen_dirs = set()
         candidate_dirs = []

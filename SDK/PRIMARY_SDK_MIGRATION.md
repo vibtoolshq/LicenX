@@ -107,3 +107,7 @@ Only an independently approved release-request commit can trigger a publish.
 After publication, do not delete or edit a release request to rerun a release;
 PyPI package versions and filenames are immutable. Do not put secrets in the
 request file.
+
+## 2026-11-10 — Failed initial tag and immutable next version
+
+The first `python-sdk-v1.2.3` release request created a tag, but its multi-platform test matrix did **not** pass: `ubuntu-latest` moved to Ubuntu 26.04 without Python 3.8/3.9, and case-insensitive macOS APFS exposed path-alias deduplication in SDK config discovery. **No GitHub Release wheel or PyPI distribution was published from that failed tag.** Do not move/reuse the tag. The corrected SDK is released as **1.2.4** with `ubuntu-24.04` pinned for the compatibility matrix and filesystem inode-based dedup that preserves ambiguity for genuinely distinct config files. A focused PR compatibility matrix verifies Ubuntu 3.8/3.9 and macOS 3.11/3.13 before the next new release request. Existing CalGrid EXEs are unchanged and may need a separately approved SDK rebuild to consume 1.2.4.

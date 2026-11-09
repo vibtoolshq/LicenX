@@ -49,6 +49,34 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  sdk-platform-compat:
+    name: Primary SDK portability (${{ matrix.os }}, Python ${{ matrix.python-version }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            python-version: "3.8"
+          - os: ubuntu-24.04
+            python-version: "3.9"
+          - os: macos-15-intel
+            python-version: "3.11"
+          - os: macos-15-intel
+            python-version: "3.13"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+      - name: Focused signed SDK and Python config discovery tests
+        run: |
+          python -m pip install -r SDK/client/python/licenx/requirements.txt
+          python -m unittest discover -s SDK/client/python/licenx/test -p "test_*.py"
   build-and-smoke:
     name: Build and exercise isolated Docker Compose
     runs-on: ubuntu-24.04
@@ -90,7 +118,10 @@ jobs:
           "$RUNNER_TEMP/licenx-package-venv/bin/python" - <<'PY'
           import importlib.metadata as metadata
           from licenx import XLicenseClient, SDKConfig
-          assert metadata.version("licenx") == "1.2.3"
+          from pathlib import Path
+          import tomllib
+          package = tomllib.loads(Path("SDK/client/python/licenx/pyproject.toml").read_text())
+          assert metadata.version("licenx") == package["project"]["version"]
           assert XLicenseClient is not None and SDKConfig is not None
           print("PRIMARY_LICENX_WHEEL_INSTALL=PASS")
           PY
