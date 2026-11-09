@@ -198,7 +198,20 @@ async function rollbackProbe(){
   const data=await ping.json();
   if(ping.status!==200||data.valid!==true||data.nonce!==nonce)
     throw new Error("Existing signed HTTP heartbeat broke under WS rollback");
-  const publicKey=fs.readFileSync(publicKeyPath,"utf8");
+  // App was force-recreated for rollback: its ephemeral /tmp public-key
+  // fixture is gone. Read only the disposable CI database's PUBLIC key.
+  if(!process.env.DATABASE_URL?.includes("/licenx_ci?") ||
+     !process.env.DATABASE_URL.includes("@postgres:5432/")) {
+    throw new Error("Rollback probe refused non-disposable database");
+  }
+  const db=new pg.Client({connectionString:process.env.DATABASE_URL});
+  await db.connect();
+  let publicKey;
+  try {
+    const record=await db.query("SELECT ed25519_public_key FROM admin_config LIMIT 1");
+    publicKey=record.rows[0]?.ed25519_public_key;
+  } finally { await db.end(); }
+  if(typeof publicKey!=="string" || !publicKey)throw new Error("Rollback verification key missing");
   if(!signed(data,publicKey)){
     const {public_key,...payload}=data;
     if(!signed(payload,publicKey))throw new Error("Rollback HTTP signature invalid");
