@@ -12,6 +12,7 @@ import { createRealtimeTickets, validateRealtimeDevice } from './src/server/real
 import { createRealtimeLeaseManager } from './src/server/realtime/leaseManager.js';
 import { createRealtimeEventPublisher } from './src/server/realtime/eventPublisher.js';
 import { setRealtimePresenceEnabled, registerRealtimePresence } from './src/server/realtime/presence.js';
+import { createAdminRealtimeGateway, setActiveAdminRealtimeGateway } from './src/server/realtime/adminGateway.js';
 import type { RealtimeIdentity } from './src/server/realtime/sessionTickets.js';
 
 dotenv.config();
@@ -51,6 +52,7 @@ app.get('/api/ready', readiness);
 // Bound payloads before the general 20 MiB parser; never preflight-authorize browser callers.
 app.use('/api/v1/public/license/check', express.json({ limit: '1kb' }));
 app.use('/api/v1/realtime/ticket', express.json({ limit: '2kb' }));
+app.use('/api/admin/realtime/bootstrap', express.json({ limit: '1kb' }));
 app.options('/api/v1/public/license/check', (_req, res) => res.status(405).set('Allow', 'POST').set('Cache-Control', 'no-store').json({code: 'METHOD_NOT_ALLOWED'}));
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
@@ -99,6 +101,11 @@ const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
 
 async function main() {
   await initDatabaseSchema();
+  // Independent Admin WSS gate; always OFF unless explicitly enabled.
+  const adminRealtime = process.env.LICENX_ADMIN_REALTIME_ENABLED === 'true'
+    ? createAdminRealtimeGateway(() => ready && !shuttingDown && !isBackupRestoreRunning())
+    : null;
+  setActiveAdminRealtimeGateway(adminRealtime);
   if (process.env.STORAGE_PROVIDER === 'local') {
     if (!path.isAbsolute(storageRoot)) throw new Error('LOCAL_STORAGE_PATH must be absolute');
     await fs.mkdir(storageRoot, { recursive: true, mode: 0o700 });
@@ -183,6 +190,7 @@ async function main() {
     realtimeLease?.start(() => console.error('[LicenX] Realtime lease maintenance unavailable'));
     realtimePublisher?.start(() => console.error('[LicenX] Realtime event relay unavailable'));
   }
+  if (adminRealtime) adminRealtime.attach(server);
   const shutdown = () => {
     if (shuttingDown) return;
     shuttingDown = true;
@@ -191,6 +199,16 @@ async function main() {
       try { await getDbClient().close(); process.exit(0); }
       catch { process.exit(1); }
     });
+    const stopAdminRealtime = () => {
+      setActiveAdminRealtimeGateway(null);
+      if (adminRealtime) {
+        void adminRealtime.stop()
+          .catch(() => console.error('[LicenX] Admin realtime shutdown failed'))
+          .finally(closeHttpServer);
+      } else {
+        closeHttpServer();
+      }
+    };
     if (realtimeTransport) {
       realtimePublisher?.stop();
       realtimeLease?.stop();
@@ -198,9 +216,9 @@ async function main() {
       realtimeTickets = null;
       void realtimeTransport.stop()
         .catch(() => console.error('[LicenX] Realtime transport shutdown failed'))
-        .finally(closeHttpServer);
+        .finally(stopAdminRealtime);
     } else {
-      closeHttpServer();
+      stopAdminRealtime();
     }
     setTimeout(() => process.exit(1), 10_000).unref();
   };

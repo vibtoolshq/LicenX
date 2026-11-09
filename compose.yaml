@@ -30,6 +30,8 @@ services:
       PUBLIC_LICENSE_CHECK_RATE_SECRET: ${PUBLIC_LICENSE_CHECK_RATE_SECRET:-}
       # WS-05: existing port 3000/Caddy upgrade; OFF unless explicitly approved.
       LICENX_REALTIME_TRANSPORT_ENABLED: ${LICENX_REALTIME_TRANSPORT_ENABLED:-false}
+      # ADMIN-RT-01: separate browser-admin WebSocket gate, OFF until release sign-off.
+      LICENX_ADMIN_REALTIME_ENABLED: ${LICENX_ADMIN_REALTIME_ENABLED:-false}
     volumes:
       - app-storage:/var/lib/licenx/storage
     depends_on:

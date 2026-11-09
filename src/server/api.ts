@@ -35,6 +35,11 @@ import {
 } from "./crypto.js";
 import { getDbClient, isTursoPlaceholder } from "./db.js";
 import { closeRealtimeDeviceSessions, getRealtimePresenceReport } from "./realtime/presence.js";
+import {
+  getActiveAdminRealtimeGateway,
+  isAllowedAdminRealtimeOrigin,
+  revokeAdminRealtimeSession,
+} from "./realtime/adminGateway.js";
 import { validateAdminLicenseCreation } from "./adminApiInput.js";
 import { createAdminApiRateLimiter } from "./adminApiRateLimiter.js";
 import { runRestrictedPublicLicenseCheck, PUBLIC_LICENSE_CHECK_PATH } from "./restrictedPublicLicenseCheck.js";
@@ -328,11 +333,37 @@ apiRouter.get("/auth/csrf", (req: Request, res: Response) => {
   res.json({ csrfToken: token });
 });
 
+// Browser bootstrap proof is one-use, HttpOnly and never returned in JSON.
+apiRouter.post("/admin/realtime/bootstrap", requireAdminAuth, (req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  const gateway = getActiveAdminRealtimeGateway();
+  if (!gateway) {
+    res.status(404).json({ code: "ADMIN_REALTIME_DISABLED" });
+    return;
+  }
+  const sessionToken = getCookieValue(req.headers.cookie, ADMIN_SESSION_COOKIE);
+  if (!sessionToken || req.headers.authorization ||
+      !isAllowedAdminRealtimeOrigin(req.headers.origin, req.get("host")) ||
+      !hasValidAdminCsrf(req)) {
+    res.status(403).json({ code: "ADMIN_REALTIME_FORBIDDEN" });
+    return;
+  }
+  const proofCookie = gateway.issueBootstrap(sessionToken);
+  if (!proofCookie) {
+    res.status(503).json({ code: "ADMIN_REALTIME_UNAVAILABLE" });
+    return;
+  }
+  res.setHeader("Set-Cookie", proofCookie);
+  res.json({ expires_in_seconds: 30 });
+});
+
 apiRouter.post("/auth/logout", (req: Request, res: Response) => {
   if (isBrowserRequest(req) && !hasValidAdminCsrf(req)) {
     res.status(403).json({ error: "Invalid CSRF token" });
     return;
   }
+  const sessionToken = getCookieValue(req.headers.cookie, ADMIN_SESSION_COOKIE);
+  if (sessionToken) revokeAdminRealtimeSession(sessionToken);
   res.setHeader("Set-Cookie", clearAdminSessionCookie());
   res.json({ success: true });
 });
