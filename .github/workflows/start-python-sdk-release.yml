@@ -1,0 +1,85 @@
+name: Authorize an explicit SDK release request
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "SDK/release-requests/python-sdk-v*.txt"
+
+permissions: {}
+
+concurrency:
+  group: sdk-release-request-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  create-tag-and-dispatch:
+    if: github.repository == 'vibtoolshq/LicenX'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Check out exact approved main revision
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - name: Verify one newly created explicit SDK release request
+        id: release
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$(git branch -r --contains "$EXPECTED_SHA" | grep -c origin/main)" -ge 1
+          mapfile -t changes < <(git diff-tree --no-commit-id --name-only -r "$EXPECTED_SHA")
+          test "${#changes[@]}" -eq 1 || { echo "::error::Only a release request file may change"; exit 1; }
+          release_file="${changes[0]}"
+          if [[ ! "$release_file" =~ ^SDK/release-requests/python-sdk-v([0-9]+\.[0-9]+\.[0-9]+)\.txt$ ]]; then
+            echo "::error::Unrecognized Python SDK release request filename"
+            exit 1
+          fi
+          release_version="${BASH_REMATCH[1]}"
+          test "$(git diff-tree --no-commit-id --name-status -r "$EXPECTED_SHA" | cut -f1)" = A
+          test ! -f ".git/FETCH_HEAD.not-applicable"
+          RELEASE_VERSION="$release_version" RELEASE_FILE="$release_file" python - <<'PY'
+          import os, pathlib, subprocess, tomllib
+          path = pathlib.Path(os.environ["RELEASE_FILE"])
+          version = os.environ["RELEASE_VERSION"]
+          package = tomllib.loads(pathlib.Path("SDK/client/python/licenx/pyproject.toml").read_text())
+          parent = subprocess.check_output(["git", "rev-parse", "HEAD^"], text=True).strip()
+          expected = f"version={version}\nsource_sha={parent}\n"
+          if path.read_text(encoding="utf-8") != expected:
+              raise SystemExit("Release request file contents do not match approved source commit")
+          if package["project"]["name"] != "licenx" or package["project"]["version"] != version:
+              raise SystemExit("Primary SDK package version/name mismatch")
+          if (pathlib.Path("SDK") / "x_license_python").exists():
+              raise SystemExit("Legacy SDK still present; refusing release")
+          print("PASS: exact version, reviewed source parent and primary SDK only")
+          PY
+          echo "tag=python-sdk-v${release_version}" >> "$GITHUB_OUTPUT"
+
+      - name: Create immutable release tag and explicitly dispatch verified release workflow
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG_NAME: ${{ steps.release.outputs.tag }}
+          EXPECTED_SHA: ${{ github.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/${TAG_NAME}" >/dev/null 2>&1; then
+            echo "::error::SDK release tag already exists; no release overwrite"
+            exit 1
+          fi
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            --field "ref=refs/tags/${TAG_NAME}" \
+            --field "sha=${EXPECTED_SHA}" >/dev/null
+          test "$(git ls-remote origin "refs/tags/${TAG_NAME}" | cut -f1)" = "$EXPECTED_SHA"
+          # GITHUB_TOKEN-created tags suppress push-triggered workflows.
+          # workflow_dispatch is an allowed exception; one exact tag workflow runs.
+          gh workflow run release-python-sdk.yml \
+            --repo "$GITHUB_REPOSITORY" --ref "$TAG_NAME"
+          echo "PASS: tagged and dispatched SDK publication without exposing PyPI credentials"

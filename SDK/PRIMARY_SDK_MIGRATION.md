@@ -80,3 +80,30 @@ and platform-specific wheels would require a separate audited design and CI.
 The token is not used during code builds, not printed, and is only passed
 to the isolated publishing job. If a tag has already been uploaded, reruns
 will fail rather than silently skip or overwrite an immutable PyPI version.
+
+## Explicit SDK release request (GitHub Actions permission-safe trigger)
+
+Because this GitHub integration cannot create tag refs directly, the controlled
+release path is an explicit new file committed to `main`:
+`SDK/release-requests/python-sdk-vX.Y.Z.txt` containing exactly two lines:
+
+```text
+version=X.Y.Z
+source_sha=<reviewed previous main commit SHA>
+```
+
+The `Authorize an explicit SDK release request` GitHub workflow accepts only
+a commit adding exactly one new release-request file, validates that its
+previous commit and the `licenx` package version match, and uses a minimal
+`contents:write/actions:write` GitHub Actions job to create the immutable
+`python-sdk-vX.Y.Z` tag. It then explicitly dispatches the existing
+`release-python-sdk.yml` on that exact tag, because GitHub suppresses
+ordinary push events for tags created using `GITHUB_TOKEN`. The existing
+tag workflow runs full platform SDK tests, source/wheel checks, GitHub Release
+checksum verification and the separately permission-scoped PyPI upload job.
+
+**No release request file is added by merging this documentation alone.**
+Only an independently approved release-request commit can trigger a publish.
+After publication, do not delete or edit a release request to rerun a release;
+PyPI package versions and filenames are immutable. Do not put secrets in the
+request file.
