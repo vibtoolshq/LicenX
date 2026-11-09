@@ -227,6 +227,57 @@ export async function migratePostgres(db: DatabaseClient): Promise<void> {
         args: [Date.now()],
       });
     }
+    // ADMIN-RT remediation Phase-01: additive journal coverage for committed
+    // creations and UI-visible metadata changes. Migration v4 remains untouched.
+    const notificationMigration = await transaction.execute(
+      "SELECT version FROM licenx_schema_migrations WHERE version = 5",
+    );
+    if (!notificationMigration.rows.length) {
+      // Reuse the existing sanitized event function; all triggers run within
+      // their owning mutation transaction and contain IDs, never customer data.
+      for (const table of ["app", "license", "device"]) {
+        await transaction.execute(
+          `CREATE TRIGGER licenx_rt_${table}_insert AFTER INSERT ON ${table}s
+           FOR EACH ROW EXECUTE FUNCTION licenx_realtime_audit_event()`,
+        );
+      }
+      // Old policy/status triggers continue handling their own changes.
+      // Complementary metadata triggers only run if the policy/status group
+      // did NOT change; mixed edits produce one journal event, not two.
+      await transaction.execute(`CREATE TRIGGER licenx_rt_app_ui_update
+        AFTER UPDATE OF display_name, description ON apps
+        FOR EACH ROW WHEN (
+          ROW(OLD.display_name, OLD.description)
+            IS DISTINCT FROM ROW(NEW.display_name, NEW.description)
+          AND ROW(OLD.status,OLD.realtime_websocket_enabled,OLD.keep_login_on_network_error,
+            OLD.device_lease_seconds,OLD.ping_interval_seconds,OLD.offline_grace_seconds,OLD.min_version)
+            IS NOT DISTINCT FROM
+            ROW(NEW.status,NEW.realtime_websocket_enabled,NEW.keep_login_on_network_error,
+              NEW.device_lease_seconds,NEW.ping_interval_seconds,NEW.offline_grace_seconds,NEW.min_version)
+        ) EXECUTE FUNCTION licenx_realtime_audit_event()`);
+      await transaction.execute(`CREATE TRIGGER licenx_rt_license_ui_update
+        AFTER UPDATE OF customer_name, customer_email, notes, metadata_json, pin,
+          validity_type, validity_value, activated_at ON licenses
+        FOR EACH ROW WHEN (
+          ROW(OLD.customer_name,OLD.customer_email,OLD.notes,OLD.metadata_json,OLD.pin,
+            OLD.validity_type,OLD.validity_value,OLD.activated_at)
+            IS DISTINCT FROM ROW(NEW.customer_name,NEW.customer_email,NEW.notes,NEW.metadata_json,NEW.pin,
+              NEW.validity_type,NEW.validity_value,NEW.activated_at)
+          AND ROW(OLD.status,OLD.expires_at,OLD.app_id,OLD.device_limit,OLD.tier)
+            IS NOT DISTINCT FROM ROW(NEW.status,NEW.expires_at,NEW.app_id,NEW.device_limit,NEW.tier)
+        ) EXECUTE FUNCTION licenx_realtime_audit_event()`);
+      await transaction.execute(`CREATE TRIGGER licenx_rt_device_ui_update
+        AFTER UPDATE OF device_name, os_info, ip_address ON devices
+        FOR EACH ROW WHEN (
+          ROW(OLD.device_name,OLD.os_info,OLD.ip_address)
+            IS DISTINCT FROM ROW(NEW.device_name,NEW.os_info,NEW.ip_address)
+          AND OLD.status IS NOT DISTINCT FROM NEW.status
+        ) EXECUTE FUNCTION licenx_realtime_audit_event()`);
+      await transaction.execute({
+        sql: "INSERT INTO licenx_schema_migrations (version, applied_at) VALUES (5, ?)",
+        args: [Date.now()],
+      });
+    }
     await transaction.commit();
   } catch (error) {
     await transaction.rollback();

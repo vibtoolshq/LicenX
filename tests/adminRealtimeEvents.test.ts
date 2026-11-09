@@ -195,3 +195,79 @@ test("ADMIN-RT-02: authenticated Admin-only socket dispatch is App-scoped, coale
     for(const [name,value] of Object.entries(original)){if(value===undefined)delete process.env[name];else process.env[name]=value;}
   }
 });
+
+
+test("ADMIN-RT remediation-01: SQLite journal covers insert/metadata without duplicate or heartbeat events", async () => {
+  const envNames = ["NODE_ENV", "DATABASE_PROVIDER", "DATABASE_URL", "TURSO_DATABASE_URL", "TURSO_AUTH_TOKEN"];
+  const previous = Object.fromEntries(envNames.map(name => [name, process.env[name]]));
+  process.env.NODE_ENV = "test";
+  process.env.DATABASE_PROVIDER = "libsql";
+  process.env.DATABASE_URL = "file::memory:";
+  delete process.env.TURSO_DATABASE_URL;
+  delete process.env.TURSO_AUTH_TOKEN;
+  const db = getDbClient();
+  try {
+    await initDatabaseSchema();
+    const now = Date.now();
+    await db.execute({ sql: `INSERT INTO apps
+      (id,app_slug,display_name,status,app_secret,created_at,updated_at)
+      VALUES (?,?,?,'active',?,?,?)`,
+      args: ["p01-app","p01-app","App A","placeholder-secret",now,now] });
+    await db.execute({ sql: `INSERT INTO licenses
+      (id,key,app_id,status,device_limit,created_at)
+      VALUES (?,?,?,'active',1,?)`,
+      args: ["p01-lic","FAKE-SECRET-KEY","p01-app",now] });
+    await db.execute({ sql: `INSERT INTO devices
+      (id,license_id,hwid,first_bound_at,last_ping_at,status)
+      VALUES (?,?,?,?,?,'active')`,
+      args: ["p01-dev","p01-lic","FAKE-PRIVATE-HWID",now,now] });
+    const inserted = (await db.execute(
+      "SELECT event_type,app_id,license_id,device_id FROM realtime_events ORDER BY id"
+    )).rows;
+    assert.deepEqual(inserted.map(x => x.event_type), ["app.changed", "license.changed", "device.changed"]);
+    assert.deepEqual(inserted.map(x => x.app_id), ["p01-app", "p01-app", "p01-app"]);
+    assert.deepEqual(inserted.map(x => x.license_id), [null, "p01-lic", "p01-lic"]);
+    assert.deepEqual(inserted.map(x => x.device_id), [null, null, "p01-dev"]);
+    assert.doesNotMatch(JSON.stringify(inserted), /FAKE-SECRET|FAKE-PRIVATE|placeholder-secret/);
+
+    await db.execute("DELETE FROM realtime_events");
+    await db.execute("UPDATE apps SET display_name='App B' WHERE id='p01-app'");
+    await db.execute("UPDATE apps SET status='inactive',description='mixed' WHERE id='p01-app'");
+    await db.execute("UPDATE licenses SET customer_name='Fixture' WHERE id='p01-lic'");
+    await db.execute("UPDATE licenses SET status='revoked',customer_email='fixture@example.invalid' WHERE id='p01-lic'");
+    await db.execute("UPDATE devices SET device_name='Fixture Device' WHERE id='p01-dev'");
+    await db.execute("UPDATE devices SET status='blocked',os_info='fixture' WHERE id='p01-dev'");
+    await db.execute({ sql: "UPDATE devices SET last_ping_at=? WHERE id='p01-dev'", args: [now + 5_000] });
+    await db.execute("UPDATE apps SET display_name='App B' WHERE id='p01-app'");
+    const changed = (await db.execute(
+      "SELECT id,event_type,app_id,license_id,device_id FROM realtime_events ORDER BY id"
+    )).rows;
+    assert.deepEqual(changed.map(x => x.event_type), [
+      "app.changed","app.changed","license.changed","license.changed","device.changed","device.changed",
+    ], "metadata and mixed policy changes each yield exactly one event; heartbeat/no-op yields none");
+    assert.deepEqual(changed.map(x => Number(x.id)), [...changed.map(x => Number(x.id))].sort((a, b) => a - b));
+    assert.doesNotMatch(JSON.stringify(changed), /FAKE-SECRET|FAKE-PRIVATE|fixture@example.invalid/);
+
+    await initDatabaseSchema();
+    const triggerCount = await db.execute(
+      "SELECT COUNT(*) AS count FROM sqlite_master WHERE type='trigger' AND name='licenx_rt_app_insert'"
+    );
+    assert.equal(Number(triggerCount.rows[0].count), 1);
+    const tx = await db.transaction("write");
+    try {
+      await tx.execute({ sql: `INSERT INTO apps
+        (id,app_slug,display_name,app_secret,created_at,updated_at)
+        VALUES (?,?,?,?,?,?)`, args: ["p01-rolled-back","p01-rolled-back","Temporary","private",now,now] });
+      await tx.rollback();
+    } finally { tx.close(); }
+    assert.equal(Number((await db.execute(
+      "SELECT COUNT(*) AS count FROM realtime_events WHERE app_id='p01-rolled-back'"
+    )).rows[0].count), 0, "rolled-back business INSERT cannot leak journal event");
+  } finally {
+    await db.close();
+    for (const [name, value] of Object.entries(previous)) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});

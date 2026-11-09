@@ -256,6 +256,48 @@ async function ensureRealtimeSqliteSchema(db: DatabaseClient): Promise<void> {
     `CREATE TRIGGER IF NOT EXISTS licenx_rt_device_delete AFTER DELETE ON devices
       BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
         VALUES('device.deleted',(SELECT app_id FROM licenses WHERE id = OLD.license_id),OLD.license_id,OLD.id,${now}); END`,
+    // Additive triggers: existing policy/status triggers remain intact.
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_app_insert AFTER INSERT ON apps
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('app.changed',NEW.id,NULL,NULL,${now}); END`,
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_license_insert AFTER INSERT ON licenses
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('license.changed',NEW.app_id,NEW.id,NULL,${now}); END`,
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_device_insert AFTER INSERT ON devices
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('device.changed',(SELECT app_id FROM licenses WHERE id=NEW.license_id),NEW.license_id,NEW.id,${now}); END`,
+    // Complement existing update triggers: mixed metadata + policy edits must
+    // publish exactly one event, with no heartbeat-only (last_ping_at) trigger.
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_app_ui_update
+      AFTER UPDATE OF display_name, description ON apps
+      WHEN (OLD.display_name IS NOT NEW.display_name OR OLD.description IS NOT NEW.description)
+        AND OLD.status IS NEW.status
+        AND OLD.realtime_websocket_enabled IS NEW.realtime_websocket_enabled
+        AND OLD.keep_login_on_network_error IS NEW.keep_login_on_network_error
+        AND OLD.device_lease_seconds IS NEW.device_lease_seconds
+        AND OLD.ping_interval_seconds IS NEW.ping_interval_seconds
+        AND OLD.offline_grace_seconds IS NEW.offline_grace_seconds
+        AND OLD.min_version IS NEW.min_version
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('app.changed',NEW.id,NULL,NULL,${now}); END`,
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_license_ui_update
+      AFTER UPDATE OF customer_name, customer_email, notes, metadata_json, pin,
+        validity_type, validity_value, activated_at ON licenses
+      WHEN (OLD.customer_name IS NOT NEW.customer_name OR OLD.customer_email IS NOT NEW.customer_email
+        OR OLD.notes IS NOT NEW.notes OR OLD.metadata_json IS NOT NEW.metadata_json
+        OR OLD.pin IS NOT NEW.pin OR OLD.validity_type IS NOT NEW.validity_type
+        OR OLD.validity_value IS NOT NEW.validity_value OR OLD.activated_at IS NOT NEW.activated_at)
+        AND OLD.status IS NEW.status AND OLD.expires_at IS NEW.expires_at
+        AND OLD.app_id IS NEW.app_id AND OLD.device_limit IS NEW.device_limit
+        AND OLD.tier IS NEW.tier
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('license.changed',NEW.app_id,NEW.id,NULL,${now}); END`,
+    `CREATE TRIGGER IF NOT EXISTS licenx_rt_device_ui_update
+      AFTER UPDATE OF device_name, os_info, ip_address ON devices
+      WHEN (OLD.device_name IS NOT NEW.device_name OR OLD.os_info IS NOT NEW.os_info
+        OR OLD.ip_address IS NOT NEW.ip_address) AND OLD.status IS NEW.status
+      BEGIN INSERT INTO realtime_events(event_type,app_id,license_id,device_id,created_at)
+        VALUES('device.changed',(SELECT app_id FROM licenses WHERE id=NEW.license_id),NEW.license_id,NEW.id,${now}); END`,
   ];
   for (const statement of sql) await db.execute(statement);
 }
