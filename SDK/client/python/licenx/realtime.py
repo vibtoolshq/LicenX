@@ -14,6 +14,7 @@ from typing import Optional
 from urllib.parse import urlsplit
 
 from .storage import TRANSIENT_HEARTBEAT_CODES
+from .diagnostics import tls_verify_code
 
 _TICKET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{40,60}$")
 _FRAME_LIMIT = 16384
@@ -40,6 +41,27 @@ class RealtimeLicenseWorker:
         self._socket_lock = threading.Lock()
         self._identity = None
         self._version = -1
+        candidate = getattr(communicator, "_diagnostic_token", None)
+        self._diagnostic_token = (
+            candidate if isinstance(candidate, str)
+            and re.fullmatch(r"[A-Za-z0-9_-]{43}", candidate) else None
+        )
+
+    def _report(self, stage, code, attempt=0, error=None):
+        """Never log exception text, URLs, device fingerprints or credentials."""
+        verify = tls_verify_code(error) if error is not None else None
+        try:
+            if self._diagnostic_token and hasattr(self.communicator, "send_diagnostic"):
+                self.communicator.send_diagnostic(
+                    self._diagnostic_token, stage, code,
+                    min(max(attempt, 0), 20), verify,
+                )
+            elif hasattr(self.communicator, "record_diagnostic"):
+                self.communicator.record_diagnostic(
+                    stage, code, min(max(attempt, 0), 20), verify,
+                )
+        except Exception:
+            pass  # Never interrupt fail-closed license handling.
 
     def start(self):
         """Never blocks the caller; an unavailable optional dependency means HTTP-only."""
@@ -82,8 +104,23 @@ class RealtimeLicenseWorker:
                 min(10, max(1, self.communicator.config.request_timeout_seconds)),
             )
         except Exception:
+            self._report("ticket", "REALTIME_TICKET_TRANSPORT_ERROR")
             return None, 503
         if status != 200 or not isinstance(body, dict):
+            server_code = body.get("code") if isinstance(body, dict) else None
+            safe_code = {
+                "REALTIME_DISABLED": "REALTIME_TICKET_DISABLED",
+                "RESTORE_IN_PROGRESS": "REALTIME_TICKET_UNAVAILABLE",
+                "REALTIME_UNAVAILABLE": "REALTIME_TICKET_UNAVAILABLE",
+                "REALTIME_BROWSER_ORIGIN_DENIED": "REALTIME_TICKET_FORBIDDEN",
+            }.get(server_code, {
+                403: "REALTIME_TICKET_FORBIDDEN",
+                401: "REALTIME_TICKET_FORBIDDEN",
+                404: "REALTIME_TICKET_DISABLED",
+                429: "REALTIME_TICKET_RATE_LIMITED",
+                503: "REALTIME_TICKET_UNAVAILABLE",
+            }.get(status, "REALTIME_TICKET_HTTP_ERROR"))
+            self._report("ticket", safe_code)
             return None, status
         ticket = body.get("ticket")
         if not isinstance(ticket, str) or not _TICKET_PATTERN.fullmatch(ticket):
@@ -263,15 +300,18 @@ class RealtimeLicenseWorker:
                 attempt = 0 if time.monotonic() - started >= 60.0 else min(attempt + 1, 6)
             except _RealtimeSecurityError as error:
                 if not self._stop_event.is_set():
+                    self._report("snapshot", "REALTIME_SECURITY_ERROR", attempt)
                     self.storage._invalidate(str(error))
                 break
-            except (ssl.SSLError, ssl.CertificateError):
+            except (ssl.SSLError, ssl.CertificateError) as error:
                 if not self._stop_event.is_set():
+                    self._report("tls_handshake", "REALTIME_TLS_ERROR", attempt, error)
                     self.storage._invalidate("REALTIME_TLS_ERROR")
                 break
             except Exception:
-                # Never log raw URLs, tokens, HWIDs, socket data, or error text.
-                pass
+                # Keep reconnect behavior, but retain only preapproved safe diagnostics.
+                if not self._stop_event.is_set():
+                    self._report("ws_upgrade", "REALTIME_SOCKET_ERROR", attempt)
             if self._stop_event.is_set() or not self.storage._running:
                 break
             self.storage.set_realtime_connected(False)

@@ -34,6 +34,8 @@ import {
   verifySessionToken,
 } from "./crypto.js";
 import { getDbClient, isTursoPlaceholder } from "./db.js";
+import { issueSdkDiagnosticCapability, ingestSdkDiagnostic, ingestAdminDiagnostic,
+  listSafeDiagnostics, recordInternalDiagnostic, isDiagnosticCode, isIncidentId } from "./diagnostics.js";
 import { closeRealtimeDeviceSessions, getRealtimePresenceReport } from "./realtime/presence.js";
 import {
   getActiveAdminRealtimeGateway,
@@ -65,6 +67,41 @@ const archiver = (archiverModule as any).default || archiverModule;
 const SAFE_SERVER_ERROR = "Internal server error";
 
 export const apiRouter = Router();
+
+// LX-S01: bounded diagnostic intake; neither endpoint can grant a license/device privilege.
+apiRouter.post("/v1/diagnostics/report", (req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  const header = req.headers.authorization;
+  const token = typeof header === "string" && header.startsWith("Bearer ")
+    ? header.slice(7) : null;
+  const outcome = ingestSdkDiagnostic(token, req.body);
+  const status = { accepted: 202, unauthorized: 401, invalid: 400, rate_limited: 429 }[outcome];
+  res.status(status).json({ code: "DIAGNOSTIC_" + outcome.toUpperCase() });
+});
+
+apiRouter.post("/diagnostics/admin", requireAdminAuth, (req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  const outcome = ingestAdminDiagnostic(req.body);
+  res.status(outcome === "accepted" ? 202 : outcome === "rate_limited" ? 429 : 400)
+    .json({ code: "DIAGNOSTIC_" + outcome.toUpperCase() });
+});
+
+apiRouter.get("/diagnostics", requireAdminAuth, (req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  const { limit, code, incident_id } = req.query;
+  const n = limit === undefined ? 50 : Number(limit);
+  if (!Number.isSafeInteger(n) || n < 1 || n > 100 ||
+      (code !== undefined && !isDiagnosticCode(code)) ||
+      (incident_id !== undefined && !isIncidentId(incident_id))) {
+    res.status(400).json({ code: "INVALID_DIAGNOSTIC_FILTER" });
+    return;
+  }
+  res.json(listSafeDiagnostics({
+    limit: n,
+    code: typeof code === "string" ? code : undefined,
+    incident_id: typeof incident_id === "string" ? incident_id : undefined,
+  }));
+});
 
 // In-memory admin auth caching to eliminate redundant DB queries on every request
 let cachedAdminConfig: {
@@ -2318,6 +2355,13 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
       signedData.request_app = typeof app_name === "string" ? app_name.trim() : "";
     }
 
+    // Short-lived, signed-login-issued diagnostics capability. No licensing permissions.
+    const diagnostic = requestNonce !== undefined && matchedApp
+      ? issueSdkDiagnosticCapability() : null;
+    if (diagnostic) {
+      signedData.diagnostic_token = diagnostic.token;
+      signedData.diagnostic_incident_id = diagnostic.incident_id;
+    }
     const canonicalPayload = canonicalJson(signedData);
     const signature = signPayload(canonicalPayload, privateKeyPem);
 
@@ -2340,6 +2384,9 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
       signature,
       public_key: publicKeyPem,
     });
+    if (diagnostic) recordInternalDiagnostic(
+      "server_api", "validate", "VALIDATION_OK", diagnostic.incident_id
+    );
   } catch (error: any) {
     res.status(500).json({ error: SAFE_SERVER_ERROR });
   }
@@ -2634,8 +2681,10 @@ apiRouter.get(
         limit: pageLimit,
         offset: pageOffset,
       });
-    } catch (error: any) {
-      res.status(500).json({ error: SAFE_SERVER_ERROR });
+    } catch {
+      const incidentId = crypto.randomUUID();
+      recordInternalDiagnostic("server_api", "request", "SERVER_API_FAILURE", incidentId);
+      res.status(500).json({ error: SAFE_SERVER_ERROR, requestId: incidentId });
     }
   },
 );

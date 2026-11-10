@@ -6,6 +6,7 @@ import WebSocket, { WebSocketServer } from "ws";
 import { ADMIN_SESSION_COOKIE, getCookieValue } from "../adminAuthCookies.js";
 import { verifySessionToken } from "../crypto.js";
 import { getDbClient } from "../db.js";
+import { recordInternalDiagnostic } from "../diagnostics.js";
 
 export const ADMIN_REALTIME_PATH = "/api/admin/realtime";
 export const ADMIN_REALTIME_PROOF_COOKIE = "vcon_admin_realtime_proof";
@@ -241,6 +242,7 @@ export function createAdminRealtimeGateway(
     if (requested.search || requested.hash) { rejectUpgrade(socket, 400); return; }
     if (stopping || !ready()) { rejectUpgrade(socket, 503); return; }
     if (!isAllowedAdminRealtimeOrigin(req.headers.origin, req.headers.host)) {
+      recordInternalDiagnostic("admin_ws", "ws_upgrade", "ADMIN_WS_ORIGIN_DENIED");
       rejectUpgrade(socket, 403);
       return;
     }
@@ -306,6 +308,7 @@ export function createAdminRealtimeGateway(
           sequence: 0, stream_id: connection.streamId }));
       });
     } catch {
+      recordInternalDiagnostic("admin_ws", "ws_upgrade", "ADMIN_WS_UPGRADE_FAILED");
       rejectUpgrade(socket, 503);
     } finally {
       pendingUpgrades--;

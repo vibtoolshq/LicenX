@@ -39,6 +39,17 @@ const clientCache = new Map<string, CacheEntry<any>>();
 let csrfTokenPromise: Promise<string> | null = null;
 const API_REQUEST_TIMEOUT_MS = 30_000;
 
+export interface SafeDiagnostic {
+  id: string;
+  incident_id: string;
+  observed_at: number;
+  component: "sdk" | "admin_ui" | "admin_ws" | "server_api";
+  stage: string;
+  code: string;
+  attempt: number;
+  tls_verify_code?: number;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
@@ -80,6 +91,14 @@ function safeErrorCode(data: unknown, fallback: string): string {
     return data.code;
   }
   return fallback;
+}
+
+function safeRequestId(data: unknown): string | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const obj = data as Record<string, unknown>;
+  const candidate = obj.requestId ?? obj.request_id;
+  return typeof candidate === "string" && DIAGNOSTIC_REQUEST_ID_PATTERN.test(candidate)
+    ? candidate : undefined;
 }
 
 const DIAGNOSTIC_REQUEST_ID_PATTERN =
@@ -260,6 +279,7 @@ async function request<T>(
       safeErrorMessage(res.status),
       res.status,
       safeErrorCode(data, `HTTP_${res.status}`),
+      safeRequestId(data),
     );
   }
 
@@ -282,6 +302,11 @@ async function request<T>(
 export const adminRealtime = createAdminRealtimeClient({
   bootstrap: signal => request("/api/admin/realtime/bootstrap", { method: "POST", body: "{}", signal }),
   snapshot: signal => request<RealtimePresenceReport>("/api/realtime/presence", { signal }),
+  reportDiagnostic: async () => {
+    await request("/api/diagnostics/admin", {
+      method: "POST", body: JSON.stringify({ code: "ADMIN_WS_TRANSPORT_ERROR" }),
+    });
+  },
   invalidate: (change: AdminRealtimeChange | null) => {
     if (!change || change.type === "stream.resync") {
       invalidateCache();
@@ -431,6 +456,12 @@ export const api = {
     setCached(key, result);
     return result;
   },
+  getDiagnostics: async (): Promise<{ entries: SafeDiagnostic[]; volatile: true }> =>
+    request<{ entries: SafeDiagnostic[]; volatile: true }>("/api/diagnostics?limit=50"),
+  reportAdminDiagnostic: async (code: "ADMIN_UI_RENDER_ERROR" | "ADMIN_WS_TRANSPORT_ERROR") =>
+    request<{ code: string }>("/api/diagnostics/admin", {
+      method: "POST", body: JSON.stringify({ code }),
+    }),
   clearLogs: async () => {
     invalidateCache("logs");
     invalidateCache("system_stats");

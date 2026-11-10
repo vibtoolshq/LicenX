@@ -1,4 +1,5 @@
 import express, { type ErrorRequestHandler } from 'express';
+import { recordInternalDiagnostic } from './src/server/diagnostics.js';
 import cors from 'cors';
 import path from 'node:path';
 import fs from 'node:fs/promises';
@@ -53,6 +54,8 @@ app.get('/api/ready', readiness);
 // Bound payloads before the general 20 MiB parser; never preflight-authorize browser callers.
 app.use('/api/v1/public/license/check', express.json({ limit: '1kb' }));
 app.use('/api/v1/realtime/ticket', express.json({ limit: '2kb' }));
+app.use('/api/v1/diagnostics/report', express.json({ limit: '512b' }));
+app.use('/api/diagnostics/admin', express.json({ limit: '256b' }));
 app.use('/api/admin/realtime/bootstrap', express.json({ limit: '1kb' }));
 app.options('/api/v1/public/license/check', (_req, res) => res.status(405).set('Allow', 'POST').set('Cache-Control', 'no-store').json({code: 'METHOD_NOT_ALLOWED'}));
 app.use(cors());
@@ -96,6 +99,7 @@ const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (res.headersSent) return;
   const status = err?.type === 'entity.too.large' ? 413 :
     (err instanceof SyntaxError && 'body' in err) ? 400 : 500;
+  if (status === 500) recordInternalDiagnostic('server_api', 'request', 'SERVER_API_FAILURE', id);
   if (status === 500) console.error('[LicenX] Unexpected API failure', id);
   fail(res, status, status === 400 ? 'INVALID_JSON' : status === 413 ? 'PAYLOAD_TOO_LARGE' : 'INTERNAL_ERROR', id);
 };

@@ -173,3 +173,27 @@ test("requests abort at the shared timeout and report a stable timeout code", as
     globalThis.setTimeout = originalSetTimeout;
   }
 });
+
+test("LX-S01: ordinary Admin API failures preserve only valid safe request IDs", async () => {
+  const id = "12345678-1234-4234-9234-123456789abc";
+  await withFetch(async () => new Response(JSON.stringify({
+    code: "SERVER_UNAVAILABLE", requestId: id, error: "secret backend error",
+  }), {status: 503}), async () => {
+    await assert.rejects(api.getMe(true), (error: unknown) => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.code, "SERVER_UNAVAILABLE");
+      assert.equal(error.requestId, id);
+      assert.ok(!error.message.includes("secret"));
+      return true;
+    });
+  });
+  await withFetch(async () => new Response(JSON.stringify({
+    code: "SERVER_UNAVAILABLE", requestId: "private-secret-untrusted",
+  }), {status:503}), async () => {
+    await assert.rejects(api.getMe(true), (error:unknown) => {
+      assert.ok(error instanceof ApiError);
+      assert.equal(error.requestId, undefined);
+      return true;
+    });
+  });
+});

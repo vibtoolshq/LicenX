@@ -291,3 +291,22 @@ test("ADMIN-RT-05: six existing UI components retain controls and subscribe to s
   assert.match(sources.OverviewTab, /Recent activity unavailable/, "Overview stale report");
   assert.match(sources.OverviewTab, /Live Client Validation Stream/, "Existing layout kept");
 });
+
+test("LX-S01: browser WSS failure reports only a predetermined category", async () => {
+  const socket = new FakeSocket();
+  let reports = 0;
+  const client = createAdminRealtimeClient({
+    bootstrap: async () => {},
+    snapshot: async () => report(),
+    invalidate: () => {},
+    socket: () => socket,
+    origin: () => "https://example.com",
+    reportDiagnostic: async () => { reports++; },
+  });
+  client.start();
+  await pause();
+  socket.onerror?.({} as Event);
+  await pause();
+  assert.equal(reports, 1);
+  client.stop();
+});

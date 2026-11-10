@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useRef } from 'react';
 import { Terminal, Trash2, RefreshCw } from 'lucide-react';
-import { adminRealtime, api } from '../services/apiClient';
+import { adminRealtime, api, type SafeDiagnostic } from '../services/apiClient';
 import { ValidationLog } from '../types';
 import { TablePagination } from './TablePagination';
 import { useConfirm } from '../context/ConfirmContext';
@@ -12,6 +12,9 @@ export const LogsTab: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [diagnostics, setDiagnostics] = useState<SafeDiagnostic[]>([]);
+  const [diagError, setDiagError] = useState('');
+  const [diagSearch, setDiagSearch] = useState('');
   const [connectionState, setConnectionState] = useState(adminRealtime.getStatus().state);
   const loadSerial = useRef(0);
   const [actionFilter, setActionFilter] = useState(() => {
@@ -88,6 +91,29 @@ export const LogsTab: React.FC = () => {
     return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(fallback); };
   }, [actionFilter, currentPage, pageSize]);
 
+  // Recent volatile diagnostics are NOT validation/audit history.
+  useEffect(() => {
+    let mounted = true;
+    const refresh = async () => {
+      try {
+        const result = await api.getDiagnostics();
+        if (mounted) {
+          setDiagnostics(Array.isArray(result.entries) ? result.entries : []);
+          setDiagError('');
+        }
+      } catch {
+        if (mounted) setDiagError('Recent diagnostic report unavailable');
+      }
+    };
+    void refresh();
+    const timer = setInterval(() => { void refresh(); }, 30_000);
+    return () => { mounted = false; clearInterval(timer); };
+  }, []);
+
+  const filteredDiagnostics = diagnostics.filter(entry =>
+    [entry.code, entry.stage, entry.component, entry.incident_id]
+      .some(value => value.toLowerCase().includes(diagSearch.trim().toLowerCase()))
+  );
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
   const safeCurrentPage = Math.min(Math.max(1, currentPage), totalPages);
   const paginatedLogs = logs; // Server returns the requested bounded history page.
@@ -115,6 +141,34 @@ export const LogsTab: React.FC = () => {
 
   return (
     <div className="space-y-3 font-mono text-xs">
+      <section className="rounded border border-slate-800 bg-slate-950/50 p-2 space-y-2" aria-label="Recent SDK and server diagnostics">
+        <div className="flex items-center justify-between gap-2 flex-wrap">
+          <span className="font-medium text-slate-300">Recent SDK / Server Diagnostics (volatile)</span>
+          <input
+            aria-label="Filter recent diagnostics by code, stage, source, or incident ID"
+            value={diagSearch}
+            onChange={event => setDiagSearch(event.target.value)}
+            placeholder="Filter code / stage / incident"
+            className="px-2 py-1 text-xs rounded bg-slate-900 border border-slate-800 text-slate-300"
+          />
+        </div>
+        {diagError && <p role="status" className="text-amber-400">{diagError}</p>}
+        {filteredDiagnostics.length === 0 ? (
+          <p className="text-slate-500">No recent in-process diagnostic event matching this filter (not proof of no errors).</p>
+        ) : (
+          <div className="max-h-44 overflow-auto space-y-1">
+            {filteredDiagnostics.slice(0, 12).map(entry => (
+              <div key={entry.id} className="flex flex-wrap gap-x-3 text-[10px] text-slate-400 border-b border-slate-800/50 pb-1">
+                <span>{new Date(entry.observed_at).toLocaleTimeString()}</span>
+                <span>{entry.component} / {entry.stage}</span>
+                <span className="text-amber-300">{entry.code}</span>
+                {entry.tls_verify_code !== undefined && <span>TLS verify #{entry.tls_verify_code}</span>}
+                <span title="Opaque incident ID" className="select-all">{entry.incident_id}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </section>
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-2">
           <span className="font-medium text-slate-300 uppercase tracking-wider">

@@ -1,5 +1,6 @@
 import React, { Component, ReactNode } from 'react';
 import { AlertTriangle, RefreshCw, Home, ShieldAlert } from 'lucide-react';
+import { api } from '../services/apiClient';
 
 interface Props {
   children: ReactNode;
@@ -19,6 +20,8 @@ export class ErrorBoundary extends Component<Props, State> {
   }
 
   public componentDidCatch() {
+    // Only the approved error category is reported; no React stack/props or secrets.
+    void api.reportAdminDiagnostic("ADMIN_UI_RENDER_ERROR").catch(() => {});
     console.error('Unhandled Application Error caught by ErrorBoundary');
   }
 

@@ -24,6 +24,7 @@ export interface AdminRealtimeDependencies {
   bootstrap(signal: AbortSignal): Promise<unknown>;
   snapshot(signal: AbortSignal): Promise<RealtimePresenceReport>;
   invalidate(change: Change | null): void;
+  reportDiagnostic?(): Promise<void>;
   socket(url: string): AdminBrowserSocket;
   origin(): string;
   isVisible?(): boolean;
@@ -227,7 +228,12 @@ export class AdminRealtimeClient {
         this.ws = socket;
         socket.onopen = () => { /* Await admin.ready and a fresh HTTP snapshot before CONNECTED. */ };
         socket.onmessage = event => this.receive(event.data, socket, generation);
-        socket.onerror = () => { /* Native browser WebSocket hides upgrade HTTP status. */ };
+        socket.onerror = () => {
+          // Browser hides the HTTP upgrade status; send only a fixed safe category.
+          if (this.options.reportDiagnostic) {
+            void this.options.reportDiagnostic().catch(() => {});
+          }
+        };
         socket.onclose = event => {
           if (this.ws !== socket || generation !== this.generation) return;
           this.ws = null;

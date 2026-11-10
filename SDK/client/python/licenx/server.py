@@ -17,6 +17,7 @@ import urllib.request
 from typing import Dict, Any, Tuple, Optional
 from urllib.parse import urlsplit
 from .config import SDKConfig
+from .diagnostics import SafeDiagnosticBuffer, tls_verify_code
 
 # Graceful HTTP Transport import (requests preferred, urllib built-in fallback)
 try:
@@ -43,6 +44,47 @@ except ImportError:
 class ServerCommunicator:
     def __init__(self, config: SDKConfig):
         self.config = config
+        self.diagnostics = SafeDiagnosticBuffer()
+        self._diagnostic_token = None
+
+    def record_diagnostic(self, stage, code, attempt=0, verify_code=None):
+        return self.diagnostics.record(stage, code, attempt, verify_code)
+
+    def get_diagnostics(self):
+        """Bounded, privacy-safe process-local events; not an authorization decision."""
+        return self.diagnostics.snapshot()
+
+    @staticmethod
+    def _transport_stage(url):
+        path = urlsplit(url).path
+        if path.endswith("/realtime/ticket"):
+            return "ticket"
+        if path.endswith("/license/ping"):
+            return "heartbeat"
+        return "validate"
+
+    def send_diagnostic(self, bearer_token, stage, code, attempt=0, verify_code=None):
+        """Best-effort HTTPS report from an already signed login, never from UI thread."""
+        if not isinstance(bearer_token, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", bearer_token):
+            return False
+        event = self.record_diagnostic(stage, code, attempt, verify_code)
+        if event is None:
+            return False
+        data = {k: event[k] for k in ("stage", "code", "attempt")}
+        if "tls_verify_code" in event:
+            data["tls_verify_code"] = event["tls_verify_code"]
+        try:
+            url = self._build_url("api/v1/diagnostics/report")
+            request = urllib.request.Request(
+                url,
+                data=json.dumps(data, separators=(",", ":")).encode("utf-8"),
+                headers={"Content-Type": "application/json", "Authorization": "Bearer " + bearer_token},
+                method="POST",
+            )
+            with urllib.request.urlopen(request, timeout=3, context=ssl.create_default_context()) as response:
+                return response.getcode() == 202
+        except Exception:
+            return False
 
     def _build_url(self, endpoint: str) -> str:
         """Constructs clean URL handling trailing slashes and redundant api prefixes"""
@@ -189,15 +231,19 @@ class ServerCommunicator:
                         data = None
                     return resp.status_code, self._safe_response(resp.status_code, data)
                 except requests.exceptions.SSLError:
+                    self.record_diagnostic("tls_handshake", "SDK_HTTP_TLS_ERROR")
                     return 495, {"error": "SSL handshake with license server failed", "code": "SSL_ERROR"}
                 except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                     if attempt < len(retry_delays):
                         time.sleep(retry_delays[attempt])
                         continue
                     if isinstance(e, requests.exceptions.Timeout):
+                        self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_TIMEOUT")
                         return 408, {"error": "Connection to license server timed out", "code": "TIMEOUT"}
+                    self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_NETWORK_ERROR")
                     return 503, {"error": "Cannot connect to license server", "code": "SERVER_UNREACHABLE"}
                 except Exception:
+                    self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_UNEXPECTED")
                     return 500, {"error": "License server request failed", "code": "REQUEST_ERROR"}
 
         # Native Python standard library fallback
@@ -231,6 +277,8 @@ class ServerCommunicator:
                 return status_code, self._safe_response(status_code, data)
             except urllib.error.URLError as error:
                 if isinstance(error.reason, ssl.SSLError):
+                    self.record_diagnostic("tls_handshake", "SDK_HTTP_TLS_ERROR",
+                                           verify_code=tls_verify_code(error.reason))
                     return 495, {
                         "error": "SSL handshake with license server failed",
                         "code": "SSL_ERROR",
@@ -238,13 +286,16 @@ class ServerCommunicator:
                 if attempt < len(retry_delays):
                     time.sleep(retry_delays[attempt])
                     continue
+                self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_NETWORK_ERROR")
                 return 503, {"error": "Cannot connect to license server", "code": "SERVER_UNREACHABLE"}
             except socket.timeout:
                 if attempt < len(retry_delays):
                     time.sleep(retry_delays[attempt])
                     continue
+                self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_TIMEOUT")
                 return 408, {"error": "Connection to license server timed out", "code": "TIMEOUT"}
             except Exception:
+                self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_UNEXPECTED")
                 return 500, {"error": "License server request failed", "code": "UNKNOWN_ERROR"}
 
     def _http_get(self, url: str, timeout: int) -> Tuple[int, Dict[str, Any]]:
@@ -270,15 +321,19 @@ class ServerCommunicator:
                         data = None
                     return resp.status_code, self._safe_response(resp.status_code, data)
                 except requests.exceptions.SSLError:
+                    self.record_diagnostic("tls_handshake", "SDK_HTTP_TLS_ERROR")
                     return 495, {"error": "SSL handshake with license server failed", "code": "SSL_ERROR"}
                 except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
                     if attempt < len(retry_delays):
                         time.sleep(retry_delays[attempt])
                         continue
                     if isinstance(e, requests.exceptions.Timeout):
+                        self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_TIMEOUT")
                         return 408, {"error": "Connection to license server timed out", "code": "TIMEOUT"}
+                    self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_NETWORK_ERROR")
                     return 503, {"error": "Cannot connect to license server", "code": "SERVER_UNREACHABLE"}
                 except Exception:
+                    self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_UNEXPECTED")
                     return 500, {"error": "License server request failed", "code": "REQUEST_ERROR"}
 
         # Native Python standard library fallback
@@ -313,13 +368,16 @@ class ServerCommunicator:
                 if attempt < len(retry_delays):
                     time.sleep(retry_delays[attempt])
                     continue
+                self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_NETWORK_ERROR")
                 return 503, {"error": "Cannot connect to license server", "code": "SERVER_UNREACHABLE"}
             except socket.timeout:
                 if attempt < len(retry_delays):
                     time.sleep(retry_delays[attempt])
                     continue
+                self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_TIMEOUT")
                 return 408, {"error": "Connection to license server timed out", "code": "TIMEOUT"}
             except Exception:
+                self.record_diagnostic(self._transport_stage(url), "SDK_HTTP_UNEXPECTED")
                 return 500, {"error": "License server request failed", "code": "UNKNOWN_ERROR"}
 
     def validate_license(
@@ -334,6 +392,7 @@ class ServerCommunicator:
         The legacy pin argument is accepted for compatibility but never sent.
         Returns (is_valid, http_status_code, response_payload)
         """
+        self._diagnostic_token = None
         url = self._build_url("api/v1/license/validate")
         app_version = self.config.app_version
         if not isinstance(app_version, str) or not app_version.strip():
@@ -371,6 +430,11 @@ class ServerCommunicator:
             ):
                 return False, 403, {"error": "Signed validation does not match request", "code": "VALIDATION_BINDING_FAILED"}
 
+            # Keep the signed, short-lived diagnostic bearer capability in RAM only.
+            # Never expose it via LoginResult/license_data or session storage.
+            capability = data.pop("diagnostic_token", None)
+            if isinstance(capability, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", capability):
+                self._diagnostic_token = capability
             return True, 200, data
         else:
             return False, status_code, data
