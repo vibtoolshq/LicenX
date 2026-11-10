@@ -83,6 +83,15 @@ All development-time Markdown plans, forensic notes, error audits, and phase log
 - If verification finds an in-scope defect, fix it and rerun only the affected checks. Record environment failures or scope-crossing blockers honestly; do not hide a failure to close the phase.
 - Once acceptance is satisfied, immediately close the phase and update the relevant plan, roadmap, logs, actual-working status, and required project memory. Do not prolong the phase with unrelated improvements or verification loops.
 - For an authorized implementation phase, publish the reviewed change to GitHub and safely fast-forward-pull it into the remote project after the focused verification; preserve local user changes, data, and ignored notes.
+
+## Mandatory GitHub-to-RDP sync gate (LicenX)
+
+- For every approved LicenX SDK, Admin Panel, API, security, build, or documentation update/fix pushed to GitHub `vibtoolshq/LicenX` (`main`), synchronize the authorized Windows RDP project at `C:\Users\Administrator\Desktop\project\14_LicenX` immediately after the push, during the same authorized work session; do not leave a newer GitHub baseline and an older RDP baseline without explicitly reporting a blocker.
+- Before syncing, inspect local `HEAD`, `git status --porcelain`, and `origin/main`. If local work is dirty, safely preserve it with recoverable snapshots/backup refs first; never use destructive reset/clean/force, overwrite user work, silently discard staged changes, or automatically reapply old stashes.
+- Sync only through `git fetch origin main` plus `git merge --ff-only origin/main` (or equivalent verified fast-forward). If the remote host is offline, the branch diverges, safe preservation fails, or verification fails, STOP and mark the phase `RDP_SYNC_BLOCKED` with the exact reason; do not claim that baseline is clean.
+- Preserve private `notes/`, local databases, credentials, `.env`, ignored storage, and deployment-specific config. Verify RDP `git rev-parse HEAD` matches the GitHub `main` commit, `git status --porcelain` is empty, and relevant SDK/Admin code or version matches. Record the SHA and verification receipt in local `notes/` and close the phase only after both GitHub push and RDP sync pass.
+- This is an agent workflow obligation when working on an authorized update; it is not an unattended GitHub webhook or background auto-pull service.
+
 - Finish with a short factual summary of updates, benefits, verification, unchanged/out-of-scope behavior, and the next documented phase. Provide a short copy-paste approval command for that next phase, then wait for the user to issue it.
 
 ## Project Memory Maintenance
