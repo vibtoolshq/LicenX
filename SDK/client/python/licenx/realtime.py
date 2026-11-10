@@ -212,22 +212,24 @@ class RealtimeLicenseWorker:
             valid, data = False, {"code": "SERVER_UNREACHABLE"}
         if self._stop_event.is_set():
             return False
-        self.storage.realtime_signed_heartbeat(valid, data)
-        return valid
+        applied = self.storage.realtime_signed_heartbeat(valid, data)
+        return bool(valid and applied)
 
     def _run_connection(self, websocket):
         ticket, status = self._post_ticket()
         if self._stop_event.is_set():
             return
         if not ticket:
-            # A disabled WebSocket app is not an invalid license; verify through
-            # the existing signed heartbeat if the server explicitly denies WSS.
-            if status in (401, 403):
+            # 401/403: WSS refused, 404: WSS gate disabled. Do not assume
+            # an unverified transport response authorizes a license.
+            if status in (401, 403, 404):
+                self.storage.pause_for_signed_reverification()
                 if self._signed_check():
-                    # A forbidden ticket must not retain a stale server-side
-                    # Keep Login preference from an earlier App configuration.
-                    self.storage.apply_signed_realtime_policy(False)
-            return
+                    # A freshly signed HTTPS heartbeat—not the ticket denial—
+                    # authorizes HTTP-only continuity; wake periodic monitoring.
+                    if self.storage.enter_signed_http_fallback():
+                        return "HTTP_FALLBACK"
+            return None
         socket = websocket.create_connection(
             self._socket_url(), timeout=8,
             header=["Authorization: Bearer " + ticket],
@@ -295,8 +297,10 @@ class RealtimeLicenseWorker:
         while not self._stop_event.is_set():
             try:
                 started = time.monotonic()
-                self._run_connection(websocket)
-                # Disabled WSS or repeated short connections must back off.
+                outcome = self._run_connection(websocket)
+                if outcome == "HTTP_FALLBACK":
+                    return  # Signed HTTPS background monitor stays active.
+                # Repeated short connections must back off.
                 attempt = 0 if time.monotonic() - started >= 60.0 else min(attempt + 1, 6)
             except _RealtimeSecurityError as error:
                 if not self._stop_event.is_set():
@@ -305,13 +309,27 @@ class RealtimeLicenseWorker:
                 break
             except (ssl.SSLError, ssl.CertificateError) as error:
                 if not self._stop_event.is_set():
+                    # Immediately pause protected app operations before any
+                    # diagnostic network I/O or HTTPS re-verification.
+                    self.storage.pause_for_signed_reverification()
                     self._report("tls_handshake", "REALTIME_TLS_ERROR", attempt, error)
-                    self.storage._invalidate("REALTIME_TLS_ERROR")
+                    # WSS TLS failure is NOT a license revocation. Only a fresh,
+                    # correctly signed HTTPS heartbeat may permit HTTP-only
+                    # continuity; HTTPS TLS/signature failure remains fail-closed.
+                    if self._signed_check() and self.storage.enter_signed_http_fallback():
+                        pass
+                    elif getattr(self.storage, "_running", False):
+                        self.storage._invalidate("REALTIME_TLS_ERROR")
                 break
             except Exception:
-                # Keep reconnect behavior, but retain only preapproved safe diagnostics.
+                # Unexpected WSS errors never bypass HTTPS verification.
                 if not self._stop_event.is_set():
+                    if attempt >= 1:
+                        self.storage.pause_for_signed_reverification()
                     self._report("ws_upgrade", "REALTIME_SOCKET_ERROR", attempt)
+                    if (attempt >= 1 and self._signed_check()
+                            and self.storage.enter_signed_http_fallback()):
+                        return
             if self._stop_event.is_set() or not self.storage._running:
                 break
             self.storage.set_realtime_connected(False)

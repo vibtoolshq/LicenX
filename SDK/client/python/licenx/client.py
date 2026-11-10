@@ -158,6 +158,16 @@ class XLicenseClient:
         The legacy pin argument is accepted for compatibility but ignored;
         license PINs are only used by the web control panel.
         """
+        # An earlier failed remote logout still owns a server-side device slot.
+        # Attempt exactly one explicit reconciliation before any new binding.
+        if self.logout_manager.has_pending_release():
+            if not self.logout_manager.retry_pending_logout():
+                return LoginResult(
+                    success=False,
+                    status_code=503,
+                    message="Previous device release is unverified. Retry after server connectivity returns.",
+                    code="PREVIOUS_SESSION_LOGOUT_FAILED",
+                )
         if self._current_key and not self.logout():
             return LoginResult(
                 success=False,
@@ -172,7 +182,7 @@ class XLicenseClient:
             self._authenticated = True
             self._current_key = license_key.strip()
             self._license_payload = result.license_data
-            self.logout_manager.set_active_session(self._current_key)
+            self.logout_manager.set_active_session(self._current_key, result.hwid)
             self._start_realtime(result)
         else:
             self._authenticated = False
@@ -192,7 +202,7 @@ class XLicenseClient:
             self._authenticated = True
             self._current_key = result.license_key or self.storage.load_saved_session()
             self._license_payload = result.license_data
-            self.logout_manager.set_active_session(self._current_key)
+            self.logout_manager.set_active_session(self._current_key, result.hwid)
             self._start_realtime(result)
         return result
 
@@ -201,6 +211,10 @@ class XLicenseClient:
         Logs out active session, stops heartbeat thread, and notifies server
         to release hardware device slot immediately.
         """
+        # A second explicit logout can safely retry a *previously failed*
+        # release. Never rebind or grant access from this reconciliation.
+        if self._current_key is None and self.logout_manager.has_pending_release():
+            return self.logout_manager.retry_pending_logout()
         self._stop_realtime()
         success = self.logout_manager.logout(
             self._current_key,

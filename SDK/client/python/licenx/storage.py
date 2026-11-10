@@ -232,6 +232,37 @@ class BackgroundLicenseWorker:
         with self._state_lock:
             return not self._realtime_paused
 
+    def pause_for_signed_reverification(self) -> bool:
+        """Deny protected actions while a WSS failure awaits fresh signed HTTP.
+
+        Do not assume that a disconnected or rejected WebSocket grants any
+        license permission; the following HTTPS proof must recover the session.
+        """
+        if not self._realtime_enabled or not self._running:
+            return False
+        with self._state_lock:
+            self._realtime_paused = True
+            self._realtime_connected = False
+        self._set_realtime_state("PAUSED_UNVERIFIED")
+        return True
+
+    def enter_signed_http_fallback(self) -> bool:
+        """Enter HTTP-only only after an already verified signed HTTPS heartbeat.
+
+        Force old WSS connection status offline and wake signed HTTP monitoring.
+        A socket event can never invoke this as an authorization grant.
+        """
+        if not self._realtime_enabled or not self._running:
+            return False
+        with self._state_lock:
+            if self._realtime_paused:
+                return False
+            self._realtime_connected = False
+            self._keep_login_on_network_error = False
+        self._set_realtime_state("HTTP_FALLBACK")
+        self._realtime_wake.set()
+        return True
+
     def set_realtime_connected(self, connected: bool) -> bool:
         """Call TRUE only after a *signed, bound* snapshot; never from socket open."""
         if not self._realtime_enabled or not self._running:

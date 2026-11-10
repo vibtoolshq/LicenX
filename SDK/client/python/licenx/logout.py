@@ -25,6 +25,10 @@ class LogoutManager:
         self.storage = storage
         self.auto_logout_on_exit = auto_logout_on_exit
         self._current_license_key: Optional[str] = None
+        self._current_hwid: Optional[str] = None
+        # Never put failed release credentials on disk. Reconcile on a future
+        # explicit user logout/login only, not from an invalidation callback.
+        self._pending_release: Optional[tuple] = None
         self._exit_hook_registered = False
         self._exit_cleanup_started = False
         self._stop_realtime_callback: Optional[Callable[[], None]] = None
@@ -35,16 +39,38 @@ class LogoutManager:
     def set_realtime_stop_callback(self, callback: Callable[[], None]) -> None:
         self._stop_realtime_callback = callback
 
-    def set_active_session(self, license_key: Optional[str]) -> None:
-        """Sets active license key for exit cleanup"""
+    def set_active_session(self, license_key: Optional[str], hwid: Optional[str] = None) -> None:
+        """Keep the verified login HWID stable for the matching logout call."""
         self._current_license_key = license_key
+        self._current_hwid = hwid if license_key and hwid else None
+
+    def has_pending_release(self) -> bool:
+        """A failed remote logout leaves a RAM-only release to reconcile."""
+        return self._pending_release is not None
+
+    def retry_pending_logout(self) -> bool:
+        """One bounded, explicit retry; a failure never grants license access."""
+        pending = self._pending_release
+        if pending is None:
+            return True
+        try:
+            success = bool(self.communicator.send_logout(*pending))
+        except Exception:
+            success = False
+        if success:
+            self._pending_release = None
+        return success
 
     def logout(self, license_key: Optional[str] = None, clear_saved_data: bool = True) -> bool:
         """
         Logs out active session and unbinds device from server.
         """
         key = license_key or self._current_license_key
-        hwid = DeviceManager.get_hwid()
+        hwid = (
+            (self._current_hwid or DeviceManager.get_hwid())
+            if key and key == self._current_license_key
+            else DeviceManager.get_hwid() if key else None
+        )
 
         # Stop WSS before unbinding the device, including automatic exit paths.
         if self._stop_realtime_callback:
@@ -60,10 +86,20 @@ class LogoutManager:
 
         success = True
         if key:
-            # Send unbind request to server so license device slots are freed
-            success = self.communicator.send_logout(key, hwid)
+            # A failed unbind does not release the server slot. Never invent
+            # a successful logout or silently forget which device was bound.
+            try:
+                success = bool(self.communicator.send_logout(key, hwid))
+            except Exception:
+                success = False
+            if success:
+                if self._pending_release == (key, hwid):
+                    self._pending_release = None
+            elif self._pending_release is None:
+                self._pending_release = (key, hwid)
 
         self._current_license_key = None
+        self._current_hwid = None
         return success
 
     def _register_exit_hooks(self) -> None:
