@@ -37,6 +37,7 @@ import { getDbClient, isTursoPlaceholder } from "./db.js";
 import { issueSdkDiagnosticCapability, ingestSdkDiagnostic, ingestAdminDiagnostic,
   listSafeDiagnostics, recordInternalDiagnostic, isDiagnosticCode, isIncidentId } from "./diagnostics.js";
 import { closeRealtimeDeviceSessions, getRealtimePresenceReport } from "./realtime/presence.js";
+import { prepareDeviceLogoutProof, activateDeviceLogoutProof, invalidateDeviceLogoutProof, takeDeviceLogoutProof, restoreDeviceLogoutProof } from "./realtime/logoutProof.js";
 import {
   getActiveAdminRealtimeGateway,
   isAllowedAdminRealtimeOrigin,
@@ -1363,10 +1364,7 @@ apiRouter.delete(
       const { id } = req.params;
       const db = getDbClient();
 
-      await db.execute({
-        sql: "DELETE FROM devices WHERE license_id = ?",
-        args: [id],
-      });
+      await deleteBoundDevicesForLicenses(db, [id]);
       await db.execute({
         sql: "DELETE FROM licenses WHERE id = ?",
         args: [id],
@@ -1395,10 +1393,7 @@ apiRouter.post(
       const placeholders = ids.map(() => "?").join(",");
 
       if (action === "delete") {
-        await db.execute({
-          sql: `DELETE FROM devices WHERE license_id IN (${placeholders})`,
-          args: ids,
-        });
+        await deleteBoundDevicesForLicenses(db, ids);
         await db.execute({
           sql: `DELETE FROM licenses WHERE id IN (${placeholders})`,
           args: ids,
@@ -1419,10 +1414,7 @@ apiRouter.post(
           args: ids,
         });
       } else if (action === "reset") {
-        await db.execute({
-          sql: `DELETE FROM devices WHERE license_id IN (${placeholders})`,
-          args: ids,
-        });
+        await deleteBoundDevicesForLicenses(db, ids);
       } else if (action === "extend" && extendDays) {
         const extraMs = Number(extendDays) * 86400 * 1000;
         await db.execute({
@@ -1442,6 +1434,36 @@ apiRouter.post(
     }
   },
 );
+
+// Commit device deletion before closing precisely those already bound WSS sessions.
+async function deleteBoundDevicesForLicenses(
+  db: ReturnType<typeof getDbClient>, licenseIds: string[],
+): Promise<void> {
+  const unique = [...new Set(licenseIds)];
+  if (unique.length === 0) return;
+  const placeholders = unique.map(() => "?").join(",");
+  const tx = await db.transaction("write");
+  let deviceIds: string[] = [];
+  try {
+    for (const id of [...unique].sort()) await tx.lockLicense?.(id);
+    const existing = await tx.execute({
+      sql: "SELECT id FROM devices WHERE license_id IN (" + placeholders + ")",
+      args: unique,
+    });
+    deviceIds = existing.rows.map(row => String(row.id));
+    await tx.execute({
+      sql: "DELETE FROM devices WHERE license_id IN (" + placeholders + ")",
+      args: unique,
+    });
+    await tx.commit();
+  } catch (error) {
+    await tx.rollback();
+    throw error;
+  } finally {
+    tx.close();
+  }
+  for (const deviceId of deviceIds) closeRealtimeDeviceSessions(deviceId);
+}
 
 // Get devices for a specific license
 apiRouter.get(
@@ -1471,10 +1493,7 @@ apiRouter.delete(
     try {
       const { id } = req.params;
       const db = getDbClient();
-      await db.execute({
-        sql: "DELETE FROM devices WHERE license_id = ?",
-        args: [id],
-      });
+      await deleteBoundDevicesForLicenses(db, [id]);
       res.json({ success: true });
     } catch (error: any) {
       res.status(500).json({ error: SAFE_SERVER_ERROR });
@@ -1528,6 +1547,14 @@ apiRouter.get(
     try {
       const db = getDbClient();
       const { search, limit = "50", offset = "0" } = req.query;
+      const pageLimit = typeof limit === "string" && /^\d+$/.test(limit) ? Number(limit) : NaN;
+      const pageOffset = typeof offset === "string" && /^\d+$/.test(offset) ? Number(offset) : NaN;
+      if (!Number.isSafeInteger(pageLimit) || pageLimit < 1 || pageLimit > 100 ||
+          !Number.isSafeInteger(pageOffset) || pageOffset < 0 || pageOffset > 1_000_000 ||
+          (search !== undefined && (typeof search !== "string" || search.length > 160))) {
+        res.status(400).json({ code: "INVALID_DEVICE_PAGINATION" });
+        return;
+      }
 
       let query = `
       SELECT d.*, l.key as license_key, l.tier as license_tier, l.status as license_status, l.customer_name,
@@ -1546,7 +1573,7 @@ apiRouter.get(
       }
 
       query += ` ORDER BY d.last_ping_at DESC LIMIT ? OFFSET ?`;
-      args.push(Number(limit), Number(offset));
+      args.push(pageLimit, pageOffset);
 
       const result = await db.execute({ sql: query, args });
 
@@ -2277,6 +2304,9 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
 
     const deviceLimit = Number(license.device_limit);
     const deviceLeaseSeconds = await getDeviceLeaseSeconds(db, license.app_id);
+    let finalizedResponse: Record<string, unknown> | undefined;
+    let finalizedIncident: string | undefined;
+    let pendingProof: { token: string; deviceId: string } | undefined;
     const binding = await bindDeviceWithinLimit({
       db,
       licenseId: license.id as string,
@@ -2290,6 +2320,58 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
       deviceLeaseSeconds,
       rejectBlocked: true,
       activateLicense: true,
+      finalizeBound: async (bound, tx) => {
+        const effectiveActivatedAt = bound.activation?.activatedAt ?? activatedAt;
+        const effectiveExpiresAt = bound.activation?.expiresAt ?? expiresAt;
+        const signedData: Record<string, unknown> = {
+          valid: true,
+          license_key: license.key,
+          status: "active",
+          tier: license.tier || "Standard",
+          app_slug: matchedApp ? matchedApp.app_slug : "global",
+          app_name: matchedApp ? matchedApp.display_name : "Global",
+          app_id: license.app_id || null,
+          hwid,
+          device_name,
+          device_limit: deviceLimit,
+          bound_devices_count: bound.boundDevicesCount,
+          activated_at: effectiveActivatedAt,
+          expires_at: effectiveExpiresAt,
+          server_time: now,
+          grace_period_hours: 72,
+        };
+        if (requestNonce !== undefined) {
+          signedData.nonce = requestNonce;
+          signedData.request_app = typeof app_name === "string" ? app_name.trim() : "";
+        }
+        const diagnostic = requestNonce !== undefined && matchedApp
+          ? issueSdkDiagnosticCapability() : null;
+        if (diagnostic) {
+          signedData.diagnostic_token = diagnostic.token;
+          signedData.diagnostic_incident_id = diagnostic.incident_id;
+        }
+        if (requestNonce !== undefined && req.body.logout_proof_version === 2) {
+          const found = await tx.execute({
+            sql: "SELECT id FROM devices WHERE license_id = ? AND hwid = ? LIMIT 1",
+            args: [license.id as string, hwid],
+          });
+          if (!found.rows[0]?.id) throw new Error("Bound device unavailable");
+          const token = prepareDeviceLogoutProof();
+          signedData.device_logout_proof = token;
+          pendingProof = { token, deviceId: String(found.rows[0].id) };
+        }
+        const signature = signPayload(canonicalJson(signedData), privateKeyPem);
+        await tx.execute({
+          sql: "INSERT INTO validation_logs (id, license_key, app_slug, hwid, ip_address, action, status_code, message, created_at) "
+             + "VALUES (?, ?, ?, ?, ?, 'validate', 200, 'Validated and signed successfully', ?)",
+          args: [
+            "log_" + crypto.randomBytes(6).toString("hex"),
+            license_key, matchedApp?.app_slug || null, hwid, ip, now,
+          ],
+        });
+        finalizedResponse = { ...signedData, signature, public_key: publicKeyPem };
+        finalizedIncident = diagnostic?.incident_id;
+      },
     });
 
     if (binding.status === "blocked") {
@@ -2330,62 +2412,16 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
       return;
     }
 
-    if (binding.activation) ({ activatedAt, expiresAt } = binding.activation);
-
-    // 8. Construct Cryptographically Signed Payload
-    const signedData: Record<string, unknown> = {
-      valid: true,
-      license_key: license.key,
-      status: "active",
-      tier: license.tier || "Standard",
-      app_slug: matchedApp ? matchedApp.app_slug : "global",
-      app_name: matchedApp ? matchedApp.display_name : "Global",
-      app_id: license.app_id || null,
-      hwid: hwid,
-      device_name: device_name,
-      device_limit: deviceLimit,
-      bound_devices_count: binding.boundDevicesCount,
-      activated_at: activatedAt,
-      expires_at: expiresAt,
-      server_time: now,
-      grace_period_hours: 72,
-    };
-    if (requestNonce !== undefined) {
-      signedData.nonce = requestNonce;
-      signedData.request_app = typeof app_name === "string" ? app_name.trim() : "";
+    if (!finalizedResponse) throw new Error("Signed validation finalization missing");
+    invalidateDeviceLogoutProof(String(license.id), hwid);
+    if (pendingProof) {
+      activateDeviceLogoutProof(
+        pendingProof.token, pendingProof.deviceId, String(license.id), hwid,
+      );
     }
-
-    // Short-lived, signed-login-issued diagnostics capability. No licensing permissions.
-    const diagnostic = requestNonce !== undefined && matchedApp
-      ? issueSdkDiagnosticCapability() : null;
-    if (diagnostic) {
-      signedData.diagnostic_token = diagnostic.token;
-      signedData.diagnostic_incident_id = diagnostic.incident_id;
-    }
-    const canonicalPayload = canonicalJson(signedData);
-    const signature = signPayload(canonicalPayload, privateKeyPem);
-
-    // 9. Log success
-    await db.execute({
-      sql: `INSERT INTO validation_logs (id, license_key, app_slug, hwid, ip_address, action, status_code, message, created_at)
-            VALUES (?, ?, ?, ?, ?, 'validate', 200, 'Validated and signed successfully', ?)`,
-      args: [
-        "log_" + crypto.randomBytes(6).toString("hex"),
-        license_key,
-        matchedApp?.app_slug || null,
-        hwid,
-        ip,
-        now,
-      ],
-    });
-
-    res.json({
-      ...signedData,
-      signature,
-      public_key: publicKeyPem,
-    });
-    if (diagnostic) recordInternalDiagnostic(
-      "server_api", "validate", "VALIDATION_OK", diagnostic.incident_id
+    res.json(finalizedResponse);
+    if (finalizedIncident) recordInternalDiagnostic(
+      "server_api", "validate", "VALIDATION_OK", finalizedIncident,
     );
   } catch (error: any) {
     res.status(500).json({ error: SAFE_SERVER_ERROR });
@@ -2516,6 +2552,60 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
   }
 });
 
+// Optional v2 logout: single-use bearer issued only in a signed v2 validation.
+ // Legacy v1 endpoints remain compatible until client migration is approved.
+apiRouter.post("/v2/license/logout", async (req: Request, res: Response) => {
+  const authorization = req.headers.authorization;
+  const token = typeof authorization === "string" && authorization.startsWith("Bearer ")
+    ? authorization.slice(7) : null;
+  const claim = takeDeviceLogoutProof(token);
+  if (!claim || typeof token !== "string") {
+    res.status(403).json({ code: "INVALID_LOGOUT_PROOF" });
+    return;
+  }
+
+  const db = getDbClient();
+  let tx: Awaited<ReturnType<typeof db.transaction>> | undefined;
+  let committed = false;
+  try {
+    tx = await db.transaction("write");
+    await tx.lockLicense?.(claim.licenseId);
+    const found = await tx.execute({
+      sql: "SELECT l.key, d.status FROM devices d JOIN licenses l ON l.id = d.license_id "
+         + "WHERE d.id = ? AND d.license_id = ? AND d.hwid = ? LIMIT 1",
+      args: [claim.deviceId, claim.licenseId, claim.hwid],
+    });
+    if (!found.rows.length || found.rows[0].status !== "active") {
+      await tx.rollback();
+      res.status(403).json({ code: "DEVICE_UNBOUND" });
+      return;
+    }
+    const now = Date.now();
+    await tx.execute({
+      sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? "
+         + "WHERE id = ? AND license_id = ? AND hwid = ? AND status = 'active'",
+      args: [now, claim.deviceId, claim.licenseId, claim.hwid],
+    });
+    await tx.execute({
+      sql: "INSERT INTO validation_logs (id, license_key, app_slug, hwid, ip_address, action, status_code, message, created_at) "
+         + "VALUES (?, ?, NULL, ?, NULL, 'logout', 200, 'Authenticated device logout completed', ?)",
+      args: ["log_" + crypto.randomBytes(6).toString("hex"), String(found.rows[0].key), claim.hwid, now],
+    });
+    await tx.commit();
+    committed = true;
+    closeRealtimeDeviceSessions(claim.deviceId);
+    res.json({ success: true });
+  } catch {
+    if (tx && !committed) {
+      try { await tx.rollback(); } catch { /* preserve original failure */ }
+    }
+    restoreDeviceLogoutProof(token, claim);
+    res.status(500).json({ error: SAFE_SERVER_ERROR });
+  } finally {
+    tx?.close();
+  }
+});
+
 // Logout / Deactivate device from client (Instant unbind to free device limit slot)
 const handleLogoutOrDeactivate = async (req: Request, res: Response) => {
   try {
@@ -2543,6 +2633,10 @@ const handleLogoutOrDeactivate = async (req: Request, res: Response) => {
     }
 
     const licId = licRes.rows[0].id as string;
+    const affected = await db.execute({
+      sql: "SELECT id FROM devices WHERE license_id = ? AND hwid = ? AND status = 'active'",
+      args: [licId, hwid],
+    });
 
     // Set device status to 'logged_out' so active device count frees up slot
     await db.execute({
@@ -2564,6 +2658,8 @@ const handleLogoutOrDeactivate = async (req: Request, res: Response) => {
       ],
     });
 
+    invalidateDeviceLogoutProof(licId, hwid);
+    for (const row of affected.rows) closeRealtimeDeviceSessions(String(row.id));
     res.json({
       success: true,
       message: "Device logged out and HWID slot released successfully",

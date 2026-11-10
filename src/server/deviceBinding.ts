@@ -34,6 +34,7 @@ interface BindDeviceParams {
   deviceLeaseSeconds?: number;
   rejectBlocked: boolean;
   activateLicense?: boolean;
+  finalizeBound?: (result: Extract<BindDeviceResult, { status: "bound" }>, tx: DatabaseTransaction) => Promise<void>;
 }
 
 export type BindDeviceResult =
@@ -74,6 +75,7 @@ export async function bindDeviceWithinLimit({
   deviceLeaseSeconds = DEFAULT_DEVICE_LEASE_SECONDS,
   rejectBlocked,
   activateLicense = false,
+  finalizeBound,
 }: BindDeviceParams): Promise<BindDeviceResult> {
   const staleBefore = now - deviceLeaseSeconds * 1000;
 
@@ -170,8 +172,7 @@ export async function bindDeviceWithinLimit({
         }
         activation = { activatedAt, expiresAt };
       }
-      await transaction.commit();
-      return {
+      const boundResult: Extract<BindDeviceResult, { status: "bound" }> = {
         status: "bound",
         existingDevice: Boolean(existingDevice),
         activeDevicesCount,
@@ -180,6 +181,10 @@ export async function bindDeviceWithinLimit({
           : activeDevicesCount + 1,
         ...(activation ? { activation } : {}),
       };
+      // Signed response + success audit must succeed before a device slot commits.
+      if (finalizeBound) await finalizeBound(boundResult, transaction);
+      await transaction.commit();
+      return boundResult;
     } catch (error) {
       if (transaction) await transaction.rollback();
       if (
