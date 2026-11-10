@@ -270,7 +270,7 @@ class PythonConfigLoaderTests(unittest.TestCase):
                 self.assertEqual(error.exception.code, expected_code)
                 http_post.assert_not_called()
 
-    def test_discovery_deduplicates_case_variations_on_windows(self):
+    def test_discovery_deduplicates_case_variations_on_case_insensitive_volumes(self):
         self.write_config()
         script_file = Path(self.temp_dir.name) / "app.py"
         # Simulate casing variance between getcwd and main module __file__
@@ -283,6 +283,20 @@ class PythonConfigLoaderTests(unittest.TestCase):
             sys.modules["__main__"], "__file__", main_variant, create=True
         ):
             config = SDKConfig.from_discovered_file()
+            self.assertEqual(config.app_name, "config-test")
+
+    def test_discovery_deduplicates_symlinked_app_root(self):
+        self.write_config()
+        with tempfile.TemporaryDirectory() as directory:
+            alias = Path(directory) / "same-app"
+            try:
+                alias.symlink_to(Path(self.temp_dir.name), target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("Directory symlinks unavailable on this test host")
+            with patch("licenx.config.os.getcwd", return_value=self.temp_dir.name), patch.object(
+                sys.modules["__main__"], "__file__", str(alias / "app.py"), create=True
+            ):
+                config = SDKConfig.from_discovered_file()
             self.assertEqual(config.app_name, "config-test")
 
     @staticmethod
