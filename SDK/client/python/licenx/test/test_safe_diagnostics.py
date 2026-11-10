@@ -32,7 +32,18 @@ class SafeDiagnosticsTests(unittest.TestCase):
 
     def test_wss_tls_failure_retains_safe_code_and_fails_closed(self):
         communicator = ServerCommunicator(SDKConfig(server_url="https://example.test"))
-        storage = SimpleNamespace(_running=True, _invalidate=Mock())
+        # LX-S02: the real storage first pauses protected actions, then
+        # checks fresh signed HTTPS. A failed signature must still fail closed.
+        storage = SimpleNamespace(
+            _running=True,
+            _invalidate=Mock(),
+            pause_for_signed_reverification=Mock(return_value=True),
+            realtime_signed_heartbeat=Mock(return_value=False),
+            enter_signed_http_fallback=Mock(return_value=False),
+        )
+        communicator.ping_heartbeat = Mock(return_value=(
+            False, {"code": "HEARTBEAT_SIGNATURE_FAILED"},
+        ))
         worker = RealtimeLicenseWorker(
             communicator, storage, "SECRET-LICENSE", "RAW-HWID",
             {"app_id": "app-one"},
@@ -42,6 +53,11 @@ class SafeDiagnosticsTests(unittest.TestCase):
             side_effect=ssl.SSLError("private credential in arbitrary exception")
         ):
             worker._run()
+        storage.pause_for_signed_reverification.assert_called_once_with()
+        communicator.ping_heartbeat.assert_called_once_with(
+            "SECRET-LICENSE", "RAW-HWID"
+        )
+        storage.enter_signed_http_fallback.assert_not_called()
         storage._invalidate.assert_called_once_with("REALTIME_TLS_ERROR")
         events = communicator.get_diagnostics()
         self.assertEqual(events[-1]["code"], "REALTIME_TLS_ERROR")
