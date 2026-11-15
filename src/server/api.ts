@@ -2564,7 +2564,12 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
                 ) RETURNING id`,
         args: [now, license.id as string, hwid, license.id as string, now],
       });
-      if (Number(renewed.rowsAffected) !== 1) {
+      // libSQL can report rowsAffected=0 for UPDATE ... RETURNING even
+      // when a row was updated. The returned row identity is authoritative.
+      // Require exactly the SAME previously verified active binding; never
+      // reactivate a logged-out, blocked or replaced device.
+      if (renewed.rows.length !== 1 ||
+          String(renewed.rows[0].id) !== String(devCheck.rows[0].id)) {
         await renewalTx.rollback();
         await sendTerminalDenial(403, "DEVICE_UNBOUND", {
           message: "Device binding or license is no longer active",

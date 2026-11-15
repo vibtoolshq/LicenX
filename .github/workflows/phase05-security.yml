@@ -49,7 +49,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # One bounded gate for this unshipped PR; other PRs and main still use
+  # the original full portability/Docker workflows after separate approval.
+  focused-pr-regression:
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'ci/licenx-1.2.6rc1-regression'
+    name: Focused Node heartbeat and Python SDK security
+    runs-on: ubuntu-24.04
+    timeout-minutes: 9
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install isolated test requirements
+        run: |
+          npm ci --no-audit --no-fund
+          python -m pip install -r SDK/client/python/licenx/requirements.txt
+          python -m pip install 'websocket-client>=1.7,<2'
+      - name: N-01 focused Node heartbeat and denial security
+        run: |
+          timeout --signal=TERM --kill-after=5s 120s node --import tsx --test --test-concurrency=1 \
+            tests/licenseHeartbeat.test.ts \
+            tests/phase05Security.test.ts \
+            tests/realtimeServerPolicy.test.ts
+      - name: P-01 focused Python SDK recovery and lifecycle
+        env:
+          PYTHONPATH: SDK/client/python
+          PYTHONDONTWRITEBYTECODE: "1"
+        run: |
+          timeout --signal=TERM --kill-after=5s 120s python -m unittest -v \
+            licenx.test.test_lx_s02_lifecycle \
+            licenx.test.test_network_recovery \
+            licenx.test.test_heartbeat
+      - name: TypeScript static check
+        run: ./node_modules/.bin/tsc --noEmit
+
   sdk-platform-compat:
+    # This one prerelease PR is intentionally short-gated before full matrix.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref != 'ci/licenx-1.2.6rc1-regression'
     name: Primary SDK portability (${{ matrix.os }}, Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
     permissions:
@@ -80,6 +122,7 @@ jobs:
           python -m pip install -r SDK/client/python/licenx/requirements.txt
           python -m unittest discover -s SDK/client/python/licenx/test -p "test_*.py"
   build-and-smoke:
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.ref != 'ci/licenx-1.2.6rc1-regression'
     name: Build and exercise isolated Docker Compose
     runs-on: ubuntu-24.04
     timeout-minutes: 30
