@@ -499,10 +499,12 @@ class LiveConfigTests(unittest.TestCase):
                 "os_info",
                 "app_name",
                 "app_version",
-                "client_time",
                 "nonce",
+                "logout_proof_version",
             },
         )
+        self.assertEqual(request_body["logout_proof_version"], 2)
+        self.assertNotIn("client_time", request_body)
         self.assertEqual(request_body["device_name"], "test-host")
         self.assertEqual(request_body["os_info"], "Test OS")
         self.assertEqual(request_body["app_version"], "2.4.1")

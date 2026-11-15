@@ -108,7 +108,10 @@ class LoginBindingCleanupTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.code, "SIGNATURE_FAILED")
-        print_warning.assert_called_once()
+        # An untrusted validation response has no authenticated device proof.
+        # Never attempt remote cleanup or emit a misleading cleanup warning.
+        self.communicator.send_logout.assert_not_called()
+        print_warning.assert_not_called()
 
 
 if __name__ == "__main__":

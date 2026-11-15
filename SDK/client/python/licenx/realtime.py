@@ -289,6 +289,9 @@ class RealtimeLicenseWorker:
                         "REALTIME_AUTH_REVOKED",
                         "REALTIME_ALREADY_REGISTERED",
                     ):
+                        # Pause BEFORE raising: direct calls must never leave
+                        # protected operations authorized on an unknown frame.
+                        self.storage.pause_for_signed_reverification()
                         raise _RealtimeSecurityError("REALTIME_UNEXPECTED_FRAME")
                     self.storage.pause_for_signed_reverification()
                     self._report("ws_upgrade", "REALTIME_SOCKET_ERROR")
@@ -353,6 +356,7 @@ class RealtimeLicenseWorker:
                     raise _RealtimeSecurityError("REALTIME_FRAME_INVALID")
                 packet = self._receive(SimpleNamespace(recv=lambda: raw))
                 if packet.get("type") != "license.state_changed":
+                    self.storage.pause_for_signed_reverification()
                     raise _RealtimeSecurityError("REALTIME_UNEXPECTED_FRAME")
                 if self._verify_event(packet):
                     # Events are notifications, never an offline authorization.

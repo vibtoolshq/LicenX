@@ -314,6 +314,27 @@ class RealtimeSdkTests(unittest.TestCase):
                 self.worker._run_connection(FakeWebSocketModule(sock))
         self.assertTrue(sock.closed)
         self.assertFalse(self.storage.is_authorized())
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
+        self.assertTrue(self.storage._running, "unsigned control must not force a UI logout")
+
+    def test_unexpected_frame_after_signed_snapshot_pauses_immediately(self):
+        # A trusted WSS snapshot may have reenabled access, but a subsequent
+        # unsigned unexpected frame must revoke protected-operation permission
+        # BEFORE bubbling the security exception to the reconnect worker.
+        snapshot = signed({
+            "type": "license.snapshot", "app_id": "app-one",
+            "license_id": "lic-one", "device_id": "dev-one",
+            "valid": True, "version": 1,
+            "server_time": self.worker._signed_server_time_ms,
+        }, self.key)
+        sock = FakeWebSocket([snapshot, {"type": "unexpected.control"}])
+        with patch.object(self.worker, "_post_ticket", return_value=("A" * 43, 200)):
+            with self.assertRaisesRegex(_RealtimeSecurityError, "REALTIME_UNEXPECTED_FRAME"):
+                self.worker._run_connection(FakeWebSocketModule(sock))
+        self.assertTrue(sock.closed)
+        self.assertFalse(self.storage.is_authorized())
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
+        self.assertTrue(self.storage._running)
 
     def test_half_open_wss_requires_matching_pong_and_pauses_license_actions(self):
         server_epoch = self.worker._signed_server_time_ms
