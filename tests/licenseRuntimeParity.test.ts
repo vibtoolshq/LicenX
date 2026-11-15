@@ -520,11 +520,11 @@ test("Node and Cloudflare persist and export valid per-app lease settings", asyn
   }
 });
 
-test("Node and Cloudflare logout routes release active validation bindings", async () => {
-  for (const [validate, logout] of [
-    [validateWithNode, logoutWithNode],
-    [validateWithCloudflare, logoutWithCloudflare],
-  ]) {
+test("Node legacy logout rejects proofless unbind; Cloudflare legacy behavior is unchanged", async () => {
+  for (const [validate, logout, isNode] of [
+    [validateWithNode, logoutWithNode, true],
+    [validateWithCloudflare, logoutWithCloudflare, false],
+  ] as const) {
     const validation = await validate();
     assert.equal(validation.status, 200);
 
@@ -535,12 +535,13 @@ test("Node and Cloudflare logout routes release active validation bindings", asy
     assert.equal(activeBinding.rows[0]?.status, "active");
 
     const logoutResult = await logout();
-    assert.equal(logoutResult.status, 200);
+    assert.equal(logoutResult.status, isNode ? 403 : 200);
+    if (isNode) assert.equal(logoutResult.body.code, "LOGOUT_PROOF_REQUIRED");
 
     const releasedBinding = await db.execute({
       sql: "SELECT status FROM devices WHERE license_id = ? AND hwid = ?",
       args: [licenseId, requestHwid],
     });
-    assert.equal(releasedBinding.rows[0]?.status, "logged_out");
+    assert.equal(releasedBinding.rows[0]?.status, isNode ? "active" : "logged_out");
   }
 });

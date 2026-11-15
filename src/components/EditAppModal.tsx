@@ -18,7 +18,6 @@ export const EditAppModal: React.FC<EditAppModalProps> = ({ app, onClose, onUpda
   const [pingIntervalSeconds, setPingIntervalSeconds] = useState(app.ping_interval_seconds ?? 1200);
   const [offlineGraceSeconds, setOfflineGraceSeconds] = useState(app.offline_grace_seconds ?? 0);
   const [webSocketEnabled, setWebSocketEnabled] = useState(Number(app.realtime_websocket_enabled ?? 0) === 1);
-  const [keepLoginOnNetworkError, setKeepLoginOnNetworkError] = useState(Number(app.keep_login_on_network_error ?? 0) === 1);
   const [presence, setPresence] = useState<RealtimePresenceReport | null>(null);
   const [connectionState, setConnectionState] = useState(adminRealtime.getStatus().state);
 
@@ -95,7 +94,6 @@ export const EditAppModal: React.FC<EditAppModalProps> = ({ app, onClose, onUpda
         ping_interval_seconds: pingIntervalSeconds,
         offline_grace_seconds: offlineGraceSeconds,
         realtime_websocket_enabled: webSocketEnabled,
-        keep_login_on_network_error: keepLoginOnNetworkError,
       });
 
       onUpdated();
@@ -224,17 +222,14 @@ export const EditAppModal: React.FC<EditAppModalProps> = ({ app, onClose, onUpda
                   aria-label="Enable WebSocket for this application"
                   className="accent-indigo-500" />
               </label>
-              <label className="flex items-center justify-between gap-2 rounded border border-slate-800 bg-slate-900/50 p-2 cursor-pointer">
-                <span className="text-[11px] text-slate-300">Keep login on network error</span>
-                <input type="checkbox" checked={keepLoginOnNetworkError}
-                  onChange={e => setKeepLoginOnNetworkError(e.target.checked)}
-                  aria-label="Keep login policy on network error"
-                  className="accent-indigo-500" />
-              </label>
+              <div className="rounded border border-slate-800 bg-slate-900/50 p-2" role="note">
+                <span className="text-[11px] text-slate-300">Network error UI session</span>
+                <div className="text-[10px] text-slate-500 mt-1">Retained by current realtime SDK; legacy policy flag is compatibility-only.</div>
+              </div>
             </div>
             <div className="mt-2 text-[10px] leading-relaxed text-slate-500">
-              After a verified WebSocket snapshot, new SDK follows this signed policy: OFF logs out after network grace; ON retains UI session only while unverified actions stay blocked.
-              Without a snapshot, safety defaults OFF. Older SDKs stay HTTP-only; revoke/expiry always deny access.
+              Network failures retain the current realtime SDK login UI while unverified licensed operations pause after bounded grace.
+              The legacy keep-login flag is retained for older clients but is no longer editable here. Verified revoke/expiry still logs out; WebSocket requires SDK support.
             </div>
             <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400" aria-live="polite">
               {presence ? (

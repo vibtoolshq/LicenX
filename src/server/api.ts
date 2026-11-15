@@ -97,11 +97,15 @@ apiRouter.get("/diagnostics", requireAdminAuth, (req: Request, res: Response) =>
     res.status(400).json({ code: "INVALID_DIAGNOSTIC_FILTER" });
     return;
   }
-  res.json(listSafeDiagnostics({
-    limit: n,
-    code: typeof code === "string" ? code : undefined,
-    incident_id: typeof incident_id === "string" ? incident_id : undefined,
-  }));
+  res.json({
+    ...listSafeDiagnostics({
+      limit: n,
+      code: typeof code === "string" ? code : undefined,
+      incident_id: typeof incident_id === "string" ? incident_id : undefined,
+    }),
+    serverTime: Date.now(),
+    serverTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+  });
 });
 
 // In-memory admin auth caching to eliminate redundant DB queries on every request
@@ -970,6 +974,7 @@ apiRouter.get(
           app.offline_grace_seconds ?? DEFAULT_OFFLINE_GRACE_SECONDS,
         ),
         enable_background_heartbeat: true,
+        useWebSocket: Number(app.realtime_websocket_enabled ?? 0) === 1,
         public_key_pem: publicKeyPem,
         generated_at: new Date().toISOString(),
       };
@@ -1598,6 +1603,8 @@ apiRouter.get(
       res.json({
         devices: result.rows,
         total: Number(countResult.rows[0].total || 0),
+        serverTime: Date.now(),
+        serverTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       });
     } catch (error: any) {
       res.status(500).json({ error: SAFE_SERVER_ERROR });
@@ -2440,37 +2447,67 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
     const db = getDbClient();
     const now = Date.now();
 
+    // Terminal denials require server-signed, request-bound evidence. Older
+    // clients retain the HTTP status/code, but unsigned replies carry no
+    // cryptographic authority for newer SDKs.
+    const sendTerminalDenial = async (
+      httpStatus: 403 | 404,
+      code: string,
+      legacy: Record<string, unknown> = {},
+    ): Promise<void> => {
+      const response = { valid: false, code, ...legacy };
+      const appName = req.body.app_name;
+      if (typeof license_key !== "string" || typeof hwid !== "string"
+          || typeof appName !== "string" || typeof nonce !== "string"
+          || !/^[A-Za-z0-9_-]{16,128}$/.test(nonce)) {
+        res.status(httpStatus).json(response);
+        return;
+      }
+      const binding = crypto.createHash("sha256").update(canonicalJson({
+        license_key: license_key.trim().toUpperCase(),
+        hwid,
+        app_name: appName,
+      }), "utf8").digest("hex");
+      const proof = {
+        valid: false, code, nonce, request_binding: binding, server_time: now,
+      };
+      try {
+        const signing = await db.execute(
+          "SELECT ed25519_private_key FROM admin_config LIMIT 1",
+        );
+        const privateKey = signing.rows[0]?.ed25519_private_key;
+        if (typeof privateKey === "string" && privateKey.length > 0) {
+          const signature = signPayload(canonicalJson(proof), privateKey);
+          res.status(httpStatus).json({ ...response, ...proof, signature });
+          return;
+        }
+      } catch {
+        // No verifiable signing key: deny the operation but never fake a proof.
+      }
+      res.status(httpStatus).json(response);
+    };
+
     const licRes = await db.execute({
       sql: "SELECT id, status, expires_at, app_id FROM licenses WHERE key = ? LIMIT 1",
       args: [license_key.trim().toUpperCase()],
     });
 
     if (licRes.rows.length === 0) {
-      res.status(404).json({
-        valid: false,
-        code: "NOT_FOUND",
-        message: "License not found",
-      });
+      await sendTerminalDenial(404, "NOT_FOUND", { message: "License not found" });
       return;
     }
 
     const license = licRes.rows[0];
     if (license.status !== "active") {
-      res.status(403).json({
-        valid: false,
-        code: "LICENSE_INACTIVE",
-        status: license.status,
-        message: `License is ${license.status}`,
+      await sendTerminalDenial(403, "LICENSE_INACTIVE", {
+        status: license.status, message: `License is ${license.status}`,
       });
       return;
     }
 
     if (license.expires_at && now > (license.expires_at as number)) {
-      res.status(403).json({
-        valid: false,
-        code: "LICENSE_EXPIRED",
-        status: "expired",
-        message: "License has expired",
+      await sendTerminalDenial(403, "LICENSE_EXPIRED", {
+        status: "expired", message: "License has expired",
       });
       return;
     }
@@ -2478,13 +2515,14 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
     if (license.app_id) {
       const appState = await db.execute({ sql: "SELECT status FROM apps WHERE id = ? LIMIT 1", args: [license.app_id] });
       if (!appState.rows.length || appState.rows[0].status !== "active") {
-        res.status(403).json({ valid: false, code: !appState.rows.length ? "APP_NOT_FOUND" : "APP_INACTIVE" });
+        await sendTerminalDenial(
+          403, !appState.rows.length ? "APP_NOT_FOUND" : "APP_INACTIVE",
+        );
         return;
       }
     }
-    const deviceLeaseSeconds = await getDeviceLeaseSeconds(db, license.app_id);
-    const staleBefore = now - deviceLeaseSeconds * 1000;
-
+    // A stale but still-active binding may recover after a transient outage.
+    // Explicitly logged-out, blocked or deleted bindings may never recover here.
     // Check if device is still bound and active on this license
     const devCheck = await db.execute({
       sql: "SELECT id, status, last_ping_at FROM devices WHERE license_id = ? AND hwid = ? LIMIT 1",
@@ -2492,24 +2530,8 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
     });
 
     if (devCheck.rows.length === 0 || devCheck.rows[0].status !== "active") {
-      res.status(403).json({
-        valid: false,
-        code: "DEVICE_UNBOUND",
+      await sendTerminalDenial(403, "DEVICE_UNBOUND", {
         message: "Device binding was logged out or unlinked by administrator",
-      });
-      return;
-    }
-
-    if (Number(devCheck.rows[0].last_ping_at) <= staleBefore) {
-      await db.execute({
-        sql: "UPDATE devices SET status = 'logged_out' WHERE license_id = ? AND hwid = ? AND status = 'active' AND last_ping_at <= ?",
-        args: [license.id as string, hwid, staleBefore],
-      });
-      res.status(403).json({
-        valid: false,
-        code: "DEVICE_LEASE_EXPIRED",
-        message:
-          "Device lease expired; log in again to revalidate this license",
       });
       return;
     }
@@ -2522,17 +2544,40 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
       return;
     }
 
-    const renewed = await db.execute({
-      sql: "UPDATE devices SET last_ping_at = ? WHERE license_id = ? AND hwid = ? AND status = 'active' AND last_ping_at > ?",
-      args: [now, license.id as string, hwid, staleBefore],
-    });
-    if (Number(renewed.rowsAffected) === 0) {
-      res.status(403).json({
-        valid: false,
-        code: "DEVICE_UNBOUND",
-        message: "Device binding is no longer active",
+    // Serialize with other license binding changes. Never reactivate a row:
+    // both the transaction and the conditional UPDATE require status='active'.
+    let renewalTx: Awaited<ReturnType<typeof db.transaction>> | undefined;
+    let renewedDeviceId: string | undefined;
+    try {
+      renewalTx = await db.transaction("write");
+      await renewalTx.lockLicense?.(license.id as string);
+      const renewed = await renewalTx.execute({
+        sql: `UPDATE devices SET last_ping_at = ?
+              WHERE license_id = ? AND hwid = ? AND status = 'active'
+                AND EXISTS (
+                  SELECT 1 FROM licenses l
+                  WHERE l.id = ? AND l.status = 'active'
+                    AND (l.expires_at IS NULL OR l.expires_at > ?)
+                    AND (l.app_id IS NULL OR EXISTS (
+                      SELECT 1 FROM apps a WHERE a.id = l.app_id AND a.status = 'active'
+                    ))
+                ) RETURNING id`,
+        args: [now, license.id as string, hwid, license.id as string, now],
       });
-      return;
+      if (Number(renewed.rowsAffected) !== 1) {
+        await renewalTx.rollback();
+        await sendTerminalDenial(403, "DEVICE_UNBOUND", {
+          message: "Device binding or license is no longer active",
+        });
+        return;
+      }
+      renewedDeviceId = String(renewed.rows[0].id);
+      await renewalTx.commit();
+    } catch (error) {
+      await renewalTx?.rollback();
+      throw error;
+    } finally {
+      renewalTx?.close();
     }
 
     const signedData: Record<string, unknown> = {
@@ -2541,10 +2586,19 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
       server_time: now,
       nonce: typeof nonce === "string" ? nonce : "",
     };
+    // A validated v2 SDK refreshes its RAM-only logout capability on
+    // signed heartbeat, avoiding forced logout after the one-hour proof TTL.
+    const refreshedProof = req.body.logout_proof_version === 2
+      && typeof nonce === "string" && nonce.length > 0 && renewedDeviceId
+      ? prepareDeviceLogoutProof() : undefined;
+    if (refreshedProof) signedData.device_logout_proof = refreshedProof;
     const signature = signPayload(
       canonicalJson(signedData),
       configResult.rows[0].ed25519_private_key as string,
     );
+    if (refreshedProof && renewedDeviceId) {
+      activateDeviceLogoutProof(refreshedProof, renewedDeviceId, String(license.id), hwid);
+    }
 
     res.json({ ...signedData, signature });
   } catch (error: any) {
@@ -2607,66 +2661,10 @@ apiRouter.post("/v2/license/logout", async (req: Request, res: Response) => {
 });
 
 // Logout / Deactivate device from client (Instant unbind to free device limit slot)
-const handleLogoutOrDeactivate = async (req: Request, res: Response) => {
-  try {
-    const { license_key, hwid, app_name } = req.body;
-    if (!license_key || !hwid) {
-      res.status(400).json({ error: "license_key and hwid required" });
-      return;
-    }
-
-    const db = getDbClient();
-    const ip =
-      req.headers["x-forwarded-for"]?.toString().split(",")[0].trim() ||
-      req.socket.remoteAddress ||
-      "127.0.0.1";
-    const now = Date.now();
-
-    const licRes = await db.execute({
-      sql: "SELECT id FROM licenses WHERE key = ? LIMIT 1",
-      args: [license_key.trim().toUpperCase()],
-    });
-
-    if (licRes.rows.length === 0) {
-      res.status(404).json({ error: "License not found" });
-      return;
-    }
-
-    const licId = licRes.rows[0].id as string;
-    const affected = await db.execute({
-      sql: "SELECT id FROM devices WHERE license_id = ? AND hwid = ? AND status = 'active'",
-      args: [licId, hwid],
-    });
-
-    // Set device status to 'logged_out' so active device count frees up slot
-    await db.execute({
-      sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ? AND hwid = ? AND status = 'active'",
-      args: [now, licId, hwid],
-    });
-
-    // Log logout audit entry
-    await db.execute({
-      sql: `INSERT INTO validation_logs (id, license_key, app_slug, hwid, ip_address, action, status_code, message, created_at)
-            VALUES (?, ?, ?, ?, ?, 'logout', 200, 'Device unbind / logout completed', ?)`,
-      args: [
-        "log_" + crypto.randomBytes(6).toString("hex"),
-        license_key.trim().toUpperCase(),
-        app_name || null,
-        hwid,
-        ip,
-        now,
-      ],
-    });
-
-    invalidateDeviceLogoutProof(licId, hwid);
-    for (const row of affected.rows) closeRealtimeDeviceSessions(String(row.id));
-    res.json({
-      success: true,
-      message: "Device logged out and HWID slot released successfully",
-    });
-  } catch (error: any) {
-    res.status(500).json({ error: SAFE_SERVER_ERROR });
-  }
+// Legacy clients must migrate to signed v2 device logout. Neither v1 route
+// may mutate a binding based only on a license key and a disclosed HWID.
+const handleLogoutOrDeactivate = (_req: Request, res: Response) => {
+  res.status(403).json({ code: "LOGOUT_PROOF_REQUIRED" });
 };
 
 apiRouter.post("/v1/license/logout", handleLogoutOrDeactivate);
@@ -2776,6 +2774,8 @@ apiRouter.get(
         total: Number(countResult.rows[0]?.total || 0),
         limit: pageLimit,
         offset: pageOffset,
+        serverTime: Date.now(),
+        serverTimeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       });
     } catch {
       const incidentId = crypto.randomUUID();

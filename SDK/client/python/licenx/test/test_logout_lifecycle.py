@@ -1,6 +1,6 @@
 import signal
 import unittest
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from licenx.device import DeviceManager
 from licenx.logout import LogoutManager
@@ -74,6 +74,75 @@ class LogoutLifecycleTests(unittest.TestCase):
         self.communicator.send_logout.assert_called_once_with(
             "test-license", "test-hwid"
         )
+
+    def test_verified_validation_strips_logout_proof_from_public_result(self):
+        from licenx.config import SDKConfig
+        from licenx.server import ServerCommunicator
+        communicator = ServerCommunicator(SDKConfig(
+            server_url="https://licenx.test", app_name="test-app", app_version="1.0.0",
+        ))
+        signed_data = {
+            "valid": True, "nonce": "test-nonce", "request_app": "test-app",
+            "license_key": "LIC-TEST", "hwid": "HWID-TEST",
+            "device_logout_proof": "A" * 43, "signature": "test-signature",
+        }
+        with patch("licenx.server.secrets.token_urlsafe", return_value="test-nonce"), patch.object(
+            communicator, "_http_post", return_value=(200, signed_data.copy())
+        ) as http, patch.object(communicator, "verify_signature", return_value=True):
+            ok, status, result = communicator.validate_license(
+                "LIC-TEST", "HWID-TEST", {}
+            )
+        self.assertTrue(ok)
+        self.assertEqual(status, 200)
+        self.assertNotIn("device_logout_proof", result)
+        self.assertEqual(communicator._logout_proof_session, ("LIC-TEST", "HWID-TEST"))
+        self.assertEqual(communicator._logout_proof, "A" * 43)
+        self.assertEqual(http.call_args.args[1]["logout_proof_version"], 2)
+
+    def test_proof_bound_v2_logout_only_and_no_legacy_fallback(self):
+        from licenx.config import SDKConfig
+        from licenx.server import ServerCommunicator
+        communicator = ServerCommunicator(SDKConfig(server_url="https://licenx.test"))
+        communicator._logout_proof = "A" * 43
+        communicator._logout_proof_session = ("LIC-TEST", "HWID-TEST")
+        response = MagicMock()
+        response.getcode.return_value = 200
+        response.__enter__.return_value = response
+        with patch("licenx.server.urllib.request.urlopen", return_value=response) as send:
+            self.assertTrue(communicator.send_logout("lic-test", "HWID-TEST"))
+        request = send.call_args.args[0]
+        self.assertEqual(request.full_url, "https://licenx.test/api/v2/license/logout")
+        self.assertEqual(request.get_header("Authorization"), "Bearer " + "A" * 43)
+        self.assertIsNone(communicator._logout_proof)
+        with patch.object(communicator, "ping_heartbeat", return_value=(False, {})), patch(
+            "licenx.server.urllib.request.urlopen"
+        ) as no_anonymous:
+            self.assertFalse(communicator.send_logout("LIC-TEST", "HWID-TEST"))
+            no_anonymous.assert_not_called()
+
+    def test_expired_v2_proof_refreshes_only_via_signed_heartbeat(self):
+        from urllib.error import HTTPError
+        from licenx.config import SDKConfig
+        from licenx.server import ServerCommunicator
+        communicator = ServerCommunicator(SDKConfig(server_url="https://licenx.test"))
+        communicator._logout_proof = "A" * 43
+        communicator._logout_proof_session = ("LIC-TEST", "HWID-TEST")
+        response = MagicMock()
+        response.getcode.return_value = 200
+        response.__enter__.return_value = response
+
+        def refresh(key, hwid):
+            communicator._logout_proof = "B" * 43
+            return True, {"valid": True}
+
+        with patch("licenx.server.urllib.request.urlopen", side_effect=[
+            HTTPError("https://licenx.test/api/v2/license/logout", 403, "expired", {}, None),
+            response,
+        ]) as send, patch.object(communicator, "ping_heartbeat", side_effect=refresh) as ping:
+            self.assertTrue(communicator.send_logout("LIC-TEST", "HWID-TEST"))
+        ping.assert_called_once_with("LIC-TEST", "HWID-TEST")
+        self.assertEqual(send.call_count, 2)
+        self.assertEqual(send.call_args.args[0].get_header("Authorization"), "Bearer " + "B" * 43)
 
     def test_disabling_exit_hooks_does_not_change_host_signal_handlers(self):
         with patch("licenx.logout.signal.getsignal") as get_signal, patch(

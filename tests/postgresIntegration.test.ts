@@ -151,12 +151,21 @@ integration("PostgreSQL Node API supports fresh setup/login and a signed validat
   assert.equal((await request("/admin-api-keys", { name: "PG Fixture" }, token)).status, 201);
   assert.equal((await request("/admin-api-keys", undefined, token)).status, 200);
   await license();
-  const validation = await request("/v1/license/validate", { license_key: "PG-TEST-KEY", hwid: "api-hwid" });
+  const validation = await request("/v1/license/validate", {
+    license_key: "PG-TEST-KEY", hwid: "api-hwid",
+    nonce: "PG-LOGOUT-NONCE-TEST", logout_proof_version: 2,
+  });
   assert.equal(validation.status, 200);
   assert.equal(typeof validation.body.signature, "string");
   assert.equal(typeof validation.body.activated_at, "number");
+  const proof = validation.body.device_logout_proof as string;
+  assert.match(proof, /^[A-Za-z0-9_-]{43}$/);
   assert.equal((await request("/v1/license/ping", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 200);
-  assert.equal((await request("/v1/license/logout", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 200);
+  assert.equal((await request("/v1/license/logout", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 403);
+  assert.equal((await request("/v1/license/deactivate", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 403);
+  assert.equal((await request("/v1/license/ping", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 200);
+  assert.equal((await request("/v2/license/logout", {}, proof)).status, 200);
+  assert.equal((await request("/v2/license/logout", {}, proof)).status, 403);
   assert.equal((await request("/v1/license/ping", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 403);
   assert.equal((await request("/licenses?search=pg-test", undefined, token)).status, 200);
   assert.equal((await request("/stats", undefined, token)).status, 200);

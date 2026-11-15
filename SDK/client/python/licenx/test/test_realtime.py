@@ -40,6 +40,7 @@ class FakeWebSocket:
         self.sent = []
         self.closed = False
         self.timeouts = []
+        self.pings = []
 
     def send(self, msg):
         self.sent.append(json.loads(msg))
@@ -52,11 +53,23 @@ class FakeWebSocket:
     def settimeout(self, value):
         self.timeouts.append(value)
 
+    def ping(self, payload):
+        self.pings.append(payload)
+
+    def recv_data(self, control_frame=False):
+        return FakeWebSocketModule.ABNF.OPCODE_TEXT, self.recv().encode("utf-8")
+
     def close(self):
         self.closed = True
 
 
 class FakeWebSocketModule:
+    class ABNF:
+        OPCODE_TEXT = 1
+        OPCODE_CLOSE = 8
+        OPCODE_PING = 9
+        OPCODE_PONG = 10
+
     class WebSocketTimeoutException(Exception):
         pass
 
@@ -85,7 +98,8 @@ class RealtimeSdkTests(unittest.TestCase):
         self.storage._stop_event.clear()
         self.worker = RealtimeLicenseWorker(
             self.communicator, self.storage, "TEST-LICENSE", "HWID-TEST",
-            {"app_id": "app-one", "status": "active", "hwid": "HWID-TEST"},
+            {"app_id": "app-one", "status": "active", "hwid": "HWID-TEST",
+             "server_time": int(time.time() * 1000)},
         )
 
     def tearDown(self):
@@ -154,6 +168,61 @@ class RealtimeSdkTests(unittest.TestCase):
         with self.assertRaises(_RealtimeSecurityError):
             self.worker._verify_snapshot(signed(payload, self.key))
 
+    def test_signed_realtime_ignores_wall_clock_and_timezone_jumps(self):
+        now = self.worker._server_now_ms()
+        snap = {
+            "type": "license.snapshot", "app_id": "app-one",
+            "license_id": "lic-one", "device_id": "dev-one",
+            "version": 10, "valid": True, "server_time": now,
+        }
+        event = {
+            "type": "license.state_changed", "event_id": "11", "version": 11,
+            "event_type": "license.changed", "app_id": "app-one",
+            "license_id": "lic-one", "device_id": None,
+            "issued_at": now, "expires_at": now + 30_000,
+        }
+        for zone, wall_time in (("Pacific/Honolulu", 0), ("Asia/Dhaka", 4102444800)):
+            with self.subTest(zone=zone), patch.dict(os.environ, {"TZ": zone}), patch(
+                "licenx.realtime.time.time", return_value=wall_time
+            ):
+                self.worker._identity = None
+                self.worker._version = -1
+                self.worker._verify_snapshot(signed(snap, self.key))
+                self.assertTrue(self.worker._verify_event(signed(event, self.key)))
+                self.assertFalse(self.worker._verify_event(signed(event, self.key)))
+
+        # Server event expiry is still enforced using authenticated server time.
+        with patch("licenx.realtime.time.monotonic",
+                   return_value=self.worker._signed_server_clock_at + 90):
+            with self.assertRaises(_RealtimeSecurityError):
+                self.worker._verify_event(signed(event, self.key))
+
+    def test_realtime_requires_a_verified_server_clock_anchor(self):
+        self.worker._signed_server_time_ms = None
+        self.worker._signed_server_clock_at = None
+        now = int(time.time() * 1000)
+        snap = {
+            "type": "license.snapshot", "app_id": "app-one",
+            "license_id": "lic-one", "device_id": "dev-one",
+            "version": 1, "valid": True, "server_time": now,
+        }
+        with self.assertRaisesRegex(_RealtimeSecurityError, "REALTIME_TIME_UNVERIFIED"):
+            self.worker._verify_snapshot(signed(snap, self.key))
+        with patch.object(self.communicator, "ping_heartbeat", return_value=(
+            True, {"valid": True, "status": "active", "server_time": now}
+        )):
+            self.assertTrue(self.worker._signed_check())
+        self.worker._verify_snapshot(signed(snap, self.key))
+
+    def test_missing_server_time_on_heartbeat_is_never_authorized(self):
+        with patch.object(self.communicator, "ping_heartbeat", return_value=(
+            True, {"valid": True, "status": "active"}
+        )):
+            self.assertFalse(self.worker._signed_check())
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
+        self.assertFalse(self.storage.is_authorized())
+        self.assertTrue(self.storage._running)
+
     def test_event_scope_signature_version_and_expiry_rejected(self):
         snap = {
             "type": "license.snapshot", "app_id": "app-one", "license_id": "lic-one",
@@ -198,7 +267,8 @@ class RealtimeSdkTests(unittest.TestCase):
         mod = FakeWebSocketModule(sock)
         def ping(_key, _hwid):
             self.worker._stop_event.set()
-            return True, {"valid": True, "code": "OK", "status":"active"}
+            return True, {"valid": True, "code": "OK", "status":"active",
+                          "server_time": now}
         with patch.object(self.communicator, "_http_post", return_value=(200, {"ticket": "A"*43})), patch.object(
             self.communicator, "ping_heartbeat", side_effect=ping
         ) as signed_http:
@@ -211,6 +281,143 @@ class RealtimeSdkTests(unittest.TestCase):
         signed_http.assert_called_once_with("TEST-LICENSE", "HWID-TEST")
         self.assertTrue(sock.closed)
         self.assertEqual(self.storage.get_realtime_state(), "CONNECTED")
+
+    def test_known_wss_control_errors_recheck_https_not_fake_snapshot(self):
+        for code in ("REALTIME_RESTORE_IN_PROGRESS",
+                     "REALTIME_AUTH_REVOKED", "REALTIME_ALREADY_REGISTERED"):
+            with self.subTest(code=code):
+                # WSS transport frames are untrusted: neither logout nor
+                # authorization can come from an unsigned control response.
+                sock = FakeWebSocket([{"type": "connected"},
+                                      {"type": "error", "code": code}])
+                invalidated = Mock()
+                self.storage.on_invalidated = invalidated
+                with patch.object(self.worker, "_post_ticket", return_value=("A" * 43, 200)), patch.object(
+                    self.worker, "_signed_check", return_value=False
+                ) as recheck, patch.object(self.worker, "_report") as diagnostic:
+                    outcome = self.worker._run_connection(FakeWebSocketModule(sock))
+                self.assertEqual(outcome, "HTTP_FALLBACK")
+                recheck.assert_called_once()
+                diagnostic.assert_called_once_with(
+                    "ws_upgrade", "REALTIME_SOCKET_ERROR",
+                )
+                self.assertTrue(sock.closed)
+                self.assertFalse(self.storage.is_authorized())
+                invalidated.assert_not_called()
+                self.assertTrue(self.storage._running)
+
+    def test_unknown_wss_control_frame_is_still_security_error(self):
+        sock = FakeWebSocket([{"type": "connected"},
+                              {"type": "error", "code": "UNTRUSTED_FRAME"}])
+        with patch.object(self.worker, "_post_ticket", return_value=("A" * 43, 200)):
+            with self.assertRaisesRegex(_RealtimeSecurityError, "REALTIME_UNEXPECTED_FRAME"):
+                self.worker._run_connection(FakeWebSocketModule(sock))
+        self.assertTrue(sock.closed)
+        self.assertFalse(self.storage.is_authorized())
+
+    def test_half_open_wss_requires_matching_pong_and_pauses_license_actions(self):
+        server_epoch = self.worker._signed_server_time_ms
+        snap = signed({
+            "type": "license.snapshot", "app_id": "app-one",
+            "license_id": "lic-one", "device_id": "dev-one",
+            "valid": True, "version": 5, "server_time": server_epoch,
+        }, self.key)
+        clock = [500.0]
+        self.worker._signed_server_clock_at = clock[0]
+        invalidated = Mock()
+        self.storage.on_invalidated = invalidated
+
+        class BlackholeSocket(FakeWebSocket):
+            def recv_data(self, control_frame=False):
+                clock[0] += 8.0
+                if self.pings and not getattr(self, "bogus_pong_sent", False):
+                    self.bogus_pong_sent = True
+                    return FakeWebSocketModule.ABNF.OPCODE_PONG, b"forged-pong"
+                raise FakeWebSocketModule.WebSocketTimeoutException()
+
+        sock = BlackholeSocket([snap])
+        mod = FakeWebSocketModule(sock)
+        with patch.object(self.worker, "_post_ticket", return_value=("A" * 43, 200)), patch(
+            "licenx.realtime.time.monotonic", side_effect=lambda: clock[0]
+        ):
+            with self.assertRaisesRegex(_RealtimeSecurityError, "REALTIME_LIVENESS_EXPIRED"):
+                self.worker._run_connection(mod)
+        self.assertEqual(len(sock.pings), 1)
+        self.assertTrue(sock.closed)
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
+        self.assertFalse(self.storage.is_authorized())
+        invalidated.assert_not_called()
+        self.assertTrue(self.storage._running)
+
+    def test_matching_pong_keeps_healthy_wss_connected_without_granting_new_rights(self):
+        server_epoch = self.worker._signed_server_time_ms
+        snap = signed({
+            "type": "license.snapshot", "app_id": "app-one",
+            "license_id": "lic-one", "device_id": "dev-one",
+            "valid": True, "version": 5, "server_time": server_epoch,
+        }, self.key)
+        clock = [500.0]
+        self.worker._signed_server_clock_at = clock[0]
+
+        class ResponsiveSocket(FakeWebSocket):
+            def recv_data(self, control_frame=False):
+                clock[0] += 8.0
+                if self.pings:
+                    self.pong_matched = True
+                    self_worker._stop_event.set()
+                    return FakeWebSocketModule.ABNF.OPCODE_PONG, self.pings[-1]
+                raise FakeWebSocketModule.WebSocketTimeoutException()
+
+        self_worker = self.worker
+        sock = ResponsiveSocket([snap])
+        mod = FakeWebSocketModule(sock)
+        with patch.object(self.worker, "_post_ticket", return_value=("A" * 43, 200)), patch(
+            "licenx.realtime.time.monotonic", side_effect=lambda: clock[0]
+        ):
+            self.worker._run_connection(mod)
+        self.assertTrue(sock.pong_matched)
+        self.assertEqual(len(sock.pings), 1)
+        self.assertTrue(sock.closed)
+        self.assertEqual(self.storage.get_realtime_state(), "CONNECTED")
+
+    def test_initial_wss_ticket_outage_uses_http_and_keeps_retrying(self):
+        self.storage.on_invalidated = Mock()
+        self.storage.offline_grace_seconds = 0
+        with patch.object(self.worker, "_post_ticket", return_value=(None, 503)), patch.object(
+            self.worker, "_signed_check", return_value=True
+        ), patch.object(self.storage, "enter_signed_http_fallback", return_value=True):
+            self.assertEqual(self.worker._run_connection(Mock()), "HTTP_FALLBACK")
+        self.storage.on_invalidated.assert_not_called()
+        # A successful HTTP fallback must not permanently terminate the WSS worker.
+        calls = []
+        def stop_after_two(attempt):
+            calls.append(attempt)
+            if len(calls) == 2:
+                self.worker._stop_event.set()
+        with patch.dict(sys.modules, {"websocket": Mock()}), patch.object(
+            self.worker, "_run_connection",
+            side_effect=[_RealtimeSecurityError("REALTIME_SIGNATURE_INVALID"), "HTTP_FALLBACK"],
+        ) as run, patch.object(
+            self.worker, "_signed_check", return_value=False
+        ), patch.object(self.worker, "_retry_wait", side_effect=stop_after_two):
+            self.worker._run()
+        self.assertEqual(run.call_count, 2)
+        self.assertEqual(len(calls), 2)
+        self.storage.on_invalidated.assert_not_called()
+        self.assertTrue(self.storage._running)
+        self.assertFalse(self.storage.is_authorized())
+
+    def test_verified_server_terminal_denial_invalidates_only_once(self):
+        callback = Mock()
+        self.storage.on_invalidated = callback
+        self.storage.realtime_signed_heartbeat(False, {
+            "code": "DEVICE_UNBOUND", "_licenx_terminal_denial": True,
+        })
+        self.storage.realtime_signed_heartbeat(False, {
+            "code": "DEVICE_UNBOUND", "_licenx_terminal_denial": True,
+        })
+        callback.assert_called_once_with("DEVICE_UNBOUND")
+        self.assertEqual(self.storage.get_realtime_state(), "INVALIDATED")
 
     def test_invalid_snapshot_never_connects_or_grants_access(self):
         now = int(time.time() * 1000)
@@ -252,7 +459,7 @@ class RealtimeSdkTests(unittest.TestCase):
     def test_grace_is_bounded_and_revocation_never_gets_grace(self):
         self.storage.offline_grace_seconds = 20
         self.storage.apply_signed_realtime_policy(True)  # verified ON retains UI after grace
-        with patch("licenx.storage.time.monotonic", side_effect=[100.0, 121.0]):
+        with patch("licenx.storage.time.monotonic", side_effect=[100.0, 101.0, 121.0]):
             self.storage.realtime_signed_heartbeat(False, {"code":"SERVER_UNREACHABLE"})
             self.assertEqual(self.storage.get_realtime_state(), "OFFLINE_GRACE")
             self.assertTrue(self.storage.is_authorized())
@@ -261,12 +468,14 @@ class RealtimeSdkTests(unittest.TestCase):
         self.assertFalse(self.storage.is_authorized())
         revoked = Mock()
         self.storage.on_invalidated = revoked
-        self.storage.realtime_signed_heartbeat(False, {"code":"LICENSE_INACTIVE"})
+        self.storage.realtime_signed_heartbeat(False, {
+            "code": "LICENSE_INACTIVE", "_licenx_terminal_denial": True
+        })
         revoked.assert_called_once_with("LICENSE_INACTIVE")
         self.assertEqual(self.storage.get_realtime_state(), "INVALIDATED")
         self.assertFalse(self.storage.is_authorized())
 
-    def test_signed_app_policy_changes_network_error_continuity(self):
+    def test_signed_legacy_policy_flag_does_not_change_ui_continuity(self):
         snapshot = {
             "type": "license.snapshot", "app_id": "app-one",
             "license_id": "lic-1", "device_id": "device-1",
@@ -284,20 +493,33 @@ class RealtimeSdkTests(unittest.TestCase):
         snapshot["keep_login_on_network_error"] = False
         self.worker._verify_snapshot(signed(snapshot, self.key))
         self.assertFalse(self.storage._keep_login_on_network_error)
+        # Both stored signed legacy policy values have exactly the same
+        # modern UI-retention behavior; protected operations still fail closed.
+        self.storage.offline_grace_seconds = 0
+        self.storage.on_invalidated = Mock()
+        self.storage.realtime_signed_heartbeat(False, {"code": "TIMEOUT"})
+        self.assertTrue(self.storage._running)
+        self.assertFalse(self.storage.is_authorized())
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
+        self.storage.on_invalidated.assert_not_called()
         snapshot["version"] = 5
         snapshot["keep_login_on_network_error"] = "true"
         with self.assertRaises(_RealtimeSecurityError):
             self.worker._verify_snapshot(signed(snapshot, self.key))
 
-    def test_policy_off_invalidates_after_network_grace_and_policy_on_pauses(self):
+    def test_policy_off_retains_ui_but_pauses_after_network_grace(self):
         invalidated = Mock()
         self.storage.on_invalidated = invalidated
         self.storage.offline_grace_seconds = 0
         self.assertFalse(self.storage._keep_login_on_network_error)
         self.storage.realtime_signed_heartbeat(False, {"code": "TIMEOUT"})
-        invalidated.assert_called_once_with("NETWORK_GRACE_EXPIRED")
-        self.assertEqual(self.storage.get_realtime_state(), "INVALIDATED")
+        invalidated.assert_not_called()
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
+        self.assertTrue(self.storage._running)
         self.assertFalse(self.storage.is_authorized())
+        self.storage.realtime_signed_heartbeat(True, {"valid": True})
+        self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
+        self.assertTrue(self.storage.is_authorized())
 
         # A second opt-in session has a signed ON policy and retains UI only.
         fresh = BackgroundLicenseWorker("policy-on", offline_grace_seconds=0)

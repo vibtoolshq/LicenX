@@ -204,6 +204,29 @@ class ServerCommunicator:
             re.IGNORECASE,
         ):
             safe_response["request_id"] = request_id
+        # Carry a strictly bounded *candidate* negative proof through HTTP
+        # sanitization. This is not an authentication decision: ping_heartbeat
+        # independently checks nonce, request binding and configured-key signature.
+        terminal = {
+            "NOT_FOUND", "LICENSE_INACTIVE", "LICENSE_EXPIRED",
+            "APP_NOT_FOUND", "APP_INACTIVE", "DEVICE_UNBOUND",
+            "DEVICE_BLOCKED", "DEVICE_LEASE_EXPIRED",
+        }
+        if (status_code in (403, 404) and isinstance(data, dict)
+                and code in terminal and data.get("valid") is False
+                and isinstance(data.get("nonce"), str)
+                and re.fullmatch(r"[A-Za-z0-9_-]{16,128}", data["nonce"])
+                and isinstance(data.get("request_binding"), str)
+                and re.fullmatch(r"[0-9a-f]{64}", data["request_binding"])
+                and type(data.get("server_time")) is int
+                and data["server_time"] > 0
+                and isinstance(data.get("signature"), str)
+                and re.fullmatch(r"[A-Za-z0-9+/=]{64,1024}", data["signature"])):
+            safe_response.update({
+                key: data[key] for key in (
+                    "valid", "nonce", "request_binding", "server_time", "signature"
+                )
+            })
         return safe_response
 
     def _http_post(self, url: str, json_data: Dict[str, Any], timeout: int) -> Tuple[int, Dict[str, Any]]:
@@ -393,6 +416,8 @@ class ServerCommunicator:
         Returns (is_valid, http_status_code, response_payload)
         """
         self._diagnostic_token = None
+        self._logout_proof = None
+        self._logout_proof_session = None
         url = self._build_url("api/v1/license/validate")
         app_version = self.config.app_version
         if not isinstance(app_version, str) or not app_version.strip():
@@ -408,8 +433,8 @@ class ServerCommunicator:
             "os_info": telemetry.get("os_info", "Generic-OS"),
             "app_name": self.config.app_name,
             "app_version": app_version.strip(),
-            "client_time": int(time.time() * 1000),
             "nonce": secrets.token_urlsafe(32),
+            "logout_proof_version": 2,
         }
 
         status_code, data = self._http_post(url, body, self.config.request_timeout_seconds)
@@ -435,6 +460,12 @@ class ServerCommunicator:
             capability = data.pop("diagnostic_token", None)
             if isinstance(capability, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", capability):
                 self._diagnostic_token = capability
+            # Extract AFTER signature and challenge verification, BEFORE
+            # returning anything the host can display or persist.
+            proof = data.pop("device_logout_proof", None)
+            if isinstance(proof, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", proof):
+                self._logout_proof = proof
+                self._logout_proof_session = (body["license_key"], hwid)
             return True, 200, data
         else:
             return False, status_code, data
@@ -451,8 +482,8 @@ class ServerCommunicator:
             "license_key": license_key.strip().upper(),
             "hwid": hwid,
             "app_name": self.config.app_name,
-            "client_time": int(time.time() * 1000),
             "nonce": nonce,
+            "logout_proof_version": 2,
         }
 
         # Honor the SDK request timeout, but bound heartbeat attempts so that
@@ -476,7 +507,51 @@ class ServerCommunicator:
                     "error": "Heartbeat signature or challenge verification failed",
                     "code": "HEARTBEAT_SIGNATURE_FAILED",
                 }
+            # Rotate the session's RAM-only proof from this signed response.
+            # An old proof is never trusted as a replacement for a new session.
+            proof = data.pop("device_logout_proof", None)
+            session = (body["license_key"], hwid)
+            if (isinstance(proof, str)
+                    and re.fullmatch(r"[A-Za-z0-9_-]{43}", proof)
+                    and (getattr(self, "_logout_proof_session", None) is None
+                         or self._logout_proof_session == session)):
+                self._logout_proof = proof
+                self._logout_proof_session = session
             return True, data
+        # Only an explicit HTTPS license/app/device denial is terminal.
+        # No socket/TLS/timeout/malformed/signature failure may impersonate it.
+        terminal_codes = {
+            "NOT_FOUND", "LICENSE_INACTIVE", "LICENSE_EXPIRED",
+            "APP_NOT_FOUND", "APP_INACTIVE", "DEVICE_UNBOUND",
+            "DEVICE_BLOCKED", "DEVICE_LEASE_EXPIRED",
+        }
+        if status_code in (403, 404) and data.get("code") in terminal_codes:
+            import hashlib
+            expected_binding = hashlib.sha256(self.canonical_json({
+                "license_key": body["license_key"],
+                "hwid": hwid,
+                "app_name": body["app_name"],
+            }).encode("utf-8")).hexdigest()
+            proof = {
+                "valid": False,
+                "code": data["code"],
+                "nonce": data.get("nonce"),
+                "request_binding": data.get("request_binding"),
+                "server_time": data.get("server_time"),
+            }
+            if (data.get("valid") is False
+                    and data.get("nonce") == nonce
+                    and data.get("request_binding") == expected_binding
+                    and type(data.get("server_time")) is int
+                    and data["server_time"] > 0
+                    and isinstance(data.get("signature"), str)
+                    and self.verify_signature(proof, data["signature"])):
+                return False, {
+                    "code": data["code"], "_licenx_terminal_denial": True,
+                }
+            # An unsigned, mismatched or tampered HTTP error cannot terminate
+            # a verified local session. Remain fail-closed for licensed work.
+            return False, {"code": "DENIAL_UNVERIFIED"}
         transient_codes = {
             "SERVER_UNREACHABLE",
             "TIMEOUT",
@@ -492,28 +567,49 @@ class ServerCommunicator:
         return False, data
 
     def send_logout(self, license_key: str, hwid: str) -> bool:
-        """
-        Notifies the server to unbind the device from this license key.
-        This frees up the device slot for other machines immediately.
-        """
-        url = self._build_url("api/v1/license/logout")
-        body = {
-            "license_key": license_key.strip().upper(),
-            "hwid": hwid,
-            "app_name": self.config.app_name,
-        }
+        """Unbind only with the current session's signed, one-use v2 bearer."""
+        session = (license_key.strip().upper(), hwid)
+        proof = getattr(self, "_logout_proof", None) if getattr(self, "_logout_proof_session", None) == session else None
 
-        status_code, _ = self._http_post(url, body, 6)
-        if status_code == 200:
-            return True
+        def post_v2(bearer):
+            try:
+                request = urllib.request.Request(
+                    self._build_url("api/v2/license/logout"),
+                    data=b"{}",
+                    headers={
+                        "Authorization": "Bearer " + bearer,
+                        "Content-Type": "application/json",
+                    },
+                    method="POST",
+                )
+                with urllib.request.urlopen(
+                    request, timeout=6, context=ssl.create_default_context()
+                ) as response:
+                    return response.getcode() == 200, False
+            except urllib.error.HTTPError as error:
+                # Single-use/expired proof may be renewed ONLY by a new
+                # signature- and nonce-verified heartbeat from this device.
+                return False, error.code == 403
+            except (urllib.error.URLError, TimeoutError, OSError):
+                return False, False
+            except Exception:
+                return False, False
 
-        # Fallback to deactivate route
-        try:
-            alt_url = self._build_url("api/v1/license/deactivate")
-            alt_code, _ = self._http_post(alt_url, body, 6)
-            return alt_code == 200
-        except Exception:
-            return False
+        if not proof:
+            active, _ = self.ping_heartbeat(*session)
+            proof = getattr(self, "_logout_proof", None) if active and getattr(self, "_logout_proof_session", None) == session else None
+        if not proof:
+            return False  # No anonymous v1/deactivate fallback.
+        success, retryable = post_v2(proof)
+        if not success and retryable:
+            active, _ = self.ping_heartbeat(*session)
+            renewed = getattr(self, "_logout_proof", None) if active and getattr(self, "_logout_proof_session", None) == session else None
+            if renewed and renewed != proof:
+                success, _ = post_v2(renewed)
+        if success and getattr(self, "_logout_proof_session", None) == session:
+            self._logout_proof = None
+            self._logout_proof_session = None
+        return success
 
 
 # Alias for backward-compatibility and clean imports

@@ -37,15 +37,6 @@ class LoginManager:
         self.communicator = communicator
         self.storage = storage
 
-    def _release_binding_best_effort(self, license_key: str, hwid: str) -> None:
-        try:
-            released = self.communicator.send_logout(license_key, hwid)
-        except Exception:
-            released = False
-
-        if not released:
-            print("[VCON-SDK] Warning: Could not release device binding after local validation rejection")
-
     def login(self, license_key: str, pin: Optional[str] = None) -> LoginResult:
         """
         Performs full online authentication against license server.
@@ -74,8 +65,8 @@ class LoginManager:
             error_msg = data.get("message") or data.get("error") or "Authentication rejected"
             error_code = data.get("code") or "AUTH_REJECTED"
             request_id = data.get("request_id")
-            if error_code == "SIGNATURE_FAILED":
-                self._release_binding_best_effort(normalized_key, hwid)
+            # Invalid or untrusted server response never authorizes a remote
+            # device unbind; valid existing sessions must remain untouched.
             return LoginResult(
                 success=False,
                 status_code=status_code,
@@ -86,18 +77,8 @@ class LoginManager:
                 request_id=request_id if isinstance(request_id, str) else None,
             )
 
-        # Anti-Clock Rollback verification
-        server_time = data.get("server_time", 0)
-        if OfflineGuard.is_clock_tampered(server_time):
-            self._release_binding_best_effort(normalized_key, hwid)
-            return LoginResult(
-                success=False,
-                status_code=403,
-                message="System clock mismatch detected. Please synchronize your system time.",
-                code="CLOCK_TAMPERED",
-                hwid=hwid,
-                license_key=normalized_key,
-            )
+        # A verified signed, nonce-bound server response is authoritative.
+        # Local wall-clock settings must not veto a valid license.
 
         # Save session to temp directory for auto-login on next start (if enabled)
         if self.config.auto_login_enabled and getattr(self.config, "auto_save_session", True):

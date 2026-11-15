@@ -117,6 +117,107 @@ class HeartbeatVerificationTests(unittest.TestCase):
                 self.assertFalse(is_active)
                 self.assertIn("code", data)
 
+    def test_realtime_offline_and_unverified_proof_preserve_ui_not_authorization(self):
+        invalidated = Mock()
+        worker = BackgroundLicenseWorker(
+            "realtime-heartbeat-test",
+            ping_interval_seconds=60,
+            offline_grace_seconds=0,
+            on_invalidated=invalidated,
+        )
+        worker.enable_realtime()
+        worker._running = True
+        for code in ("SERVER_UNREACHABLE", "TIMEOUT", "SSL_ERROR",
+                     "HEARTBEAT_SIGNATURE_FAILED", "INVALID_RESPONSE"):
+            worker.realtime_signed_heartbeat(False, {"code": code})
+            self.assertTrue(worker._running)
+            self.assertEqual(worker.get_realtime_state(), "PAUSED_UNVERIFIED")
+            self.assertFalse(worker.is_authorized())
+        invalidated.assert_not_called()
+        worker.realtime_signed_heartbeat(True, {"valid": True, "status": "active"})
+        self.assertTrue(worker.is_authorized())
+        self.assertEqual(worker.get_realtime_state(), "HTTP_FALLBACK")
+        worker.realtime_signed_heartbeat(False, {
+            "code": "LICENSE_EXPIRED", "_licenx_terminal_denial": True,
+        })
+        invalidated.assert_called_once_with("LICENSE_EXPIRED")
+        self.assertFalse(worker.is_authorized())
+
+    def test_only_nonce_bound_signed_https_denial_is_terminal(self):
+        import hashlib
+        private_key = ed25519.Ed25519PrivateKey.generate()
+        communicator = ServerCommunicator(SDKConfig(
+            public_key_pem=public_key_pem(private_key.public_key()),
+            app_name="my-app",
+        ))
+
+        def signed_denial(_url, body, _timeout):
+            proof = {
+                "valid": False, "code": "DEVICE_UNBOUND",
+                "nonce": body["nonce"], "server_time": 123456,
+                "request_binding": hashlib.sha256(
+                    communicator.canonical_json({
+                        "license_key": body["license_key"],
+                        "hwid": body["hwid"],
+                        "app_name": body["app_name"],
+                    }).encode("utf-8")
+                ).hexdigest(),
+            }
+            response = {**proof, "signature": sign_payload(private_key, proof)}
+            return 403, communicator._safe_response(403, response)
+
+        with patch.object(communicator, "_http_post", side_effect=signed_denial):
+            valid, data = communicator.ping_heartbeat("LIC-TEST", "HWID-TEST")
+        self.assertFalse(valid)
+        self.assertEqual(data, {
+            "code": "DEVICE_UNBOUND", "_licenx_terminal_denial": True,
+        })
+
+        for tamper in ("unsigned", "nonce", "hwid", "app", "signature",
+                       "server_key", "wrong_http_status"):
+            with self.subTest(tamper=tamper):
+                def bad_denial(_url, body, _timeout):
+                    status, result = signed_denial(_url, body, _timeout)
+                    result = dict(result)
+                    if tamper == "unsigned":
+                        result.pop("signature")
+                    elif tamper == "nonce":
+                        result["nonce"] = "different_nonce_12345678901234567"
+                    elif tamper == "hwid":
+                        result["request_binding"] = "f" * 64
+                    elif tamper == "app":
+                        result["request_binding"] = "a" * 64
+                    elif tamper == "signature":
+                        result["signature"] = "A" * 88
+                    elif tamper == "wrong_http_status":
+                        status = 503
+                    return status, result
+
+                if tamper == "server_key":
+                    with patch.object(communicator, "_http_post", side_effect=bad_denial), patch.object(
+                        communicator.config, "public_key_pem", ""
+                    ):
+                        valid, data = communicator.ping_heartbeat("LIC-TEST", "HWID-TEST")
+                else:
+                    with patch.object(communicator, "_http_post", side_effect=bad_denial):
+                        valid, data = communicator.ping_heartbeat("LIC-TEST", "HWID-TEST")
+                self.assertFalse(valid)
+                self.assertIsNot(data.get("_licenx_terminal_denial"), True)
+
+    def test_signed_terminal_denial_invalidates_realtime_once(self):
+        callback = Mock()
+        storage = BackgroundLicenseWorker(
+            "denial-once", offline_grace_seconds=0, on_invalidated=callback,
+        )
+        storage.enable_realtime()
+        storage._running = True
+        for _ in range(2):
+            storage.realtime_signed_heartbeat(False, {
+                "code": "DEVICE_UNBOUND", "_licenx_terminal_denial": True,
+            })
+        callback.assert_called_once_with("DEVICE_UNBOUND")
+        self.assertFalse(storage.is_authorized())
+
     def test_background_worker_fails_closed_without_retry_on_transport_error(self):
         communicator = Mock()
         communicator.ping_heartbeat.side_effect = [

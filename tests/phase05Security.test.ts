@@ -11,13 +11,15 @@ test("external admin read/manage routes deny cross-application keys in both runt
     assert.match(code, /SELECT id, status, app_id FROM licenses WHERE key = \? LIMIT 1/);
   }
 });
-test("client self-service logout and resets never erase blocked devices", () => {
-  for (const file of ["src/server/api.ts", "src/server/cloudflareHandler.ts"]) {
-    const code = source(file);
-    assert.match(code, /last_ping_at = \? WHERE license_id = \? AND hwid = \? AND status = 'active'/);
-    assert.match(code, /WHERE license_id = \? AND status = 'active'/);
-  }
-  assert.match(source("src/server/cloudflareHandler.ts"), /DELETE FROM devices WHERE license_id = \? AND status != 'blocked'/);
+test("Node proof-bound logout denies legacy mutation; Cloudflare blocked-device check remains", () => {
+  const node = source("src/server/api.ts");
+  assert.match(node, /LOGOUT_PROOF_REQUIRED/);
+  assert.match(node, /takeDeviceLogoutProof\(token\)/);
+  assert.match(node, /WHERE id = \? AND license_id = \? AND hwid = \? AND status = 'active'/);
+  const cloudflare = source("src/server/cloudflareHandler.ts");
+  assert.match(cloudflare, /last_ping_at = \? WHERE license_id = \? AND hwid = \? AND status = 'active'/);
+  assert.match(cloudflare, /WHERE license_id = \? AND status = 'active'/);
+  assert.match(cloudflare, /DELETE FROM devices WHERE license_id = \? AND status != 'blocked'/);
 });
 test("app scoped heartbeats deny disabled or missing parent in both runtimes", () => {
   for (const file of ["src/server/api.ts", "src/server/cloudflareHandler.ts"]) {

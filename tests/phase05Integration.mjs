@@ -80,7 +80,9 @@ try {
   const resumed = await request("/api/v1/license/ping", pingBody);
   assert(resumed.status === 200, "Re-enabled app could not renew heartbeat");
   await sql.query("UPDATE devices SET status = 'blocked' WHERE license_id = 'ci_lic_a' AND hwid = $1", [hwid]);
-  await request("/api/v1/license/logout", { license_key: keyA, hwid });
+  const proofless = await request("/api/v1/license/logout", { license_key: keyA, hwid });
+  assert(proofless.status === 403 && proofless.data.code === "LOGOUT_PROOF_REQUIRED",
+    "Node legacy logout must not accept key+HWID without session proof");
   const blocked = await sql.query("SELECT status FROM devices WHERE license_id = 'ci_lic_a' AND hwid = $1", [hwid]);
   assert(blocked.rows.length === 1 && blocked.rows[0].status === "blocked", "Client logout removed an admin block");
   console.log("PASS inactive-app heartbeat denial, re-enable, and blocked-device preservation");

@@ -228,9 +228,22 @@ class BackgroundLicenseWorker:
         return self._realtime_state
 
     def is_authorized(self) -> bool:
-        """Only a verified/grace-valid session may unlock licensed operations."""
+        """Check the monotonic offline deadline on *every* licensed operation."""
+        expired = False
         with self._state_lock:
-            return not self._realtime_paused
+            if self._realtime_paused:
+                return False
+            if self._realtime_enabled and self._offline_since is not None:
+                elapsed = time.monotonic() - self._offline_since
+                if (elapsed < 0 or self.offline_grace_seconds == 0
+                        or elapsed >= self.offline_grace_seconds):
+                    self._realtime_paused = True
+                    self._realtime_connected = False
+                    expired = True
+        if expired:
+            self._set_realtime_state("PAUSED_UNVERIFIED")
+            self._realtime_wake.set()
+        return not expired
 
     def pause_for_signed_reverification(self) -> bool:
         """Deny protected actions while a WSS failure awaits fresh signed HTTP.
@@ -268,12 +281,27 @@ class BackgroundLicenseWorker:
         if not self._realtime_enabled or not self._running:
             return False
         if connected:
+            # A WSS snapshot cannot reset an already expired offline grace.
+            # The realtime caller must first get a fresh signed HTTPS proof.
+            if not self.is_authorized():
+                self._realtime_wake.set()
+                return False
             with self._state_lock:
-                if self._realtime_paused:
-                    self._realtime_wake.set()
-                    return False  # Fresh signed HTTP recovery required after grace.
-                self._realtime_connected = True
-                self._offline_since = None
+                elapsed = (None if self._offline_since is None
+                           else time.monotonic() - self._offline_since)
+                expired = (self._realtime_paused or
+                           (elapsed is not None and
+                            (elapsed < 0 or elapsed >= self.offline_grace_seconds)))
+                if expired:
+                    self._realtime_paused = True
+                    self._realtime_connected = False
+                else:
+                    self._realtime_connected = True
+                    self._offline_since = None
+            if expired:
+                self._set_realtime_state("PAUSED_UNVERIFIED")
+                self._realtime_wake.set()
+                return False
             self._set_realtime_state("CONNECTED")
             self._realtime_wake.set()
             return True
@@ -301,26 +329,27 @@ class BackgroundLicenseWorker:
                     pass
             return True
         code = data.get("code") if isinstance(data, dict) else None
-        if code not in TRANSIENT_HEARTBEAT_CODES:
-            # A confirmed security/authorization denial is never grace-eligible.
+        if isinstance(data, dict) and data.get("_licenx_terminal_denial") is True:
+            # Only a server-attributed HTTPS terminal denial ends the UI login.
             self._invalidate(code if isinstance(code, str) else "LICENSE_INVALID")
             return False
         with self._state_lock:
             now = time.monotonic()
             if self._offline_since is None:
                 self._offline_since = now
-            expired = (self.offline_grace_seconds == 0 or
-                       now - self._offline_since >= self.offline_grace_seconds)
-            if expired:
+            elapsed = now - self._offline_since
+            expired = (elapsed < 0 or self.offline_grace_seconds == 0
+                       or elapsed >= self.offline_grace_seconds)
+            # Unverified TLS/signature/protocol data never extends authorization.
+            # A transient outage may use only the existing bounded grace.
+            if expired or code not in TRANSIENT_HEARTBEAT_CODES:
                 self._realtime_paused = True
+            paused = self._realtime_paused
             self._realtime_connected = False
-        # Do not wake the fallback worker from its own failed poll: retry in 30s.
-        if expired and not self._keep_login_on_network_error:
-            # OFF = historical logout semantics after grace. Never keep a
-            # logged-in state against a signed server policy that disallows it.
-            self._invalidate("NETWORK_GRACE_EXPIRED")
-            return False
-        self._set_realtime_state("PAUSED_UNVERIFIED" if expired else "OFFLINE_GRACE")
+        # Keep the in-memory UI session, retry HTTPS and WSS in the background.
+        # Signed per-App policy parsing remains strict; transport failure no
+        # longer forces UI logout. Protected-operation grace stays bounded.
+        self._set_realtime_state("PAUSED_UNVERIFIED" if paused else "OFFLINE_GRACE")
         return False
 
     def _realtime_worker_loop(self) -> None:
@@ -372,6 +401,9 @@ class BackgroundLicenseWorker:
             if self._offline_since is None:
                 return None
             elapsed = time.monotonic() - self._offline_since
+            # A monotonic anomaly must never extend licensed-operation grace.
+            if elapsed < 0:
+                return 0.0
             return max(0.0, self.offline_grace_seconds - elapsed)
 
     def _grace_expired(self) -> bool:

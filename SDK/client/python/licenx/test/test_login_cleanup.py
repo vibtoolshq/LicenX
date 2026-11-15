@@ -16,7 +16,7 @@ class LoginBindingCleanupTests(unittest.TestCase):
             self.storage,
         )
 
-    def test_signature_rejection_attempts_to_release_new_binding(self):
+    def test_signature_rejection_never_unbinds_existing_device(self):
         self.communicator.validate_license.return_value = (
             False,
             403,
@@ -31,26 +31,25 @@ class LoginBindingCleanupTests(unittest.TestCase):
 
         self.assertFalse(result.success)
         self.assertEqual(result.code, "SIGNATURE_FAILED")
-        self.communicator.send_logout.assert_called_once_with("LIC-TEST", "HWID-TEST")
+        self.communicator.send_logout.assert_not_called()
 
-    def test_clock_rejection_attempts_to_release_new_binding(self):
+    def test_signed_login_ignores_client_clock_without_unbind(self):
         self.communicator.validate_license.return_value = (
             True,
             200,
             {"valid": True, "server_time": 123},
         )
-        self.communicator.send_logout.return_value = True
-
         with patch.object(
             DeviceManager, "get_validation_telemetry", return_value={}
         ), patch.object(DeviceManager, "get_hwid", return_value="HWID-TEST"), patch(
             "licenx.login.OfflineGuard.is_clock_tampered", return_value=True
-        ):
+        ) as clock_gate:
             result = self.manager.login("LIC-TEST")
 
-        self.assertFalse(result.success)
-        self.assertEqual(result.code, "CLOCK_TAMPERED")
-        self.communicator.send_logout.assert_called_once_with("LIC-TEST", "HWID-TEST")
+        self.assertTrue(result.success)
+        self.assertEqual(result.code, "OK")
+        clock_gate.assert_not_called()
+        self.communicator.send_logout.assert_not_called()
 
     def test_ordinary_server_denial_does_not_send_logout(self):
         self.communicator.validate_license.return_value = (

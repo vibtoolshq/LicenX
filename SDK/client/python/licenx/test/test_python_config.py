@@ -71,6 +71,22 @@ class PythonConfigLoaderTests(unittest.TestCase):
         self.assertTrue(config.enable_background_heartbeat)
         self.assertFalse(hasattr(config, "generated_at"))
 
+    def test_generated_wss_config_boolean_round_trips_without_network(self):
+        self.write_config({**self.app_config, "useWebSocket": True})
+        enabled = SDKConfig.from_python_file(str(self.config_path))
+        self.assertIs(enabled.useWebSocket, True)
+        self.assertIs(XLicenseClient(config=enabled).config.useWebSocket, True)
+        # A caller explicitly opting out remains HTTP-only; Admin export
+        # cannot override a separately chosen SDKConfig object.
+        opt_out = SDKConfig(public_key_pem=self.public_key_pem, useWebSocket=False)
+        self.assertIs(XLicenseClient(config=opt_out).config.useWebSocket, False)
+        self.write_config({**self.app_config, "useWebSocket": False})
+        disabled = SDKConfig.from_python_file(str(self.config_path))
+        self.assertIs(disabled.useWebSocket, False)
+        self.write_config({**self.app_config, "useWebSocket": "true"})
+        with self.assertRaisesRegex(ValueError, "useWebSocket must be a boolean"):
+            SDKConfig.from_python_file(str(self.config_path))
+
     def test_omitted_fields_keep_sdk_defaults(self):
         self.write_config({"public_key_pem": self.public_key_pem})
 

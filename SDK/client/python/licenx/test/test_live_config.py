@@ -78,6 +78,21 @@ class LiveConfigTests(unittest.TestCase):
         self.assertEqual(config.app_version, "2.4.1")
         self.assertEqual(config.public_key_pem, PUBLIC_KEY)
 
+    def test_downloaded_app_wss_boolean_roundtrip_and_strict_type(self):
+        for enabled in (False, True):
+            with self.subTest(useWebSocket=enabled):
+                self.write_config({**self.config_data, "useWebSocket": enabled})
+                loaded = load_live_config(self.config_path)
+                self.assertIs(loaded.useWebSocket, enabled)
+                self.assertIs(XLicenseClient(config=loaded).config.useWebSocket, enabled)
+                exported_path = os.path.join(self.temp_dir.name, "roundtrip.json")
+                loaded.export_to_file(exported_path)
+                restored = SDKConfig.from_file(exported_path)
+                self.assertIs(restored.useWebSocket, enabled)
+        self.write_config({**self.config_data, "useWebSocket": "true"})
+        with self.assertRaisesRegex(ValueError, "useWebSocket must be a boolean"):
+            load_live_config(self.config_path)
+
     def test_admin_download_config_requires_operator_version_without_using_minimum(self):
         self.write_config(
             {

@@ -41,6 +41,10 @@ class RealtimeLicenseWorker:
         self._socket_lock = threading.Lock()
         self._identity = None
         self._version = -1
+        # Created only from a signature- and nonce-verified HTTPS login result.
+        self._signed_server_time_ms = None
+        self._signed_server_clock_at = None
+        self._accept_signed_server_time(signed_login_data.get("server_time"))
         candidate = getattr(communicator, "_diagnostic_token", None)
         self._diagnostic_token = (
             candidate if isinstance(candidate, str)
@@ -157,14 +161,32 @@ class RealtimeLicenseWorker:
             raise _RealtimeSecurityError("REALTIME_SIGNATURE_INVALID")
         return body
 
+    def _accept_signed_server_time(self, server_time_ms):
+        """Anchor an authenticated server timestamp to elapsed, monotonic time."""
+        if type(server_time_ms) is not int or not 0 < server_time_ms <= 2**53 - 1:
+            return False
+        self._signed_server_time_ms = server_time_ms
+        self._signed_server_clock_at = time.monotonic()
+        return True
+
+    def _server_now_ms(self):
+        """No local wall clock or timezone is ever used for license freshness."""
+        if self._signed_server_time_ms is None or self._signed_server_clock_at is None:
+            raise _RealtimeSecurityError("REALTIME_TIME_UNVERIFIED")
+        elapsed = time.monotonic() - self._signed_server_clock_at
+        if elapsed < 0:
+            raise _RealtimeSecurityError("REALTIME_TIME_UNVERIFIED")
+        return self._signed_server_time_ms + int(elapsed * 1000)
+
     def _verify_snapshot(self, packet):
         data = self._verify(packet)
+        trusted_now = self._server_now_ms()
         if (data.get("type") != "license.snapshot"
                 or data.get("valid") is not True
                 or type(data.get("version")) is not int
                 or data["version"] < 0
                 or type(data.get("server_time")) is not int
-                or abs(data["server_time"] - int(time.time() * 1000)) > 300_000):
+                or abs(data["server_time"] - trusted_now) > 300_000):
             raise _RealtimeSecurityError("REALTIME_SNAPSHOT_INVALID")
         identity = (data.get("app_id"), data.get("license_id"), data.get("device_id"))
         if (not all(isinstance(value, str) and value for value in identity)
@@ -183,15 +205,17 @@ class RealtimeLicenseWorker:
 
     def _verify_event(self, packet):
         data = self._verify(packet)
+        trusted_now = self._server_now_ms()
         if (data.get("type") != "license.state_changed"
                 or type(data.get("version")) is not int
                 or data["version"] < 0
                 or data.get("event_id") != str(data["version"])
                 or type(data.get("issued_at")) is not int
                 or type(data.get("expires_at")) is not int
-                or data["expires_at"] <= int(time.time() * 1000)
+                or data["expires_at"] <= trusted_now
+                or data["expires_at"] <= data["issued_at"]
                 or data["expires_at"] - data["issued_at"] > 60_000
-                or data["issued_at"] > int(time.time() * 1000) + 300_000):
+                or data["issued_at"] > trusted_now + 300_000):
             raise _RealtimeSecurityError("REALTIME_EVENT_INVALID")
         app_id, license_id, device_id = self._identity
         if (data.get("device_id") not in (None, device_id)
@@ -212,7 +236,14 @@ class RealtimeLicenseWorker:
             valid, data = False, {"code": "SERVER_UNREACHABLE"}
         if self._stop_event.is_set():
             return False
+        # A signed but structurally invalid server clock is not a usable proof.
+        if valid and (not isinstance(data, dict)
+                      or type(data.get("server_time")) is not int
+                      or not 0 < data["server_time"] <= 2**53 - 1):
+            valid, data = False, {"code": "REALTIME_TIME_UNVERIFIED"}
         applied = self.storage.realtime_signed_heartbeat(valid, data)
+        if valid and applied:
+            self._accept_signed_server_time(data["server_time"])
         return bool(valid and applied)
 
     def _run_connection(self, websocket):
@@ -220,15 +251,11 @@ class RealtimeLicenseWorker:
         if self._stop_event.is_set():
             return
         if not ticket:
-            # 401/403: WSS refused, 404: WSS gate disabled. Do not assume
-            # an unverified transport response authorizes a license.
-            if status in (401, 403, 404):
-                self.storage.pause_for_signed_reverification()
-                if self._signed_check():
-                    # A freshly signed HTTPS heartbeat—not the ticket denial—
-                    # authorizes HTTP-only continuity; wake periodic monitoring.
-                    if self.storage.enter_signed_http_fallback():
-                        return "HTTP_FALLBACK"
+            # Any ticket failure is WSS availability information, NOT a
+            # signed license denial. Verify over HTTPS and keep WSS retries.
+            self.storage.pause_for_signed_reverification()
+            if self._signed_check() and self.storage.enter_signed_http_fallback():
+                return "HTTP_FALLBACK"
             return None
         socket = websocket.create_connection(
             self._socket_url(), timeout=8,
@@ -253,6 +280,21 @@ class RealtimeLicenseWorker:
                     # SocketCore emits unsigned transport "connected" before hello.
                     # Never treat it as signed authorization or a license grant.
                     continue
+                if packet.get("type") == "error":
+                    # WSS errors are unsigned transport/control hints, never
+                    # independent proof that the license is revoked or active.
+                    control = packet.get("code")
+                    if control not in (
+                        "REALTIME_RESTORE_IN_PROGRESS",
+                        "REALTIME_AUTH_REVOKED",
+                        "REALTIME_ALREADY_REGISTERED",
+                    ):
+                        raise _RealtimeSecurityError("REALTIME_UNEXPECTED_FRAME")
+                    self.storage.pause_for_signed_reverification()
+                    self._report("ws_upgrade", "REALTIME_SOCKET_ERROR")
+                    if self._signed_check():
+                        self.storage.enter_signed_http_fallback()
+                    return "HTTP_FALLBACK"
                 self._verify_snapshot(packet)
                 # After grace expiry a signed WSS snapshot alone cannot
                 # resume protected operations; nonce-bound HTTP proof required.
@@ -264,11 +306,52 @@ class RealtimeLicenseWorker:
             else:
                 if not self._stop_event.is_set():
                     raise _RealtimeSecurityError("REALTIME_SNAPSHOT_MISSING")
+            # websocket-client's recv() hides control frames, so it cannot
+            # reveal a missing pong. Read control frames ONLY to check a fresh
+            # unpredictable client ping; they never authorize a license.
+            from secrets import token_bytes
+            from types import SimpleNamespace
+            liveness_ping_interval = 30.0
+            liveness_pong_deadline = 12.0
+            next_ping = time.monotonic() + liveness_ping_interval
+            pending_ping = None
+            sent_at = None
             while not self._stop_event.is_set():
+                now = time.monotonic()
+                if pending_ping is not None and (
+                    now < sent_at or now - sent_at >= liveness_pong_deadline
+                ):
+                    self.storage.pause_for_signed_reverification()
+                    raise _RealtimeSecurityError("REALTIME_LIVENESS_EXPIRED")
+                if pending_ping is None and now >= next_ping:
+                    pending_ping = token_bytes(16)
+                    sent_at = now
+                    socket.ping(pending_ping)
+                    continue
                 try:
-                    packet = self._receive(socket)
+                    opcode, raw = socket.recv_data(control_frame=True)
                 except websocket.WebSocketTimeoutException:
                     continue
+                if opcode == websocket.ABNF.OPCODE_PONG:
+                    if pending_ping is not None and raw == pending_ping:
+                        pending_ping = None
+                        sent_at = None
+                        next_ping = time.monotonic() + liveness_ping_interval
+                    continue
+                if opcode == websocket.ABNF.OPCODE_PING:
+                    continue  # Automatic pong processing is transport-only.
+                if opcode == websocket.ABNF.OPCODE_CLOSE:
+                    return  # _run will use signed HTTPS fallback and retry.
+                if opcode != websocket.ABNF.OPCODE_TEXT:
+                    raise _RealtimeSecurityError("REALTIME_FRAME_INVALID")
+                if isinstance(raw, bytes):
+                    try:
+                        raw = raw.decode("utf-8", "strict")
+                    except UnicodeError:
+                        raise _RealtimeSecurityError("REALTIME_FRAME_INVALID")
+                if not isinstance(raw, str):
+                    raise _RealtimeSecurityError("REALTIME_FRAME_INVALID")
+                packet = self._receive(SimpleNamespace(recv=lambda: raw))
                 if packet.get("type") != "license.state_changed":
                     raise _RealtimeSecurityError("REALTIME_UNEXPECTED_FRAME")
                 if self._verify_event(packet):
@@ -298,15 +381,23 @@ class RealtimeLicenseWorker:
             try:
                 started = time.monotonic()
                 outcome = self._run_connection(websocket)
-                if outcome == "HTTP_FALLBACK":
-                    return  # Signed HTTPS background monitor stays active.
+                # HTTP fallback and WSS retry remain concurrent: returning here
+                # would permanently disable automatic realtime recovery.
                 # Repeated short connections must back off.
                 attempt = 0 if time.monotonic() - started >= 60.0 else min(attempt + 1, 6)
             except _RealtimeSecurityError as error:
                 if not self._stop_event.is_set():
-                    self._report("snapshot", "REALTIME_SECURITY_ERROR", attempt)
-                    self.storage._invalidate(str(error))
-                break
+                    # Transport liveness/snapshot timeout is not a forged
+                    # signature. Other invalid signed frames remain security errors.
+                    self.storage.pause_for_signed_reverification()
+                    if str(error) in (
+                        "REALTIME_LIVENESS_EXPIRED", "REALTIME_SNAPSHOT_MISSING",
+                    ):
+                        self._report("ws_upgrade", "REALTIME_SOCKET_ERROR", attempt)
+                    else:
+                        self._report("snapshot", "REALTIME_SECURITY_ERROR", attempt)
+                    if self._signed_check():
+                        self.storage.enter_signed_http_fallback()
             except (ssl.SSLError, ssl.CertificateError) as error:
                 if not self._stop_event.is_set():
                     # Immediately pause protected app operations before any
@@ -316,20 +407,17 @@ class RealtimeLicenseWorker:
                     # WSS TLS failure is NOT a license revocation. Only a fresh,
                     # correctly signed HTTPS heartbeat may permit HTTP-only
                     # continuity; HTTPS TLS/signature failure remains fail-closed.
-                    if self._signed_check() and self.storage.enter_signed_http_fallback():
-                        pass
-                    elif getattr(self.storage, "_running", False):
-                        self.storage._invalidate("REALTIME_TLS_ERROR")
-                break
+                    if self._signed_check():
+                        self.storage.enter_signed_http_fallback()
+                    # If HTTPS is also unavailable, remain paused and retry.
+                    # TLS checks remain fully enabled for both transports.
             except Exception:
-                # Unexpected WSS errors never bypass HTTPS verification.
+                # WSS transport failure is not proof of a revoked license.
                 if not self._stop_event.is_set():
-                    if attempt >= 1:
-                        self.storage.pause_for_signed_reverification()
+                    self.storage.set_realtime_connected(False)
                     self._report("ws_upgrade", "REALTIME_SOCKET_ERROR", attempt)
-                    if (attempt >= 1 and self._signed_check()
-                            and self.storage.enter_signed_http_fallback()):
-                        return
+                    if self._signed_check():
+                        self.storage.enter_signed_http_fallback()
             if self._stop_event.is_set() or not self.storage._running:
                 break
             self.storage.set_realtime_connected(False)
