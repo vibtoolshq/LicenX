@@ -52,10 +52,26 @@ jobs:
   # One bounded gate for this unshipped PR; other PRs and main still use
   # the original full portability/Docker workflows after separate approval.
   focused-pr-regression:
+    # Final read-only RELEASE GATE for the approved prerelease PR only.
+    # No production endpoints, deployments, releases or private customer data.
     if: github.event_name == 'pull_request' && github.event.pull_request.head.ref == 'ci/licenx-1.2.6rc1-regression'
-    name: Focused Node heartbeat and Python SDK security
+    name: Final source gate (Node, SDK, PostgreSQL, package, localhost HTTPS)
     runs-on: ubuntu-24.04
-    timeout-minutes: 9
+    timeout-minutes: 12
+    services:
+      postgres:
+        image: postgres:17.6-bookworm
+        env:
+          POSTGRES_DB: licenx_test_acceptance
+          POSTGRES_USER: licenx_ci
+          POSTGRES_PASSWORD: disposable_ci_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U licenx_ci -d licenx_test_acceptance"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
     steps:
       - uses: actions/checkout@v4
         with:
@@ -69,25 +85,79 @@ jobs:
       - name: Install isolated test requirements
         run: |
           npm ci --no-audit --no-fund
-          python -m pip install -r SDK/client/python/licenx/requirements.txt
-          python -m pip install 'websocket-client>=1.7,<2'
-      - name: N-01 focused Node heartbeat and denial security
+          python -m pip install -r SDK/client/python/licenx/requirements.txt 'websocket-client>=1.7,<2' build
+      - name: Full Node security and real disposable PostgreSQL regression
+        env:
+          NODE_ENV: test
+          LICENX_TEST_POSTGRES_URL: postgresql://licenx_ci:disposable_ci_only@127.0.0.1:5432/licenx_test_acceptance
         run: |
-          timeout --signal=TERM --kill-after=5s 120s node --import tsx --test --test-concurrency=1 \
-            tests/licenseHeartbeat.test.ts \
-            tests/phase05Security.test.ts \
-            tests/realtimeServerPolicy.test.ts
-      - name: P-01 focused Python SDK recovery and lifecycle
+          timeout --signal=TERM --kill-after=5s 180s npm test
+      - name: Full Python SDK security and recovery regression
         env:
           PYTHONPATH: SDK/client/python
           PYTHONDONTWRITEBYTECODE: "1"
         run: |
-          timeout --signal=TERM --kill-after=5s 120s python -m unittest -v \
-            licenx.test.test_lx_s02_lifecycle \
-            licenx.test.test_network_recovery \
-            licenx.test.test_heartbeat
-      - name: TypeScript static check
-        run: ./node_modules/.bin/tsc --noEmit
+          timeout --signal=TERM --kill-after=5s 180s python -m unittest discover -s SDK/client/python/licenx/test -p "test_*.py"
+      - name: TypeScript, production build and SDK archive check
+        run: |
+          timeout --signal=TERM --kill-after=5s 60s npm run lint
+          timeout --signal=TERM --kill-after=5s 180s npm run build
+          timeout --signal=TERM --kill-after=5s 60s npm run verify:sdk-archive
+      - name: Build and install isolated SDK wheel and source archive
+        run: |
+          timeout --signal=TERM --kill-after=5s 120s python -m build --wheel --sdist --outdir "$RUNNER_TEMP/licenx-acceptance-dist" SDK/client/python/licenx
+          python -m venv "$RUNNER_TEMP/licenx-acceptance-venv"
+          "$RUNNER_TEMP/licenx-acceptance-venv/bin/python" -m pip install "$RUNNER_TEMP"/licenx-acceptance-dist/licenx-*.whl
+          "$RUNNER_TEMP/licenx-acceptance-venv/bin/python" -c 'import importlib.metadata as m; from licenx import SDKConfig, XLicenseClient; assert m.version("licenx") == "1.2.6rc1"; print("SDK_WHEEL_VERSION_AND_IMPORT_PASS")'
+      - name: Prepare GitHub-runner-only Docker Compose secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          password="$(openssl rand -hex 24)"
+          owner_code="$(openssl rand -hex 32)"
+          echo "::add-mask::${password}"
+          echo "::add-mask::${owner_code}"
+          {
+            echo "COMPOSE_PROJECT_NAME=licenx_accept_${GITHUB_RUN_ID}"
+            echo "DOMAIN=localhost"
+            echo "ACME_EMAIL=ci@example.invalid"
+            echo "POSTGRES_DB=licenx_ci"
+            echo "POSTGRES_USER=licenx_ci"
+            echo "POSTGRES_PASSWORD=${password}"
+            echo "DATABASE_URL=postgresql://licenx_ci:${password}@postgres:5432/licenx_ci?sslmode=disable"
+            echo "OWNER_SETUP_CODE_SHA256=$(printf '%s' "${owner_code}" | sha256sum | cut -d ' ' -f1)"
+            echo "LICENX_REALTIME_TRANSPORT_ENABLED=true"
+          } >> "$GITHUB_ENV"
+      - name: Disposable Docker build and trusted localhost HTTPS smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$DOMAIN" = "localhost"
+          test "$COMPOSE_PROJECT_NAME" = "licenx_accept_${GITHUB_RUN_ID}"
+          docker compose --profile standalone-https config --quiet
+          timeout --signal=TERM --kill-after=5s 260s docker compose --profile standalone-https up --detach --build --wait --wait-timeout 150
+          docker compose cp caddy:/data/caddy/pki/authorities/local/root.crt "$RUNNER_TEMP/licenx-acceptance-ca.pem"
+          curl --cacert "$RUNNER_TEMP/licenx-acceptance-ca.pem" --fail --silent --show-error https://localhost/api/ready | node -e '
+            let s=""; process.stdin.on("data",c=>s+=c).on("end",()=>{
+              if(JSON.parse(s).status!=="ready")process.exit(1);
+              console.log("TRUSTED_LOCAL_HTTPS_READY_PASS");
+            });'
+          NODE_EXTRA_CA_CERTS="$RUNNER_TEMP/licenx-acceptance-ca.pem" node --input-type=module -e '
+            const paths=["/api/health","/api/setup/status","/api/sdk/download/python"];
+            for(const p of paths){const r=await fetch("https://localhost"+p);
+              if(!r.ok)throw new Error(p+" status="+r.status);
+              console.log("HTTPS_ROUTE_PASS",p,r.status);}
+          '
+      - name: Cleanup ONLY disposable GitHub-runner Docker resources
+        if: always()
+        shell: bash
+        run: |
+          if [[ "${COMPOSE_PROJECT_NAME:-}" == "licenx_accept_${GITHUB_RUN_ID}" ]]; then
+            docker compose --profile standalone-https down --volumes --remove-orphans
+          else
+            echo "No acceptance Compose project to clean"
+          fi
 
   sdk-platform-compat:
     # This one prerelease PR is intentionally short-gated before full matrix.
