@@ -520,27 +520,40 @@ test("Node and Cloudflare persist and export valid per-app lease settings", asyn
   }
 });
 
-test("Node and Cloudflare logout routes release active validation bindings", async () => {
+test("Node and Cloudflare both reject proofless v1 logout/deactivation without unbinding", async () => {
   for (const [validate, logout] of [
     [validateWithNode, logoutWithNode],
     [validateWithCloudflare, logoutWithCloudflare],
-  ]) {
+  ] as const) {
     const validation = await validate();
     assert.equal(validation.status, 200);
-
-    const activeBinding = await db.execute({
-      sql: "SELECT status FROM devices WHERE license_id = ? AND hwid = ?",
-      args: [licenseId, requestHwid],
-    });
-    assert.equal(activeBinding.rows[0]?.status, "active");
-
     const logoutResult = await logout();
-    assert.equal(logoutResult.status, 200);
-
-    const releasedBinding = await db.execute({
-      sql: "SELECT status FROM devices WHERE license_id = ? AND hwid = ?",
-      args: [licenseId, requestHwid],
-    });
-    assert.equal(releasedBinding.rows[0]?.status, "logged_out");
+    assert.equal(logoutResult.status, 403);
+    assert.equal(logoutResult.body.code, "LOGOUT_PROOF_REQUIRED");
   }
+
+  const body = JSON.stringify({ license_key: licenseKey, hwid: requestHwid });
+  const nodeDeactivation = await fetch(`${baseUrl}/api/v1/license/deactivate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body,
+  });
+  const cloudflareDeactivation = await handleCloudflareApi(
+    new Request("https://licenx.test/api/v1/license/deactivate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    }),
+    undefined,
+  );
+  for (const response of [nodeDeactivation, cloudflareDeactivation]) {
+    assert.equal(response.status, 403);
+    assert.equal((await response.json()).code, "LOGOUT_PROOF_REQUIRED");
+  }
+
+  const activeBinding = await db.execute({
+    sql: "SELECT status FROM devices WHERE license_id = ? AND hwid = ?",
+    args: [licenseId, requestHwid],
+  });
+  assert.equal(activeBinding.rows[0]?.status, "active");
 });

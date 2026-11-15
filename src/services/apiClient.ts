@@ -452,12 +452,14 @@ export const api = {
       total: typeof data?.total === "number" ? data.total : rows.length,
       limit: typeof data?.limit === "number" ? data.limit : (params.limit || 100),
       offset: typeof data?.offset === "number" ? data.offset : (params.offset || 0),
+      serverTime: typeof data?.serverTime === "number" ? data.serverTime : null,
+      serverTimeZone: typeof data?.serverTimeZone === "string" ? data.serverTimeZone : "UTC",
     };
     setCached(key, result);
     return result;
   },
-  getDiagnostics: async (): Promise<{ entries: SafeDiagnostic[]; volatile: true }> =>
-    request<{ entries: SafeDiagnostic[]; volatile: true }>("/api/diagnostics?limit=50"),
+  getDiagnostics: async (): Promise<{ entries: SafeDiagnostic[]; volatile: true; serverTime: number; serverTimeZone: string }> =>
+    request<{ entries: SafeDiagnostic[]; volatile: true; serverTime: number; serverTimeZone: string }>("/api/diagnostics?limit=50"),
   reportAdminDiagnostic: async (code: "ADMIN_UI_RENDER_ERROR" | "ADMIN_WS_TRANSPORT_ERROR") =>
     request<{ code: string }>("/api/diagnostics/admin", {
       method: "POST", body: JSON.stringify({ code }),
@@ -738,9 +740,11 @@ export const api = {
     let result = {
       devices: [] as Device[],
       total: 0,
+      serverTime: null as number | null,
+      serverTimeZone: "UTC",
     };
     if (Array.isArray(data)) {
-      result = { devices: data, total: data.length };
+      result = { devices: data, total: data.length, serverTime: null, serverTimeZone: "UTC" };
     } else {
       result = {
         devices: Array.isArray(data?.devices) ? data.devices : [],
@@ -748,6 +752,8 @@ export const api = {
           typeof data?.total === "number"
             ? data.total
             : data?.devices?.length || 0,
+        serverTime: typeof data?.serverTime === "number" ? data.serverTime : null,
+        serverTimeZone: typeof data?.serverTimeZone === "string" ? data.serverTimeZone : "UTC",
       };
     }
     setCached(key, result);

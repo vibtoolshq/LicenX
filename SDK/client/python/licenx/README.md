@@ -1,6 +1,6 @@
 # LicenX Python SDK — `licenx`
 
-**Primary Python client SDK for LicenX applications.** Version **1.2.3**; Python **3.8+**. Package/install/import name: `licenx`. Repository overview: [LicenX README](../../../../README.md).
+**Primary Python client SDK for LicenX applications.** Version **1.2.6** (stable release target; requires a compatible hardened Node/VPS server); Python **3.8+**. Package/install/import name: `licenx`. Repository overview: [LicenX README](../../../../README.md).
 
 > **Single supported SDK:** `licenx` (installable from a verified wheel or the Admin's primary `licenx-python-sdk.zip` source kit). The reference SDK is retired. PyPI publication is not automatic.
 
@@ -12,7 +12,7 @@ From the LicenX repository root:
 python -m pip install ./SDK/client/python/licenx
 ```
 
-Or run `python -m pip install .` within this package directory. The package depends on `cryptography>=41.0.0` for trusted RSA/Ed25519 response verification; optional `requests` transport has a standard-library `urllib` fallback. The release workflow can attach wheel and source distribution files to GitHub Releases; **PyPI publication is not automatic**.
+Or run `python -m pip install .` within this package directory. The package depends on `cryptography>=41.0.0` for trusted RSA/Ed25519 response verification; optional `requests` transport has a standard-library `urllib` fallback. The release workflow can attach wheel and source distribution files to GitHub Releases; **PyPI publication requires an explicitly authorized release request and passing release workflow**.
 
 ## Configuration
 

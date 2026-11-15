@@ -16,6 +16,7 @@ export const DevicesTab: React.FC = () => {
   const [appliedSearch, setAppliedSearch] = useState('');
   const [loadError, setLoadError] = useState('');
   const [realtimeState, setRealtimeState] = useState(adminRealtime.getStatus().state);
+  const [serverTimeZone, setServerTimeZone] = useState("UTC");
   const loadSerial = useRef(0);
 
   // Pagination state
@@ -51,6 +52,7 @@ export const DevicesTab: React.FC = () => {
       const count = typeof res?.total === 'number' ? res.total : list.length;
       setDevices(list);
       setTotal(count);
+      if (typeof res?.serverTimeZone === 'string') setServerTimeZone(res.serverTimeZone);
       setLoadError('');
       if (currentPage > Math.max(1, Math.ceil(count / pageSize))) {
         setCurrentPage(Math.max(1, Math.ceil(count / pageSize)));
@@ -168,11 +170,12 @@ export const DevicesTab: React.FC = () => {
   const formatTime = (ms: number) => {
     if (!ms) return 'Never';
     return new Date(ms).toLocaleString(undefined, {
+      timeZone: serverTimeZone,
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
-    });
+    }) + ' (' + serverTimeZone + ')';
   };
 
   return (
@@ -206,7 +209,7 @@ export const DevicesTab: React.FC = () => {
               WS: <span className="text-emerald-400">{presence.connectedNow}</span>
               <span className="mx-1 text-slate-600">|</span>Bound active: {presence.boundActive}
               <span className="mx-1 text-slate-600">|</span>Stale: {presence.staleBound}
-              <span className="mx-1 text-slate-600">|</span>{realtimeState} · {new Date(presence.observedAt).toLocaleTimeString()} · {presence.transportEnabled ? 'SDK WS ON' : 'SDK WS OFF'}
+              <span className="mx-1 text-slate-600">|</span>{realtimeState} · {new Date(presence.observedAt).toLocaleTimeString(undefined, { timeZone: serverTimeZone })} ({serverTimeZone}) · {presence.transportEnabled ? 'SDK WS ON' : 'SDK WS OFF'}
             </span>
           ) : <span className="text-[10px] text-slate-500">Live report unavailable · {realtimeState}</span>}
           <button

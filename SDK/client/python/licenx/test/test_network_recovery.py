@@ -89,6 +89,95 @@ class HeartbeatRecoveryTests(unittest.TestCase):
             worker._worker_loop()
         return waits, invalidations, communicator, worker
 
+    def test_realtime_grace_deadline_checked_on_each_authorization_read(self):
+        revoked = Mock()
+        worker = BackgroundLicenseWorker(
+            "precise-grace-test", offline_grace_seconds=20,
+            on_invalidated=revoked,
+        )
+        worker.enable_realtime()
+        worker._running = True
+        with patch("licenx.storage.time.monotonic", return_value=100.0):
+            worker.realtime_signed_heartbeat(False, {"code": "TIMEOUT"})
+
+        # No heartbeat poll happens at t=119, 120 or 125.
+        for moment, expected in ((119.0, True), (120.0, False), (125.0, False)):
+            with self.subTest(second=moment), patch(
+                "licenx.storage.time.monotonic", return_value=moment
+            ):
+                self.assertEqual(worker.is_authorized(), expected)
+        self.assertEqual(worker.get_realtime_state(), "PAUSED_UNVERIFIED")
+        self.assertTrue(worker._running)
+        revoked.assert_not_called()
+        with patch("licenx.storage.time.monotonic", return_value=126.0):
+            worker.realtime_signed_heartbeat(True, {"valid": True, "status": "active"})
+            self.assertTrue(worker.is_authorized())
+        self.assertEqual(worker.get_realtime_state(), "HTTP_FALLBACK")
+        worker.stop_monitoring()
+
+    def test_signed_snapshot_alone_cannot_reset_expired_grace(self):
+        worker = BackgroundLicenseWorker(
+            "stale-snapshot-test", offline_grace_seconds=20,
+        )
+        worker.enable_realtime()
+        worker._running = True
+        with patch("licenx.storage.time.monotonic", return_value=100.0):
+            worker.realtime_signed_heartbeat(False, {"code": "TIMEOUT"})
+        # No prior is_authorized() call: set_realtime_connected must enforce
+        # the deadline itself and require a fresh signed HTTP recheck.
+        with patch("licenx.storage.time.monotonic", return_value=120.0):
+            self.assertFalse(worker.set_realtime_connected(True))
+        self.assertFalse(worker.is_authorized())
+        self.assertEqual(worker.get_realtime_state(), "PAUSED_UNVERIFIED")
+        worker.stop_monitoring()
+
+    def test_realtime_monotonic_rollback_never_extends_grace(self):
+        worker = BackgroundLicenseWorker(
+            "rollback-grace-test", offline_grace_seconds=20,
+        )
+        worker.enable_realtime()
+        worker._running = True
+        with patch("licenx.storage.time.monotonic", return_value=100.0):
+            worker.realtime_signed_heartbeat(False, {"code": "SERVER_UNREACHABLE"})
+        with patch("licenx.storage.time.monotonic", return_value=99.0):
+            self.assertFalse(worker.is_authorized())
+            self.assertEqual(worker._remaining_grace_seconds(), 0.0)
+        self.assertEqual(worker.get_realtime_state(), "PAUSED_UNVERIFIED")
+        worker.stop_monitoring()
+
+    def test_realtime_retries_after_prolonged_offline_without_ui_logout(self):
+        invalidated = Mock()
+        communicator = Mock()
+        communicator.ping_heartbeat.side_effect = [
+            (False, {"code": "SERVER_UNREACHABLE"}),
+            (False, {"code": "TIMEOUT"}),
+            (True, {"valid": True, "status": "active"}),
+        ]
+        worker = BackgroundLicenseWorker(
+            "realtime-recovery-test", offline_grace_seconds=0,
+            on_invalidated=invalidated,
+        )
+        worker.enable_realtime()
+        worker._server_communicator = communicator
+        worker._current_license_key = "SYNTHETIC"
+        worker._current_hwid = "HWID"
+        worker._running = True
+        waits = []
+
+        def wait(timeout):
+            waits.append(timeout)
+            if len(waits) > 3:
+                worker._stop_event.set()
+            return False
+
+        worker._realtime_wake.wait = wait
+        worker._realtime_worker_loop()
+        self.assertEqual(waits, [2.0, 30, 30, 30])
+        self.assertEqual(communicator.ping_heartbeat.call_count, 3)
+        invalidated.assert_not_called()
+        self.assertEqual(worker.get_realtime_state(), "HTTP_FALLBACK")
+        self.assertTrue(worker.is_authorized())
+
     def test_retries_at_30_seconds_during_grace_and_restores_normal_interval(self):
         callbacks = []
         waits, invalidations, communicator, worker = self.run_worker(

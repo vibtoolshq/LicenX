@@ -177,7 +177,7 @@ test("heartbeat denial remains fail-closed when the device is unbound", async ()
   assert.equal(cloudflareResult.body.code, "DEVICE_UNBOUND");
 });
 
-test("Node and Cloudflare reject and release a device after its app lease expires", async () => {
+test("Node renews the same stale active binding; Cloudflare retains legacy lease policy", async () => {
   const appId = "app-heartbeat-lease-test";
   const appSlug = "heartbeat-lease-test";
   const appNow = Date.now();
@@ -198,10 +198,14 @@ test("Node and Cloudflare reject and release a device after its app lease expire
     deviceId,
   ]);
 
-  const nodeResult = await pingNode("expired-node-lease");
-  assert.equal(nodeResult.status, 403);
-  assert.equal(nodeResult.body.code, "DEVICE_LEASE_EXPIRED");
-
+  const nodeResult = await pingNode("stale-active-node-recovery");
+  assert.equal(nodeResult.status, 200, "same active Node binding can resume");
+  assert.equal(nodeResult.body.valid, true);
+  assert.equal(nodeResult.body.nonce, "stale-active-node-recovery");
+  const renewed = await db.execute("SELECT status,last_ping_at FROM devices WHERE id = ?", [deviceId]);
+  assert.equal(renewed.rows[0]?.status, "active");
+  assert.ok(Number(renewed.rows[0]?.last_ping_at) >= appNow);
+  // Cloudflare is separately scoped and must retain its old stale-lease denial.
   await db.execute(
     "UPDATE devices SET status = 'active', last_ping_at = ? WHERE id = ?",
     [stalePing, deviceId],
@@ -214,4 +218,98 @@ test("Node and Cloudflare reject and release a device after its app lease expire
     deviceId,
   ]);
   assert.equal(row.rows[0]?.status, "logged_out");
+
+  const afterReset = await pingNode("logged-out-must-stay-logged-out");
+  assert.equal(afterReset.status, 403);
+  assert.equal(afterReset.body.code, "DEVICE_UNBOUND");
+  const afterResetRow = await db.execute("SELECT status FROM devices WHERE id = ?", [deviceId]);
+  assert.equal(afterResetRow.rows[0]?.status, "logged_out");
+
+  await db.execute("UPDATE devices SET status = 'blocked' WHERE id = ?", [deviceId]);
+  const blocked = await pingNode("blocked-must-stay-blocked");
+  assert.equal(blocked.status, 403);
+  assert.equal(blocked.body.code, "DEVICE_UNBOUND");
+  await db.execute({
+    sql: "UPDATE devices SET status = 'active', last_ping_at = ? WHERE id = ?",
+    args: [stalePing, deviceId],
+  });
+  await db.execute("UPDATE licenses SET status = 'revoked' WHERE id = ?", [licenseId]);
+  const revoked = await pingNode("revoked-must-stay-revoked");
+  assert.equal(revoked.status, 403);
+  assert.equal(revoked.body.code, "LICENSE_INACTIVE");
+});
+
+test("F05 Node signed terminal denial is challenge- and device-bound", async () => {
+  const keyPair = generateEd25519KeyPair();
+  await installSigningKey(keyPair);
+  await db.execute("UPDATE devices SET status = 'logged_out' WHERE id = ?", [deviceId]);
+  const request = {
+    license_key: licenseKey,
+    hwid,
+    app_name: "signed-denial-test-app",
+    nonce: "F05_DENIAL_NONCE_123456789012345678901234",
+  };
+  const response = await fetch(`${baseUrl}/api/v1/license/ping`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  assert.equal(response.status, 403);
+  const body = await response.json() as Record<string, any>;
+  assert.equal(body.code, "DEVICE_UNBOUND");
+  assert.equal(body.valid, false);
+  assert.equal(body.nonce, request.nonce);
+  const crypto = await import("node:crypto");
+  const binding = crypto.createHash("sha256").update(canonicalJson({
+    license_key: licenseKey, hwid, app_name: request.app_name,
+  }), "utf8").digest("hex");
+  assert.equal(body.request_binding, binding);
+  const proof = {
+    valid: false, code: body.code, nonce: body.nonce,
+    request_binding: body.request_binding, server_time: body.server_time,
+  };
+  assert.equal(verifySignature(canonicalJson(proof), body.signature, keyPair.publicKeyPem), true);
+  assert.equal(verifySignature(canonicalJson({
+    ...proof, nonce: "FORGED_NONCE_123456789012345678901234",
+  }), body.signature, keyPair.publicKeyPem), false);
+  assert.equal(verifySignature(canonicalJson({
+    ...proof, request_binding: "0".repeat(64),
+  }), body.signature, keyPair.publicKeyPem), false);
+  assert.equal("license_key" in body, false, "never echo private license key");
+
+  await db.execute("UPDATE licenses SET status='suspended' WHERE id=?", [licenseId]);
+  const suspended = await fetch(`${baseUrl}/api/v1/license/ping`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request),
+  });
+  const suspendedBody = await suspended.json() as Record<string, any>;
+  assert.equal(suspended.status, 403);
+  assert.equal(suspendedBody.code, "LICENSE_INACTIVE");
+  const { signature: suspendedSig, message: _m, status: _s, ...signedCandidate } = suspendedBody;
+  assert.equal(verifySignature(canonicalJson({
+    valid: signedCandidate.valid,
+    code: signedCandidate.code,
+    nonce: signedCandidate.nonce,
+    request_binding: signedCandidate.request_binding,
+    server_time: signedCandidate.server_time,
+  }), suspendedSig, keyPair.publicKeyPem), true);
+});
+
+test("F05 missing signing key never forges permission or negative proof", async () => {
+  await db.execute("DELETE FROM admin_config");
+  await db.execute("UPDATE devices SET status = 'logged_out' WHERE id = ?", [deviceId]);
+  const response = await fetch(`${baseUrl}/api/v1/license/ping`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      license_key: licenseKey, hwid, app_name: "signed-denial-test-app",
+      nonce: "F05_DENIAL_NONCE_123456789012345678901234",
+    }),
+  });
+  const body = await response.json() as Record<string, unknown>;
+  assert.equal(response.status, 403);
+  assert.equal(body.valid, false);
+  assert.equal(body.code, "DEVICE_UNBOUND");
+  assert.equal("signature" in body, false);
 });

@@ -12,6 +12,7 @@ export const LogsTab: React.FC = () => {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [lastUpdated, setLastUpdated] = useState<number | null>(null);
+  const [serverTimeZone, setServerTimeZone] = useState("UTC");
   const [diagnostics, setDiagnostics] = useState<SafeDiagnostic[]>([]);
   const [diagError, setDiagError] = useState('');
   const [diagSearch, setDiagSearch] = useState('');
@@ -60,7 +61,8 @@ export const LogsTab: React.FC = () => {
       setTotal(count);
       const lastPage = Math.max(1, Math.ceil(count / pageSize));
       if (currentPage > lastPage) setCurrentPage(lastPage);
-      setLastUpdated(Date.now());
+      setLastUpdated(typeof res?.serverTime === 'number' ? res.serverTime : null);
+      if (typeof res?.serverTimeZone === 'string') setServerTimeZone(res.serverTimeZone);
       setError('');
     } catch {
       if (serial === loadSerial.current) setError('Log data stale — refresh unavailable');
@@ -99,6 +101,7 @@ export const LogsTab: React.FC = () => {
         const result = await api.getDiagnostics();
         if (mounted) {
           setDiagnostics(Array.isArray(result.entries) ? result.entries : []);
+          if (typeof result.serverTimeZone === 'string') setServerTimeZone(result.serverTimeZone);
           setDiagError('');
         }
       } catch {
@@ -131,12 +134,13 @@ export const LogsTab: React.FC = () => {
 
   const formatTime = (ms: number) => {
     return new Date(ms).toLocaleString(undefined, {
+      timeZone: serverTimeZone,
       month: 'short',
       day: 'numeric',
       hour: '2-digit',
       minute: '2-digit',
       second: '2-digit',
-    });
+    }) + ' (' + serverTimeZone + ')';
   };
 
   return (
@@ -159,7 +163,7 @@ export const LogsTab: React.FC = () => {
           <div className="max-h-44 overflow-auto space-y-1">
             {filteredDiagnostics.slice(0, 12).map(entry => (
               <div key={entry.id} className="flex flex-wrap gap-x-3 text-[10px] text-slate-400 border-b border-slate-800/50 pb-1">
-                <span>{new Date(entry.observed_at).toLocaleTimeString()}</span>
+                <span>{formatTime(entry.observed_at)}</span>
                 <span>{entry.component} / {entry.stage}</span>
                 <span className="text-amber-300">{entry.code}</span>
                 {entry.tls_verify_code !== undefined && <span>TLS verify #{entry.tls_verify_code}</span>}
@@ -174,8 +178,8 @@ export const LogsTab: React.FC = () => {
           <span className="font-medium text-slate-300 uppercase tracking-wider">
             Audit Log Trail ({total})
           </span>
-          <span className="text-[10px] text-slate-500" role="status" title={lastUpdated ? 'Last HTTP refresh: ' + new Date(lastUpdated).toLocaleString() : 'Awaiting first successful HTTP refresh'}>
-            {error || (connectionState === 'CONNECTED' ? 'Live updates' : connectionState === 'AUTH_EXPIRED' ? 'Session expired' : 'HTTP fallback')}{lastUpdated ? ' · ' + new Date(lastUpdated).toLocaleTimeString() : ''}
+          <span className="text-[10px] text-slate-500" role="status" title={lastUpdated ? 'Last HTTP refresh: ' + formatTime(lastUpdated) : 'Awaiting first successful HTTP refresh'}>
+            {error || (connectionState === 'CONNECTED' ? 'Live updates' : connectionState === 'AUTH_EXPIRED' ? 'Session expired' : 'HTTP fallback')}{lastUpdated ? ' · ' + formatTime(lastUpdated) : ''}
           </span>
           <select
             value={actionFilter}

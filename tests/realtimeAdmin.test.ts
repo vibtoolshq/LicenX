@@ -105,6 +105,19 @@ test("WS-04: authenticated scoped presence, server policy, and post-commit force
     const flags=await db.execute("SELECT realtime_websocket_enabled,keep_login_on_network_error FROM apps WHERE id='app-one'");
     assert.equal(Number(flags.rows[0].realtime_websocket_enabled),1);
     assert.equal(Number(flags.rows[0].keep_login_on_network_error),1);
+    const noAuthConfig = await fetch(base+"/api/apps/app-one/config");
+    assert.equal(noAuthConfig.status,401,"client config export must remain Admin-auth-only");
+    const onConfig = await fetch(base+"/api/apps/app-one/config",{headers:{authorization:auth}});
+    const offConfig = await fetch(base+"/api/apps/app-two/config",{headers:{authorization:auth}});
+    assert.equal(onConfig.status,200);
+    assert.equal(offConfig.status,200);
+    const enabledSDK = await onConfig.json() as Record<string,unknown>;
+    const disabledSDK = await offConfig.json() as Record<string,unknown>;
+    assert.equal(enabledSDK.useWebSocket,true);
+    assert.equal(disabledSDK.useWebSocket,false);
+    assert.equal(typeof enabledSDK.useWebSocket,"boolean");
+    assert.equal("keep_login_on_network_error" in enabledSDK,false,
+      "deprecated server policy is not a generated SDK option");
     const invalidToggle=await fetch(base+"/api/apps/app-one",{
       method:"PATCH",headers:{authorization:auth,"content-type":"application/json"},
       body:JSON.stringify({keep_login_on_network_error:"yes"}),
@@ -184,8 +197,11 @@ test("WS-04: existing compact UI retains layout and differentiates policy from p
   const devices=readFileSync(new URL("../src/components/DevicesTab.tsx",import.meta.url),"utf8");
   assert.match(modal,/License Session Policy/);
   assert.match(modal,/realtime_websocket_enabled: webSocketEnabled/);
-  assert.match(modal,/keep_login_on_network_error: keepLoginOnNetworkError/);
-  assert.match(modal,/After a verified WebSocket snapshot, new SDK follows this signed policy/);
+  assert.doesNotMatch(modal,/keep_login_on_network_error: keepLoginOnNetworkError/);
+  assert.doesNotMatch(modal,/setKeepLoginOnNetworkError/);
+  assert.match(modal,/Network error UI session/);
+  assert.match(modal,/Retained by current realtime SDK/);
+  assert.match(modal,/legacy keep-login flag is retained for older clients/i);
   assert.match(devices,/Force logout/);
   assert.match(devices,/Connected/);
   assert.match(devices,/No WS/);

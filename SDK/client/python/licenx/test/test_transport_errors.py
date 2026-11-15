@@ -167,6 +167,39 @@ class TransportErrorRedactionTests(unittest.TestCase):
         self.assertNotIn("private diagnostic sentinel", str(data))
         self.assertNotIn("private response sentinel", str(data))
 
+    def test_bounded_denial_candidate_passes_without_exposing_private_fields(self):
+        import hashlib
+        from licenx.server import ServerCommunicator
+
+        candidate = {
+            "valid": False, "code": "DEVICE_UNBOUND",
+            "nonce": "safe_nonce_1234567890123456789012345678",
+            "request_binding": hashlib.sha256(b"synthetic-binding").hexdigest(),
+            "server_time": 123456789,
+            "signature": "A" * 88,
+            "error": "private backend stack sentinel",
+            "private_key": "private key sentinel",
+            "diagnostic": {"secret": "secret diagnostic sentinel"},
+        }
+        safe = ServerCommunicator._safe_response(403, candidate)
+        for key in ("valid", "code", "nonce", "request_binding",
+                    "server_time", "signature"):
+            self.assertEqual(safe[key], candidate[key])
+        for secret in ("private backend", "private key", "secret diagnostic"):
+            self.assertNotIn(secret, str(safe))
+        # Untrusted 200/502 responses and malformed 403 candidate are not
+        # allowed to carry a signature through general error sanitization.
+        for status, altered in (
+            (502, candidate),
+            (403, {**candidate, "signature": "short"}),
+            (403, {**candidate, "request_binding": "not-a-hash"}),
+            (403, {**candidate, "valid": True}),
+        ):
+            with self.subTest(status=status, altered=altered):
+                result = ServerCommunicator._safe_response(status, altered)
+                self.assertNotIn("signature", result)
+                self.assertNotIn("private_key", result)
+
     def test_invalid_or_missing_request_ids_are_omitted_for_both_transports(self):
         payloads = [
             {"error": "backend detail", "code": "UPSTREAM_FAILURE", "request_id": "not-a-uuid"},

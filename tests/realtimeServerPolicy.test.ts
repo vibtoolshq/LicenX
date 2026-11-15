@@ -58,6 +58,33 @@ test("WS-02: additive policy, authenticated tickets, committed events, signed sn
     if (!address || typeof address === "string") throw new Error("no address");
     const base = "http://127.0.0.1:" + address.port;
     const bearer = "Bearer " + createSessionToken({username:"owner", exp: Math.floor(Date.now()/1000)+1800}, "test-jwt-secret");
+    const initialConfigResponse = await fetch(base + "/api/apps/rt-app/config", {
+      headers:{authorization:bearer},
+    });
+    assert.equal(initialConfigResponse.status,200);
+    const initialConfig = await initialConfigResponse.json() as {useWebSocket:unknown};
+    assert.equal(initialConfig.useWebSocket,false,"app WSS default is exported as false");
+    const serverZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    for (const endpoint of ["/api/logs?limit=2", "/api/devices?limit=2&offset=0", "/api/diagnostics?limit=2"]) {
+      const response = await fetch(base + endpoint, {headers:{authorization:bearer}});
+      assert.equal(response.status, 200, endpoint);
+      const body = await response.json() as {serverTimeZone:string; serverTime:number};
+      assert.equal(body.serverTimeZone, serverZone, endpoint);
+      assert.ok(Math.abs(body.serverTime-Date.now())<10_000, endpoint + " uses server time");
+    }
+    const skewed = await fetch(base + "/api/v1/license/validate", {
+      method:"POST", headers:{"content-type":"application/json"},
+      body:JSON.stringify({
+        license_key:"RT-EXAMPLE-LICENSE-KEY", hwid:"hwid-rt",
+        app_name:"rt-app", app_version:"1.0.0",
+        nonce:"Time01TestNonce_12345678901234567890",
+        client_time:-99999999999999,
+      }),
+    });
+    assert.equal(skewed.status, 200, "server must ignore untrusted client wall time");
+    const verified = await skewed.json() as {valid:boolean; server_time:number};
+    assert.equal(verified.valid, true);
+    assert.ok(Math.abs(verified.server_time-Date.now())<10_000, "server-signed time is server epoch");
     const invalid = await fetch(base + "/api/apps/rt-app", {
       method:"PATCH", headers: {authorization:bearer, "content-type":"application/json"},
       body:JSON.stringify({realtime_websocket_enabled:"true"}),
@@ -71,6 +98,16 @@ test("WS-02: additive policy, authenticated tickets, committed events, signed sn
     const flags = await db.execute("SELECT realtime_websocket_enabled,keep_login_on_network_error FROM apps WHERE id='rt-app'");
     assert.equal(Number(flags.rows[0].realtime_websocket_enabled), 1);
     assert.equal(Number(flags.rows[0].keep_login_on_network_error), 1);
+    const enabledConfigResponse = await fetch(base + "/api/apps/rt-app/config", {
+      headers:{authorization:bearer},
+    });
+    assert.equal(enabledConfigResponse.status,200);
+    const enabledConfig = await enabledConfigResponse.json() as {useWebSocket:unknown};
+    assert.equal(enabledConfig.useWebSocket,true,"app WSS enabled exports boolean true");
+    // HTTP recovery must never bypass the WSS gateway's active-device check.
+    await db.execute("UPDATE devices SET status='logged_out' WHERE id='rt-dev'");
+    assert.equal((await issuer.issue(input, "127.0.0.1")).status, 403);
+    await db.execute("UPDATE devices SET status='active' WHERE id='rt-dev'");
     const issued = await issuer.issue(input, "127.0.0.1");
     assert.equal(issued.status, 200);
     const ticket = "ticket" in issued.body ? issued.body.ticket : undefined;
@@ -125,4 +162,21 @@ test("WS-02: additive policy, authenticated tickets, committed events, signed sn
       if(value === undefined) delete process.env[key]; else process.env[key]=value;
     }
   }
+});
+
+test("F06 license.hello separates maintenance from invalid-device transport hint", async () => {
+  const fs = await import("node:fs");
+  const source = fs.readFileSync(new URL("../server.ts", import.meta.url), "utf8");
+  const helloStart = source.indexOf("realtimeTransport.register('license.hello'");
+  const helloEnd = source.indexOf("const snapshot = await publisher.snapshot(identity)", helloStart);
+  assert.ok(helloStart > 0 && helloEnd > helloStart);
+  const hello = source.slice(helloStart, helloEnd);
+  assert.match(hello, /if \(isBackupRestoreRunning\(\)\)/);
+  assert.match(hello, /REALTIME_RESTORE_IN_PROGRESS/);
+  assert.match(hello, /if \(!\(await validateRealtimeDevice\(db, identity\)\)\)/);
+  assert.match(hello, /REALTIME_AUTH_REVOKED/);
+  assert.ok(hello.indexOf("REALTIME_RESTORE_IN_PROGRESS") <
+            hello.indexOf("REALTIME_AUTH_REVOKED"));
+  assert.match(hello, /ctx\.client\.ws\.close\(1012/);
+  assert.match(hello, /ctx\.client\.ws\.close\(4003/);
 });

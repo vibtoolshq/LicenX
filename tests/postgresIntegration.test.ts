@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import express from "express";
 import { createServer, type Server } from "node:http";
 import { after, before, beforeEach, test } from "node:test";
@@ -13,6 +14,8 @@ import type { AddressInfo } from "node:net";
 import { createSessionToken } from "../src/server/crypto.js";
 
 const url = process.env.LICENX_TEST_POSTGRES_URL;
+// Synthetic owner proof for the disposable PostgreSQL fixture only.
+const testOwnerSetupCode = "a".repeat(64);
 const integration = (name: string, fn: () => Promise<void>) => test(name, { skip: !url }, fn);
 let db: PostgresClient;
 let server: Server;
@@ -26,6 +29,7 @@ before(async () => {
   process.env.NODE_ENV = "test";
   process.env.DATABASE_PROVIDER = "postgres";
   process.env.DATABASE_URL = url;
+  process.env.OWNER_SETUP_CODE_SHA256 = createHash("sha256").update(testOwnerSetupCode).digest("hex");
   delete process.env.TURSO_DATABASE_URL;
   db = getDbClient() as PostgresClient;
   await Promise.all([initDatabaseSchema(), initDatabaseSchema()]);
@@ -49,7 +53,7 @@ after(async () => {
   if (!url) return;
   if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
   if (db) await db.close();
-  for (const key of ["NODE_ENV", "DATABASE_PROVIDER", "DATABASE_URL", "TURSO_DATABASE_URL"]) {
+  for (const key of ["NODE_ENV", "DATABASE_PROVIDER", "DATABASE_URL", "OWNER_SETUP_CODE_SHA256", "TURSO_DATABASE_URL"]) {
     if (original[key] === undefined) delete process.env[key];
     else process.env[key] = original[key];
   }
@@ -78,7 +82,13 @@ function bind(index: number, now = Date.now()) {
 integration("real PostgreSQL serializes migration reruns and maps safe integers/search/affected rows", async () => {
   const other = new PostgresClient(url!);
   try { await Promise.all([migratePostgres(db), migratePostgres(other)]); } finally { await other.close(); }
-  assert.equal((await db.execute("SELECT COUNT(*) AS count FROM licenx_schema_migrations")).rows[0].count, 1);
+  const readVersions = async () => (
+    await db.execute("SELECT version FROM licenx_schema_migrations ORDER BY version")
+  ).rows.map((row) => Number(row.version));
+  const expectedVersions = [1, 2, 3, 4, 5];
+  assert.deepEqual(await readVersions(), expectedVersions);
+  await migratePostgres(db);
+  assert.deepEqual(await readVersions(), expectedVersions, "rerunning all migrations must be idempotent");
   await license();
   const found = await db.execute({ sql: "SELECT * FROM licenses WHERE key LIKE ?", args: ["%pg-test%"] });
   assert.equal(found.rows.length, 1);
@@ -139,7 +149,15 @@ integration("PostgreSQL concurrent PIN and admin failures enforce database-backe
 
 integration("PostgreSQL Node API supports fresh setup/login and a signed validation-ping-logout lifecycle", async () => {
   assert.equal((await request("/setup/status")).body.initialized, false);
-  const setup = await request("/setup/init", { username: "pg-admin", password: "fixture-password-2026" });
+  const setupData = { username: "pg-admin", password: "fixture-password-2026" };
+  assert.equal((await request("/setup/init", setupData)).status, 403, "missing owner proof must be denied");
+  assert.equal(
+    (await request("/setup/init", { ...setupData, ownerSetupCode: "b".repeat(64) })).status,
+    403,
+    "invalid owner proof must be denied",
+  );
+  assert.equal((await request("/setup/status")).body.initialized, false);
+  const setup = await request("/setup/init", { ...setupData, ownerSetupCode: testOwnerSetupCode });
   assert.equal(setup.status, 200);
   assert.equal((await request("/setup/status")).body.initialized, true);
   const login = await request("/auth/login", { username: "pg-admin", password: "fixture-password-2026" });
@@ -151,12 +169,21 @@ integration("PostgreSQL Node API supports fresh setup/login and a signed validat
   assert.equal((await request("/admin-api-keys", { name: "PG Fixture" }, token)).status, 201);
   assert.equal((await request("/admin-api-keys", undefined, token)).status, 200);
   await license();
-  const validation = await request("/v1/license/validate", { license_key: "PG-TEST-KEY", hwid: "api-hwid" });
+  const validation = await request("/v1/license/validate", {
+    license_key: "PG-TEST-KEY", hwid: "api-hwid",
+    nonce: "PG-LOGOUT-NONCE-TEST", logout_proof_version: 2,
+  });
   assert.equal(validation.status, 200);
   assert.equal(typeof validation.body.signature, "string");
   assert.equal(typeof validation.body.activated_at, "number");
+  const proof = validation.body.device_logout_proof as string;
+  assert.match(proof, /^[A-Za-z0-9_-]{43}$/);
   assert.equal((await request("/v1/license/ping", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 200);
-  assert.equal((await request("/v1/license/logout", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 200);
+  assert.equal((await request("/v1/license/logout", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 403);
+  assert.equal((await request("/v1/license/deactivate", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 403);
+  assert.equal((await request("/v1/license/ping", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 200);
+  assert.equal((await request("/v2/license/logout", {}, proof)).status, 200);
+  assert.equal((await request("/v2/license/logout", {}, proof)).status, 403);
   assert.equal((await request("/v1/license/ping", { license_key: "PG-TEST-KEY", hwid: "api-hwid" })).status, 403);
   assert.equal((await request("/licenses?search=pg-test", undefined, token)).status, 200);
   assert.equal((await request("/stats", undefined, token)).status, 200);

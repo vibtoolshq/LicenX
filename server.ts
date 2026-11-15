@@ -175,7 +175,12 @@ async function main() {
         ctx.reply({ type: 'error', code: 'REALTIME_ALREADY_REGISTERED' });
         return;
       }
-      if (isBackupRestoreRunning() || !(await validateRealtimeDevice(db, identity))) {
+      if (isBackupRestoreRunning()) {
+        ctx.reply({ type: 'error', code: 'REALTIME_RESTORE_IN_PROGRESS' });
+        ctx.client.ws.close(1012, 'temporarily unavailable');
+        return;
+      }
+      if (!(await validateRealtimeDevice(db, identity))) {
         ctx.reply({ type: 'error', code: 'REALTIME_AUTH_REVOKED' });
         ctx.client.ws.close(4003, 'license revalidation required');
         return;

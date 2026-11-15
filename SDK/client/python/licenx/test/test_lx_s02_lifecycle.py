@@ -45,8 +45,13 @@ class SignedHttpRecoveryTests(unittest.TestCase):
             return signed_result
         self.communicator.ping_heartbeat = Mock(side_effect=assert_paused_before_http)
         module = SimpleNamespace()
+        # The production worker intentionally retries forever while running.
+        # Bound this isolated test to one cycle without altering SDK recovery.
         with patch.dict(sys.modules, {"websocket": module}), patch.object(
             self.worker, "_run_connection", side_effect=error
+        ), patch.object(
+            self.worker, "_retry_wait",
+            side_effect=lambda _attempt: self.worker._stop_event.set(),
         ):
             self.worker._run()
 
@@ -54,9 +59,9 @@ class SignedHttpRecoveryTests(unittest.TestCase):
         # Simulate an earlier signed WSS connection, then its TLS reconnect loss.
         self.storage.set_realtime_connected(True)
         self._run_failure(ssl.SSLCertVerificationError("SECRET EXCEPTION"), (
-            True, {"valid":True, "status":"active"},
+            True, {"valid":True, "status":"active", "server_time":1700000000000},
         ))
-        self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
+        self.assertEqual(self.storage.get_realtime_state(), "RECONNECTING")
         self.assertFalse(self.storage._realtime_connected, "stale WSS must not suppress HTTPS monitoring")
         self.assertTrue(self.storage._realtime_wake.is_set())
         self.assertTrue(self.storage._running)
@@ -72,20 +77,24 @@ class SignedHttpRecoveryTests(unittest.TestCase):
         self._run_failure(ssl.SSLError("SECRET EXCEPTION"), (
             False, {"code":"HEARTBEAT_SIGNATURE_FAILED"},
         ))
-        self.assertEqual(self.storage.get_realtime_state(), "INVALIDATED")
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
         self.assertFalse(self.storage.is_authorized())
-        revoked.assert_called_once()
+        self.assertTrue(self.storage._running)
+        revoked.assert_not_called()
 
     def test_ws_tls_and_unreachable_signed_http_never_fallback(self):
         self._run_failure(ssl.SSLError("private tls"), (
             False, {"code":"SERVER_UNREACHABLE"},
         ))
-        self.assertEqual(self.storage.get_realtime_state(), "INVALIDATED")
-        self.assertFalse(self.storage._running)
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
+        self.assertFalse(self.storage.is_authorized())
+        self.assertTrue(self.storage._running)
 
     def test_ws_denied_ticket_requires_fresh_signed_https(self):
         self.storage.set_realtime_connected(True)
-        self.communicator.ping_heartbeat = Mock(return_value=(True, {"valid":True}))
+        self.communicator.ping_heartbeat = Mock(return_value=(
+            True, {"valid":True, "server_time":1700000000000},
+        ))
         self.worker._post_ticket = Mock(return_value=(None, 403))
         self.assertEqual(self.worker._run_connection(SimpleNamespace()), "HTTP_FALLBACK")
         self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
@@ -93,12 +102,14 @@ class SignedHttpRecoveryTests(unittest.TestCase):
         self.communicator.ping_heartbeat.assert_called_once()
 
     def test_ws_disabled_404_falls_back_but_busy_503_does_not(self):
-        self.communicator.ping_heartbeat = Mock(return_value=(True, {"valid":True}))
+        self.communicator.ping_heartbeat = Mock(return_value=(
+            True, {"valid":True, "server_time":1700000000000},
+        ))
         self.worker._post_ticket = Mock(return_value=(None, 404))
         self.assertEqual(self.worker._run_connection(SimpleNamespace()), "HTTP_FALLBACK")
         self.worker._post_ticket = Mock(return_value=(None, 503))
-        self.assertIsNone(self.worker._run_connection(SimpleNamespace()))
-        self.communicator.ping_heartbeat.assert_called_once()
+        self.assertEqual(self.worker._run_connection(SimpleNamespace()), "HTTP_FALLBACK")
+        self.assertEqual(self.communicator.ping_heartbeat.call_count, 2)
 
     def test_403_ticket_with_bad_http_signature_does_not_grant_http_fallback(self):
         self.communicator.ping_heartbeat = Mock(return_value=(
@@ -106,19 +117,26 @@ class SignedHttpRecoveryTests(unittest.TestCase):
         ))
         self.worker._post_ticket = Mock(return_value=(None, 403))
         self.assertIsNone(self.worker._run_connection(SimpleNamespace()))
-        self.assertEqual(self.storage.get_realtime_state(), "INVALIDATED")
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
         self.assertFalse(self.storage.is_authorized())
+        self.assertTrue(self.storage._running)
 
     def test_repeated_non_tls_wss_failure_falls_back_only_after_verified_http(self):
-        self.communicator.ping_heartbeat = Mock(return_value=(True, {"valid":True}))
-        self.worker._retry_wait = Mock()
+        self.communicator.ping_heartbeat = Mock(return_value=(
+            True, {"valid":True, "server_time":1700000000000},
+        ))
         with patch.dict(sys.modules, {"websocket": SimpleNamespace()}), patch.object(
             self.worker, "_run_connection",
             side_effect=[RuntimeError("SECRET"), RuntimeError("SECRET")],
-        ) as attempt:
+        ) as attempt, patch.object(
+            self.worker, "_retry_wait",
+            side_effect=lambda _attempt: (
+                self.worker._stop_event.set() if attempt.call_count >= 2 else None
+            ),
+        ):
             self.worker._run()
         self.assertEqual(attempt.call_count, 2)
-        self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
+        self.assertEqual(self.storage.get_realtime_state(), "RECONNECTING")
         self.assertNotIn("SECRET", str(self.communicator.get_diagnostics()))
 
     def test_hw_id_cache_is_stable_when_synthetic_components_unchanged(self):

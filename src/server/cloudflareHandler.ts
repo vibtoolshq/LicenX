@@ -2528,46 +2528,11 @@ export async function handleCloudflareApi(
         normalizedPath === "/v1/license/deactivate") &&
       method === "POST"
     ) {
-      const { license_key, hwid, app_name } = body;
-      if (!license_key || !hwid)
-        return errorResponse("Missing license_key or hwid");
-
-      const cleanKey = license_key.trim().toUpperCase();
-      const cleanHwid = hwid.trim();
-      const now = Date.now();
-
-      const licRes = await db.execute({
-        sql: "SELECT id FROM licenses WHERE key = ? LIMIT 1",
-        args: [cleanKey],
-      });
-
-      if (licRes.rows.length === 0)
-        return errorResponse("License not found", 404);
-
-      const licId = licRes.rows[0].id as string;
-      await db.execute({
-        sql: "UPDATE devices SET status = 'logged_out', last_ping_at = ? WHERE license_id = ? AND hwid = ? AND status = 'active'",
-        args: [now, licId, cleanHwid],
-      });
-
-      // Log logout audit entry
-      await db.execute({
-        sql: `INSERT INTO validation_logs (id, license_key, app_slug, hwid, ip_address, action, status_code, message, created_at)
-              VALUES (?, ?, ?, ?, ?, 'logout', 200, 'Device unbind / logout completed', ?)`,
-        args: [
-          "log_" + crypto.randomBytes(6).toString("hex"),
-          cleanKey,
-          app_name || null,
-          cleanHwid,
-          ip,
-          now,
-        ],
-      });
-
-      return jsonResponse({
-        success: true,
-        message: "Device logged out and HWID slot released successfully",
-      });
+      // Key + HWID are identifiers, NOT authorization to unbind a device.
+      // Match the Node v1 fail-closed contract; a Cloudflare proof-v2
+      // implementation requires separately approved durable single-use
+      // claims and must never fall back to this legacy mutation path.
+      return jsonResponse({ code: "LOGOUT_PROOF_REQUIRED" }, 403);
     }
 
     // -----------------------------------------------------------------

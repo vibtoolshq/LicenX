@@ -40,6 +40,7 @@ class SafeDiagnosticsTests(unittest.TestCase):
             pause_for_signed_reverification=Mock(return_value=True),
             realtime_signed_heartbeat=Mock(return_value=False),
             enter_signed_http_fallback=Mock(return_value=False),
+            set_realtime_connected=Mock(),
         )
         communicator.ping_heartbeat = Mock(return_value=(
             False, {"code": "HEARTBEAT_SIGNATURE_FAILED"},
@@ -48,17 +49,26 @@ class SafeDiagnosticsTests(unittest.TestCase):
             communicator, storage, "SECRET-LICENSE", "RAW-HWID",
             {"app_id": "app-one"},
         )
+        # A synthetic WSS TLS failure must pause protected actions. Bound the
+        # fake worker to one retry rather than spinning on the same fake error.
         with patch.dict(sys.modules, {"websocket": SimpleNamespace()}), patch.object(
             worker, "_run_connection",
             side_effect=ssl.SSLError("private credential in arbitrary exception")
-        ):
+        ), patch.object(
+            worker, "_retry_wait",
+            side_effect=lambda _attempt: worker._stop_event.set(),
+        ) as retry:
             worker._run()
+        retry.assert_called_once()
+        storage.set_realtime_connected.assert_called_once_with(False)
         storage.pause_for_signed_reverification.assert_called_once_with()
         communicator.ping_heartbeat.assert_called_once_with(
             "SECRET-LICENSE", "RAW-HWID"
         )
         storage.enter_signed_http_fallback.assert_not_called()
-        storage._invalidate.assert_called_once_with("REALTIME_TLS_ERROR")
+        # A TLS transport error without trusted terminal denial must NOT
+        # log out the retained UI session or grant protected operations.
+        storage._invalidate.assert_not_called()
         events = communicator.get_diagnostics()
         self.assertEqual(events[-1]["code"], "REALTIME_TLS_ERROR")
         self.assertNotIn("SECRET-LICENSE", str(events))
