@@ -61,7 +61,7 @@ class SignedHttpRecoveryTests(unittest.TestCase):
         self._run_failure(ssl.SSLCertVerificationError("SECRET EXCEPTION"), (
             True, {"valid":True, "status":"active", "server_time":1700000000000},
         ))
-        self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
+        self.assertEqual(self.storage.get_realtime_state(), "RECONNECTING")
         self.assertFalse(self.storage._realtime_connected, "stale WSS must not suppress HTTPS monitoring")
         self.assertTrue(self.storage._realtime_wake.is_set())
         self.assertTrue(self.storage._running)
@@ -108,8 +108,8 @@ class SignedHttpRecoveryTests(unittest.TestCase):
         self.worker._post_ticket = Mock(return_value=(None, 404))
         self.assertEqual(self.worker._run_connection(SimpleNamespace()), "HTTP_FALLBACK")
         self.worker._post_ticket = Mock(return_value=(None, 503))
-        self.assertIsNone(self.worker._run_connection(SimpleNamespace()))
-        self.communicator.ping_heartbeat.assert_called_once()
+        self.assertEqual(self.worker._run_connection(SimpleNamespace()), "HTTP_FALLBACK")
+        self.assertEqual(self.communicator.ping_heartbeat.call_count, 2)
 
     def test_403_ticket_with_bad_http_signature_does_not_grant_http_fallback(self):
         self.communicator.ping_heartbeat = Mock(return_value=(
@@ -136,7 +136,7 @@ class SignedHttpRecoveryTests(unittest.TestCase):
         ):
             self.worker._run()
         self.assertEqual(attempt.call_count, 2)
-        self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
+        self.assertEqual(self.storage.get_realtime_state(), "RECONNECTING")
         self.assertNotIn("SECRET", str(self.communicator.get_diagnostics()))
 
     def test_hw_id_cache_is_stable_when_synthetic_components_unchanged(self):
