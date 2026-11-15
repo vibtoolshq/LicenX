@@ -1,0 +1,2 @@
+version=1.2.6
+source_sha=5e61526b19b2a09e4834be4f80db3dcb1a15c73f
