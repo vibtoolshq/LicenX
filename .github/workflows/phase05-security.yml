@@ -108,7 +108,7 @@ jobs:
           timeout --signal=TERM --kill-after=5s 120s python -m build --wheel --sdist --outdir "$RUNNER_TEMP/licenx-acceptance-dist" SDK/client/python/licenx
           python -m venv "$RUNNER_TEMP/licenx-acceptance-venv"
           "$RUNNER_TEMP/licenx-acceptance-venv/bin/python" -m pip install "$RUNNER_TEMP"/licenx-acceptance-dist/licenx-*.whl
-          "$RUNNER_TEMP/licenx-acceptance-venv/bin/python" -c 'import importlib.metadata as m; from licenx import SDKConfig, XLicenseClient; assert m.version("licenx") == "1.2.6rc1"; print("SDK_WHEEL_VERSION_AND_IMPORT_PASS")'
+          "$RUNNER_TEMP/licenx-acceptance-venv/bin/python" -c 'import importlib.metadata as m; from licenx import SDKConfig, XLicenseClient; assert m.version("licenx") == "1.2.6"; print("SDK_WHEEL_VERSION_AND_IMPORT_PASS")'
       - name: Prepare GitHub-runner-only Docker Compose secrets
         shell: bash
         run: |

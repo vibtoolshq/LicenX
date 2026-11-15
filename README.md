@@ -82,7 +82,7 @@ Preserve the PostgreSQL and app-storage volumes, private `.env`, setup credentia
 
 ## Primary Python SDK
 
-**Source:** [`SDK/client/python/licenx/`](SDK/client/python/licenx/README.md) · **Import:** `licenx` · **Package version:** 1.2.6rc1 (source-only release candidate; not approved for production or published as a stable release).
+**Source:** [`SDK/client/python/licenx/`](SDK/client/python/licenx/README.md) · **Import:** `licenx` · **Package version:** 1.2.6 (stable SDK release target; requires a compatible hardened Node/VPS server and separate production acceptance).
 
 ```bash
 python -m pip install ./SDK/client/python/licenx
