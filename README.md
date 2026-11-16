@@ -160,3 +160,9 @@ The saved Admin **Keep Login on Network Error** switch is now delivered **only**
 WS-05 adds disposable trusted-localhost Caddy WSS, real Python WS client, bounded synthetic-load, restart and HTTP-only rollback gates to GitHub Phase-05 CI. **Successful CI is not approval for live deployment or 1k–10k devices.** See [WS-05 release, preflight, operational risks and rollback](deploy/WS05_RELEASE_GATE.md). No customer database/DNS/VPS is touched by this source update.
 
 **PyPI release workflow:** After a reviewed versioned SDK commit is on `main`, a separately approved `python-sdk-vX.Y.Z` tag triggers the existing GitHub Actions wheel/sdist release pipeline and final PyPI upload using repository secret `PYPI_API_TOKEN`. See [release and PyPI guide](SDK/PRIMARY_SDK_MIGRATION.md). No automatic publish on ordinary pushes.
+
+## 2026-11-16 — License Core production baseline freeze
+
+The deployed Node/VPS License Core source is frozen at [`server-prod-2026.11.16`](https://github.com/vibtoolshq/LicenX/releases/tag/server-prod-2026.11.16) (source SHA `2fb5d32976292d8ec86e88eb1b3c322e47210ae1`). The separately published Python SDK `licenx==1.2.6` and its [`python-sdk-v1.2.6` release](https://github.com/vibtoolshq/LicenX/releases/tag/python-sdk-v1.2.6) remain unchanged.
+
+Read the exact evidence, SHA256 checksums, protected rollback references and **explicitly pending** full Admin Realtime/lifecycle criteria in [License Core Production Baseline](deploy/PRODUCTION_BASELINE_2026-11-16.md). This documentation freeze did not deploy a new server or republish any SDK package.
