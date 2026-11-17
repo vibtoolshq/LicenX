@@ -89,6 +89,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
           icon: <Activity className="w-3.5 h-3.5" />,
         },
         {
+          id: 'live-monitor',
+          label: 'Live Monitor',
+          icon: <Activity className="w-3.5 h-3.5" />,
+        },
+        {
           id: 'apps',
           label: 'Applications',
           icon: <AppWindow className="w-3.5 h-3.5" />,

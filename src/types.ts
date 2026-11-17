@@ -188,6 +188,7 @@ export interface FullBackupStatus {
 
 export type ActiveTab =
   | "overview"
+  | "live-monitor"
   | "apps"
   | "licenses"
   | "devices"

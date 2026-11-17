@@ -6,6 +6,7 @@ import { HeaderBar } from './components/HeaderBar';
 import { SetupModal } from './components/SetupModal';
 import { LoginModal } from './components/LoginModal';
 import { OverviewTab } from './components/OverviewTab';
+import { LiveMonitorTab } from './components/LiveMonitorTab';
 import { AppsTab } from './components/AppsTab';
 import { LicensesTab } from './components/LicensesTab';
 import { DevicesTab } from './components/DevicesTab';
@@ -44,6 +45,7 @@ export default function App() {
 
   const VALID_TABS: ActiveTab[] = [
     'overview',
+    'live-monitor',
     'apps',
     'licenses',
     'devices',
@@ -62,6 +64,7 @@ export default function App() {
     const path = window.location.pathname.toLowerCase();
 
     // 1. Pathname matches
+    if (path === '/vcon/live-monitor' || path.startsWith('/vcon/live-monitor/')) return 'live-monitor';
     if (path.includes('/backup')) return 'backup';
     if (path.includes('/site-settings')) return 'site-settings';
     if (path.includes('/settings')) return 'settings';
@@ -430,6 +433,8 @@ export default function App() {
               onNavigateTab={(tab) => handleTabChange(tab)}
             />
           )}
+
+          {activeTab === 'live-monitor' && <LiveMonitorTab />}
 
           {activeTab === 'apps' && (
             <AppsTab key={`apps-${refreshKey}`} />
