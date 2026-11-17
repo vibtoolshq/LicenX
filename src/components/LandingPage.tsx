@@ -32,6 +32,7 @@ import {
 import React, { useEffect, useState } from 'react';
 import { api } from '../services/apiClient';
 import { DEFAULT_SITE_SETTINGS, SiteSettings } from '../types';
+import { PublicHeader } from './PublicHeader';
 
 interface QuickCheckResult {
   status: string;
@@ -99,7 +100,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({ siteSettings: propSite
   const [copiedHwid, setCopiedHwid] = useState<string | null>(null);
 
   // Logo Error Fallback States
-  const [navLogoError, setNavLogoError] = useState(false);
   const [heroLogoError, setHeroLogoError] = useState(false);
 
   const handleCopyLicenseKey = (key: string) => {
@@ -124,7 +124,6 @@ export const LandingPage: React.FC<LandingPageProps> = ({ siteSettings: propSite
   }, [propSiteSettings]);
 
   useEffect(() => {
-    setNavLogoError(false);
     setHeroLogoError(false);
   }, [siteSettings.logoUrl]);
 
@@ -380,52 +379,8 @@ export const LandingPage: React.FC<LandingPageProps> = ({ siteSettings: propSite
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-300 flex flex-col font-mono text-xs selection:bg-indigo-600/20">
-      {/* 1. Header: Logo, SiteName & Buy License CTA Button */}
-      <header className="border-b border-slate-800/80 bg-slate-950/90 backdrop-blur-md sticky top-0 z-30">
-        <div className="max-w-2xl mx-auto px-3.5 h-12 flex items-center justify-between">
-          {/* Logo & Site Name */}
-          <div className="flex items-center gap-2">
-            {siteSettings.logoUrl && !navLogoError ? (
-              <img
-                src={siteSettings.logoUrl}
-                alt={siteSettings.siteName || 'Logo'}
-                className="w-6 h-6 object-contain rounded border border-slate-800 bg-slate-900"
-                onError={() => setNavLogoError(true)}
-              />
-            ) : (
-              <div className="w-6 h-6 rounded bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-indigo-400/90">
-                <ShieldCheck className="w-3.5 h-3.5" />
-              </div>
-            )}
-            <span className="font-semibold text-xs tracking-wide text-slate-200">
-              {siteSettings.siteName || 'LicenX'}
-            </span>
-          </div>
-
-          {/* Right Side: Navigation & Buy License CTA Button */}
-          <div className="flex items-center gap-3">
-            <a
-              href="https://html.vibid.my/"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 text-[11px] font-medium text-slate-300 hover:text-indigo-400 transition-colors"
-            >
-              <span>Free HTML</span>
-              <ExternalLink className="w-2.5 h-2.5 opacity-70" />
-            </a>
-
-            <a
-              href={siteSettings.buyLicenseUrl || '#'}
-              target={siteSettings.buyLicenseUrl && siteSettings.buyLicenseUrl !== '#' ? '_blank' : undefined}
-              rel="noopener noreferrer"
-              className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-600/90 hover:bg-indigo-600 active:bg-indigo-700 text-slate-100 font-medium text-[11px] transition-colors shadow-sm"
-            >
-              <span>Buy License</span>
-              <ExternalLink className="w-2.5 h-2.5 opacity-80" />
-            </a>
-          </div>
-        </div>
-      </header>
+      {/* Public header: published navigation, brand and canonical Buy License CTA */}
+      <PublicHeader siteSettings={siteSettings} />
 
       {/* Announcement / Notice Banner */}
       {siteSettings.noticeBannerEnabled && siteSettings.noticeBanner && (

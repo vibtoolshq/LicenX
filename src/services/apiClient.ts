@@ -13,6 +13,9 @@ import {
   R2Config,
   FullBackupStatus,
   ServerDiagnosticsReport,
+  PublicCatalogAdmin,
+  PublicCatalogPublished,
+  PublicCatalogUpdate,
   BackupAccount,
   FullBackupSchedule,
   FullBackupJob,
@@ -809,6 +812,14 @@ export const api = {
       { method: "POST" },
     );
   },
+
+  // PN-01 Phase-01: read-only public list and authenticated versioned Admin editor APIs.
+  getPublicCatalog: () => request<PublicCatalogPublished>("/api/public/site-catalog"),
+  getAdminPublicCatalog: () => request<PublicCatalogAdmin>("/api/admin/public-catalog"),
+  updateAdminPublicCatalog: (data: PublicCatalogUpdate) =>
+    request<PublicCatalogAdmin>("/api/admin/public-catalog", {
+      method: "PUT", body: JSON.stringify(data),
+    }),
 
   // Site Settings & Branding
   getPublicSiteSettings: async (force = false) => {

@@ -55,6 +55,8 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
     profile: 'Admin Profile',
     'admin-apis': 'Admin APIs Hub',
     'site-settings': 'Site Settings',
+    'public-nav': 'Public Nav Menu',
+    'public-tools': 'Public Tools',
     backup: 'Backup & Recovery',
     settings: 'System Settings',
   };

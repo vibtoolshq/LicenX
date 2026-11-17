@@ -19,10 +19,13 @@ import { SiteSettingsTab } from './components/SiteSettingsTab';
 import { SettingsTab } from './components/SettingsTab';
 import { BackupTab } from './components/BackupTab';
 import { ServerDiagnosticsTab } from './components/ServerDiagnosticsTab';
+import { PublicNavMenuTab } from './components/PublicNavMenuTab';
+import { PublicToolsTab } from './components/PublicToolsTab';
 import { CreateLicenseModal } from './components/CreateLicenseModal';
 import { BulkLicenseModal } from './components/BulkLicenseModal';
 import { ManageDevicesModal } from './components/ManageDevicesModal';
 import { LandingPage } from './components/LandingPage';
+import { PublicToolsPage } from './components/PublicToolsPage';
 import { NotFoundPage } from './components/NotFoundPage';
 import { SiteSettings, DEFAULT_SITE_SETTINGS } from './types';
 import { Loader2 } from 'lucide-react';
@@ -37,6 +40,7 @@ export default function App() {
     currentPath === '/index.html' ||
     currentPath === '/home' ||
     currentPath === '/check';
+  const isPublicToolsPath = currentPath === '/tools' || currentPath === '/tools/';
 
   const [setupStatus, setSetupStatus] = useState<SetupStatus | null>(null);
   const [loading, setLoading] = useState(true);
@@ -57,6 +61,8 @@ export default function App() {
     'profile',
     'admin-apis',
     'site-settings',
+    'public-nav',
+    'public-tools',
     'backup',
     'settings',
   ];
@@ -66,6 +72,8 @@ export default function App() {
     const path = window.location.pathname.toLowerCase();
 
     // 1. Pathname matches
+    if (path === '/vcon/public-nav' || path.startsWith('/vcon/public-nav/')) return 'public-nav';
+    if (path === '/vcon/public-tools' || path.startsWith('/vcon/public-tools/')) return 'public-tools';
     if (path === '/vcon/live-monitor' || path.startsWith('/vcon/live-monitor/')) return 'live-monitor';
     if (path === '/vcon/server' || path.startsWith('/vcon/server/')) return 'server';
     if (path.includes('/backup')) return 'backup';
@@ -316,8 +324,8 @@ export default function App() {
     );
   }
 
-  // User 404 Route -> Any non-admin path that is not the public home
-  if (!isAdminRoute && !isPublicHome) {
+  // User 404 Route -> all previous unknown public URLs still show NotFound.
+  if (!isAdminRoute && !isPublicHome && !isPublicToolsPath) {
     return (
       <NotFoundPage
         currentPath={currentPath}
@@ -328,6 +336,11 @@ export default function App() {
         siteSettings={siteSettings}
       />
     );
+  }
+
+  // Published public Tools directory; no Admin authentication required for reading.
+  if (!isAdminRoute && isPublicToolsPath) {
+    return <PublicToolsPage siteSettings={siteSettings} />;
   }
 
   // Root Public URL -> Landing Page
@@ -482,6 +495,8 @@ export default function App() {
 
           {activeTab === 'backup' && <BackupTab />}
           {activeTab === 'server' && <ServerDiagnosticsTab />}
+          {activeTab === 'public-nav' && <PublicNavMenuTab />}
+          {activeTab === 'public-tools' && <PublicToolsTab />}
           {activeTab === 'settings' && (
             <SettingsTab
               publicKeyPem={publicKeyPem}

@@ -60,6 +60,8 @@ import {
 import { isPublicAccessEnabled } from "./publicAccessSettings.js";
 import { R2Config, testR2Connection } from "./r2.js";
 import { runServerDiagnostics } from "./serverDiagnostics.js";
+import { PublicCatalogError, publicSiteSettingsProjection, readAdminPublicCatalog,
+  readPublishedPublicCatalog, saveExistingSiteSettings, updateAdminPublicCatalog } from "./publicCatalog.js";
 import {
   clearUserControlPinAttempts,
   getUserControlPinRateLimit,
@@ -3183,9 +3185,19 @@ apiRouter.get("/public/site-settings", async (req: Request, res: Response) => {
     }
 
     res.setHeader("Cache-Control", "no-cache, no-store, must-revalidate");
-    res.json(siteSettings);
+    res.json(publicSiteSettingsProjection(siteSettings));
   } catch (error: any) {
     res.status(500).json({ error: SAFE_SERVER_ERROR });
+  }
+});
+
+// PN-01: public GET exposes enabled link/card fields only, never drafts or site settings.
+apiRouter.get("/public/site-catalog", async (_req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    res.json(await readPublishedPublicCatalog(getDbClient()));
+  } catch {
+    res.status(503).json({ code: "CATALOG_UNAVAILABLE" });
   }
 });
 
@@ -3236,38 +3248,40 @@ apiRouter.post(
   requireAdminAuth,
   async (req: Request, res: Response) => {
     try {
-      const db = getDbClient();
-      const configRes = await db.execute(
-        "SELECT site_settings_json FROM admin_config LIMIT 1",
-      );
-      let existingSettings = { ...DEFAULT_SITE_SETTINGS };
-
-      if (configRes.rows.length > 0 && configRes.rows[0].site_settings_json) {
-        try {
-          existingSettings = {
-            ...existingSettings,
-            ...JSON.parse(configRes.rows[0].site_settings_json as string),
-          };
-        } catch {}
-      }
-
-      const updatedSettings = {
-        ...existingSettings,
-        ...req.body,
-      };
-
-      const jsonStr = JSON.stringify(updatedSettings);
-      await db.execute({
-        sql: "UPDATE admin_config SET site_settings_json = ?, updated_at = ?",
-        args: [jsonStr, Date.now()],
-      });
-
+      const updatedSettings = await saveExistingSiteSettings(getDbClient(), req.body, DEFAULT_SITE_SETTINGS);
       res.json({ success: true, siteSettings: updatedSettings });
-    } catch (error: any) {
-      res.status(500).json({ error: SAFE_SERVER_ERROR });
+    } catch (error: unknown) {
+      if (error instanceof PublicCatalogError) {
+        res.status(error.status).json({ code: error.code });
+      } else {
+        res.status(500).json({ error: SAFE_SERVER_ERROR });
+      }
     }
   },
 );
+
+// PN-01: Admin view includes disabled entries; PUT is versioned and protected by existing CSRF.
+apiRouter.get("/admin/public-catalog", requireAdminAuth, async (_req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    res.json(await readAdminPublicCatalog(getDbClient()));
+  } catch {
+    res.status(503).json({ code: "CATALOG_UNAVAILABLE" });
+  }
+});
+
+apiRouter.put("/admin/public-catalog", requireAdminAuth, async (req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    res.json(await updateAdminPublicCatalog(getDbClient(), req.body));
+  } catch (error: unknown) {
+    if (error instanceof PublicCatalogError) {
+      res.status(error.status).json({ code: error.code });
+    } else {
+      res.status(503).json({ code: "CATALOG_UNAVAILABLE" });
+    }
+  }
+});
 
 // Admin branding upload through the configured storage provider.
 apiRouter.post("/settings/upload", requireAdminAuth, async (req: Request, res: Response) => {

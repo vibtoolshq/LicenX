@@ -179,6 +179,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
         },
       ],
     },
+    {
+      id: 'public',
+      label: 'Public',
+      icon: <Globe className="w-3.5 h-3.5" />,
+      items: [
+        {
+          id: 'public-nav',
+          label: 'Nav Menu',
+          icon: <Globe className="w-3.5 h-3.5" />,
+        },
+        {
+          id: 'public-tools',
+          label: 'Tools',
+          icon: <AppWindow className="w-3.5 h-3.5" />,
+        },
+      ],
+    },
   ];
 
   const [openGroups, setOpenGroups] = useState<Record<string, boolean>>(() => {

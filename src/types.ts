@@ -233,6 +233,8 @@ export type ActiveTab =
   | "profile"
   | "admin-apis"
   | "site-settings"
+  | "public-nav"
+  | "public-tools"
   | "backup"
   | "settings";
 
@@ -268,6 +270,37 @@ export interface CreatedAdminApiKey {
   status: string;
   created_at: number;
 }
+
+/** PN-01 Phase-01: validated public navigation metadata (the CTA URL remains SiteSettings.buyLicenseUrl). */
+export interface PublicNavItem {
+  id: string;
+  label: string;
+  href: string;
+  kind: "link" | "cta";
+  enabled: boolean;
+  target: "same" | "new";
+  order: number;
+}
+export interface PublicToolItem {
+  id: string;
+  name: string;
+  description: string;
+  url: string;
+  iconUrl: string;
+  enabled: boolean;
+  order: number;
+}
+export interface PublicCatalogPublished {
+  navigation: PublicNavItem[];
+  tools: PublicToolItem[];
+}
+export interface PublicCatalogAdmin extends PublicCatalogPublished {
+  version: string;
+  buyLicenseUrl: string;
+}
+export type PublicCatalogUpdate =
+  | { version: string; section: "navigation"; items: PublicNavItem[] }
+  | { version: string; section: "tools"; items: PublicToolItem[] };
 
 export interface SiteSettings {
   siteName: string;

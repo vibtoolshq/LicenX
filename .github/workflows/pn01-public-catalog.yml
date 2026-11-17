@@ -1,0 +1,65 @@
+name: PN-01 Public Navigation and Tools acceptance
+
+# Source-only CI. No SSH, production deployment, DB migration or privileged secrets.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/pn01-public-catalog.yml'
+      - 'src/components/LandingPage.tsx'
+      - 'src/components/PublicHeader.tsx'
+      - 'src/components/PublicToolsPage.tsx'
+      - 'src/components/PublicNavMenuTab.tsx'
+      - 'src/components/PublicToolsTab.tsx'
+      - 'src/App.tsx'
+      - 'src/components/Sidebar.tsx'
+      - 'src/components/HeaderBar.tsx'
+      - 'src/services/apiClient.ts'
+      - 'src/server/api.ts'
+      - 'src/server/publicCatalog.ts'
+      - 'src/types.ts'
+      - 'tests/publicCatalogApi.test.ts'
+      - 'tests/publicCatalogUi.test.ts'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pn01-public-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  pn01-focused-acceptance:
+    name: PN-01 public catalog API, UI and license regression
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout reviewed commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: TypeScript
+        run: npm run lint
+
+      - name: PN-01 API/UX, Site Settings and public license regression
+        run: node --import tsx --test tests/publicCatalogApi.test.ts tests/publicCatalogUi.test.ts tests/siteSettingsSync.test.ts tests/publicAccessRoutes.test.ts
+
+      - name: Build production client and server
+        run: npm run build
+
+      - name: CI acceptance receipt
+        run: |
+          echo "PN-01 CI: TypeScript, P01/P02/P03 tests and production bundle PASS"
+          echo "SHA: ${GITHUB_SHA}"
+          echo "Production: NOT ACCESSED OR DEPLOYED"
