@@ -230,6 +230,116 @@ try {
   check("expired WSS bootstrap proof denied",
     await rawUpgrade({ cookie: expiringHeader }) === 401);
 
+  // LM-RG01: Live Monitor acceptance on the SAME isolated PostgreSQL/Chromium
+  // fixture; these are authenticated read-only requests, not license mutations.
+  const anonMonitor = await setupClient.get("/api/monitoring/devices?app_id=ci_e2e_app_a");
+  check("LM-RG01 unauthenticated device monitoring denied", anonMonitor.status() === 401);
+  await navigate(pageA, "Live Monitor");
+  await poll(() => new URL(pageA.url()).pathname === "/vcon/live-monitor" &&
+    pageA.getByText("Live Client Monitor").isVisible(), "Live Monitor route and header");
+  const appSection = pageA.locator('main section[aria-label="Application connections"]');
+  await poll(async () => (await appSection.locator("tbody tr").count()) === 10 &&
+    (await appSection.innerText()).includes("CI E2E Alpha") &&
+    (await appSection.innerText()).includes("CI E2E Beta"),
+  "Live Monitor scoped 10-application first page", 25000);
+  check("LM-RG01 global cards preserve separate WS/bound/stale semantics",
+    await pageA.getByText("WS Connected", { exact: true }).count() === 1 &&
+    await pageA.getByText("WS Sockets", { exact: true }).count() === 1 &&
+    await pageA.getByText("Bound Active", { exact: true }).count() === 1 &&
+    await pageA.getByText("Stale Leases", { exact: true }).count() === 1);
+  check("LM-RG01 app table uses server-authoritative total 152",
+    (await appSection.innerText()).includes("Applications: 152"));
+  const alpha = appSection.locator("tbody tr").filter({ hasText: "CI E2E Alpha" });
+  const beta = appSection.locator("tbody tr").filter({ hasText: "CI E2E Beta" });
+  check("LM-RG01 per-app bound totals are not combined with global count",
+    (await alpha.innerText()).includes("149") && (await beta.innerText()).includes("1"));
+
+  // Real PostgreSQL GET route, real selected-app Chromium UI, no secrets.
+  const alphaApi = await ctxA.request.get(origin +
+    "/api/monitoring/devices?app_id=ci_e2e_app_a&limit=25&offset=0");
+  check("LM-RG01 real PostgreSQL app-scoped endpoint",
+    alphaApi.status() === 200 && (await alphaApi.json()).total === 149);
+  await alpha.getByRole("button", { name: "Inspect CI E2E Alpha devices" }).click();
+  const inspector = pageA.locator('main [aria-label="Selected application devices"]');
+  await poll(async () => (await inspector.locator("tbody tr").count()) === 25 &&
+    (await inspector.innerText()).includes("Matching active devices: 149"),
+  "LM-RG01 real PostgreSQL inspector first 25 devices", 16000);
+  check("LM-RG01 inspector does not expose keys/HWIDs or cross-app devices",
+    !(await inspector.innerText()).includes("ci-e2e-hwid") &&
+    !(await inspector.innerText()).includes("CI-E2E-LICENSE") &&
+    !(await inspector.innerText()).includes("ci_e2e_device_149"));
+  for (let page = 2; page <= 6; page++) {
+    await inspector.getByRole("button", { name: "Next" }).click();
+    await poll(async () => (await inspector.innerText()).includes("Page " + page + " / 6") &&
+      await inspector.locator("tbody tr").count() === (page === 6 ? 24 : 25),
+    "LM-RG01 inspected page " + page + " device row count");
+  }
+  check("LM-RG01 149 devices paginated 25/25/25/25/25/24", true);
+  await inspector.getByRole("button", { name: "Close device inspector" }).click();
+  await beta.getByRole("button", { name: "Inspect CI E2E Beta devices" }).click();
+  await poll(async () => (await inspector.locator("tbody tr").count()) === 1 &&
+    (await inspector.innerText()).includes("ci_e2e_device_149"),
+  "LM-RG01 Beta app isolated device inspector");
+  check("LM-RG01 Beta inspector does not reveal Alpha devices",
+    !(await inspector.innerText()).includes("ci_e2e_device_148"));
+  await inspector.getByRole("button", { name: "Close device inspector" }).click();
+
+  await pageA.locator("#live-monitor-filter").selectOption("inactive");
+  await poll(async () => (await appSection.innerText()).includes("Applications: 30") &&
+    (await appSection.locator("tbody tr").count()) === 10,
+  "LM-RG01 inactive app status filter", 18000);
+  await appSection.getByRole("button", { name: "Next" }).click();
+  await poll(async () => (await appSection.innerText()).includes("Page 2 / 3"),
+  "LM-RG01 filtered applications paginate");
+  await pageA.locator("#live-monitor-filter").selectOption("all");
+  await poll(async () => (await appSection.innerText()).includes("Applications: 152") &&
+    (await appSection.innerText()).includes("CI E2E Alpha"),
+  "LM-RG01 all-app filter resets page");
+
+  // Simulate a disabled SDK transport at the Browser HTTP snapshot boundary.
+  // This is CI-only network mocking and cannot disable any real server/client.
+  await pageA.route("**/api/realtime/presence?*", async route => {
+    const appId = new URL(route.request().url()).searchParams.get("app_id");
+    await route.fulfill({ status: 200, contentType: "application/json",
+      body: JSON.stringify({
+        scope: appId, transportEnabled: false, connectedNow: 0,
+        activeSockets: 0, boundActive: appId ? 1 : 150, staleBound: 0,
+        connectedDeviceIds: [], observedAt: Date.now()
+      })
+    });
+  });
+  await navigate(pageA, "Applications");
+  await navigate(pageA, "Live Monitor");
+  await poll(async () => (await pageA.locator("main").innerText()).includes("SDK WebSocket transport disabled") &&
+    (await appSection.innerText()).includes("WS disabled"),
+  "LM-RG01 browser reports disabled WS as Unknown", 24000);
+  check("LM-RG01 disabled client WS never mislabels online device total",
+    (await pageA.getByText("WS Connected", { exact: true }).locator("..").locator("..").innerText())
+      .includes("Unknown"));
+  await pageA.unroute("**/api/realtime/presence?*");
+  await navigate(pageA, "Applications");
+  await navigate(pageA, "Live Monitor");
+  await poll(async () => (await appSection.innerText()).includes("CI E2E Alpha"),
+    "LM-RG01 browser restores trusted live monitor snapshots");
+
+  // A scoped response older than 60s is unavailable, never a confirmed No WS.
+  await pageA.route("**/api/monitoring/devices?*", async route => {
+    const requested = new URL(route.request().url()).searchParams;
+    await route.fulfill({ status: 200, contentType: "application/json",
+      body: JSON.stringify({
+        appId: requested.get("app_id"), observedAt: Date.now() - 65_000,
+        total: 1, limit: Number(requested.get("limit") ?? 25),
+        offset: Number(requested.get("offset") ?? 0), devices: []
+      })
+    });
+  });
+  await appSection.getByRole("button", { name: "Inspect CI E2E Alpha devices" }).click();
+  await poll(async () => (await inspector.innerText()).includes("Device snapshot unavailable or stale"),
+    "LM-RG01 stale inspector fails safe");
+  await inspector.getByRole("button", { name: "Close device inspector" }).click();
+  await pageA.unroute("**/api/monitoring/devices?*");
+  await pageA.screenshot({ path: "ci-admin-evidence/live-monitor-apps.png" });
+
   await navigate(pageA, "HWID Locks");
   await poll(async () => (await pageA.locator("main").innerText()).includes("Total Bound: 150"),
     "150 devices visible in browser");
@@ -521,6 +631,11 @@ try {
     headers: { authorization: "Bearer " + firstSession.value }
   });
   check("credential rotation rejects old JWT", oldJwtAccess.status() === 401);
+  const expiredMonitorAccess = await setupClient.get("/api/monitoring/devices?app_id=ci_e2e_app_a", {
+    headers: { authorization: "Bearer " + firstSession.value }
+  });
+  check("LM-RG01 expired Admin session rejects new monitor endpoint",
+    expiredMonitorAccess.status() === 401);
   const freshJwtAccess = await ctxA.request.get(origin + "/api/auth/me");
   check("credential rotation preserves new authorized HTTP session", freshJwtAccess.status() === 200);
   await poll(async () => (await pageA.locator("main").innerText()).includes("Session expired"),

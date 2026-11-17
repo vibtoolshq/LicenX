@@ -190,3 +190,118 @@ test("LM-P03: real read-only admin HTTP endpoint scopes, paginates, redacts and 
     }
   }
 });
+
+
+/**
+ * LM-RG01: only the disposable GitHub-Compose PostgreSQL identity is accepted.
+ * This separate process runs after synthetic browser bootstrap. Never point at
+ * a developer's PostgreSQL or a real VPS, even when someone sets the env flag.
+ */
+test("LM-RG01: disposable PostgreSQL monitoring endpoint enforces auth, paging, isolation and safe 503", {
+  skip: process.env.LM_RG01_PG_ONLY !== "1",
+}, async () => {
+  const uri = process.env.DATABASE_URL ?? "";
+  let parsed: URL;
+  try { parsed = new URL(uri); } catch { throw Error("Missing CI-only PostgreSQL URL"); }
+  if (process.env.GITHUB_ACTIONS !== "true" ||
+      process.env.LICENX_ADMIN_E2E_CI !== "1" ||
+      !/^licenx_admin_ci_[0-9]+$/.test(process.env.COMPOSE_PROJECT_NAME ?? "") ||
+      process.env.DATABASE_PROVIDER !== "postgres" ||
+      !["postgres:", "postgresql:"].includes(parsed.protocol) ||
+      parsed.hostname !== "postgres" || parsed.port !== "5432" ||
+      parsed.pathname !== "/licenx_ci") {
+    throw Error("Refusing LM-RG01 database test outside disposable CI PostgreSQL");
+  }
+
+  const db = getDbClient();
+  let http: ReturnType<typeof createServer> | undefined;
+  setRealtimePresenceEnabled(false);
+  try {
+    // Real server state from the CI-owned PostgreSQL instance; never modify fixture rows.
+    const config = await db.execute("SELECT username, jwt_secret FROM admin_config LIMIT 1");
+    assert.equal(config.rows.length, 1, "Browser setup must have initialized CI admin");
+    const username = String(config.rows[0].username);
+    const secret = String(config.rows[0].jwt_secret);
+    const ts = Math.floor(Date.now() / 1000);
+    const valid = createSessionToken({ username, exp: ts + 600 }, secret);
+    const expired = createSessionToken({ username, exp: ts - 60 }, secret);
+    const header = { authorization: "Bearer " + valid };
+    const app = express();
+    app.use(express.json());
+    app.use("/api", apiRouter);
+    http = createServer(app);
+    await new Promise<void>(resolve => http!.listen(0, "127.0.0.1", resolve));
+    const address = http.address();
+    if (!address || typeof address === "string") throw Error("No CI listener");
+    const base = "http://127.0.0.1:" + address.port;
+    const uriFor = (query: string) => base + "/api/monitoring/devices" + query;
+
+    assert.equal((await fetch(uriFor("?app_id=ci_e2e_app_a"))).status, 401);
+    assert.equal((await fetch(uriFor("?app_id=ci_e2e_app_a"), {
+      headers: { authorization: "Bearer " + expired },
+    })).status, 401, "expired admin token must be rejected");
+    assert.equal((await fetch(uriFor("?app_id=ci_e2e_app_a&limit=26"), { headers: header })).status, 400);
+    assert.equal((await fetch(uriFor("?app_id=ci_e2e_app_a&offset=-1"), { headers: header })).status, 400);
+    assert.equal((await fetch(uriFor("?app_id=ci_e2e_app_a%2F..%2Fci_e2e_app_b"), { headers: header })).status, 400);
+
+    const first = await fetch(uriFor("?app_id=ci_e2e_app_a&limit=25&offset=0"), { headers: header });
+    assert.equal(first.status, 200, "PostgreSQL must execute the actual app-scoped SQL");
+    assert.equal(first.headers.get("cache-control"), "no-store");
+    const firstData = await first.json() as MonitoringDevicesResponse;
+    assert.equal(firstData.total, 149);
+    assert.equal(firstData.devices.length, 25);
+    assert.ok(firstData.devices.every(row => row.id.startsWith("ci_e2e_device_") &&
+      row.id !== "ci_e2e_device_149"));
+    assert.deepEqual(Object.keys(firstData.devices[0]).sort(),
+      ["deviceName", "id", "lastPingAt", "wsConnected", "leaseSignal"].sort());
+    assert.doesNotMatch(JSON.stringify(firstData),
+      /ci-e2e-hwid|CI-E2E-LICENSE|ci-only-no-real-key|password|token|ip_address/i);
+
+    for (const [offset, count] of [[25, 25], [50, 25], [75, 25], [100, 25], [125, 24], [150, 0]]) {
+      const response = await fetch(uriFor("?app_id=ci_e2e_app_a&limit=25&offset=" + offset), { headers: header });
+      assert.equal(response.status, 200);
+      const data = await response.json() as MonitoringDevicesResponse;
+      assert.equal(data.total, 149);
+      assert.equal(data.devices.length, count);
+      assert.ok(data.devices.every(row => row.id !== "ci_e2e_device_149"));
+    }
+    const b = await fetch(uriFor("?app_id=ci_e2e_app_b"), { headers: header });
+    assert.equal(b.status, 200);
+    const second = await b.json() as MonitoringDevicesResponse;
+    assert.equal(second.total, 1);
+    assert.deepEqual(second.devices.map(row => row.id), ["ci_e2e_device_149"]);
+    const empty = await fetch(uriFor("?app_id=ci_e2e_app_000"), { headers: header });
+    assert.equal(empty.status, 200);
+    assert.equal((await empty.json() as MonitoringDevicesResponse).total, 0);
+    assert.equal(firstData.devices[0].wsConnected, null, "disabled SDK transport must report WS Unknown");
+    assert.equal(firstData.devices[0].leaseSignal, "recent");
+
+    // Deterministic test-only failure injection, isolated to this process and query.
+    // Admin authentication uses a different SELECT; no DB, schema, container or credential mutation.
+    const mutable = db as unknown as { execute: (...args: any[]) => Promise<any> };
+    const original = mutable.execute;
+    mutable.execute = async (...args: any[]) => {
+      const sql = typeof args[0] === "string" ? args[0] : String(args[0]?.sql ?? "");
+      if (sql.startsWith("SELECT COUNT(*) AS total FROM devices d JOIN licenses l")) {
+        throw Error("DISPOSABLE_CI_MONITORING_QUERY_FAILURE");
+      }
+      return original.apply(db, args);
+    };
+    try {
+      const failure = await fetch(uriFor("?app_id=ci_e2e_app_a"), { headers: header });
+      assert.equal(failure.status, 503);
+      assert.deepEqual(await failure.json(), { code: "MONITORING_DEVICES_UNAVAILABLE" });
+    } finally {
+      mutable.execute = original;
+    }
+    const legacyPresence = await fetch(base + "/api/realtime/presence?app_id=ci_e2e_app_b", { headers: header });
+    assert.equal(legacyPresence.status, 200);
+    const legacyDevices = await fetch(base + "/api/devices?limit=1", { headers: header });
+    assert.equal(legacyDevices.status, 200);
+    assert.ok(Array.isArray((await legacyDevices.json() as { devices: unknown[] }).devices));
+  } finally {
+    setRealtimePresenceEnabled(false);
+    if (http?.listening) await new Promise<void>(resolve => http!.close(() => resolve()));
+    await db.close();
+  }
+});

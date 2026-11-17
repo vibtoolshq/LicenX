@@ -8,6 +8,13 @@ on:
     paths:
       - '.github/workflows/admin-realtime-e2e.yml'
       - 'tests/e2e/**'
+      - 'tests/liveMonitorApi.test.ts'
+      - 'tests/liveMonitorUi.test.ts'
+      - 'src/App.tsx'
+      - 'src/components/LiveMonitorTab.tsx'
+      - 'src/server/api.ts'
+      - 'src/services/apiClient.ts'
+      - 'src/types.ts'
       - 'server.ts'
       - 'src/server/realtime/**'
       - 'src/services/adminRealtime.ts'
@@ -103,6 +110,28 @@ jobs:
         run: |
           set -euo pipefail
           node tests/e2e/admin-browser.mjs
+
+      - name: LM-RG01 verify new monitor endpoint on disposable PostgreSQL only
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_ACTIONS" = "true"
+          test "$LICENX_ADMIN_E2E_CI" = "1"
+          test "$COMPOSE_PROJECT_NAME" = "licenx_admin_ci_${GITHUB_RUN_ID}"
+          test "$DOMAIN" = "localhost"
+          network="${COMPOSE_PROJECT_NAME}_backend"
+          docker network inspect "$network" > /dev/null
+          test -n "$(docker compose ps -q app)"
+          # Same pinned Node image family and already-installed workspace dependencies;
+          # only the CI-created Compose network exposes postgres:5432.
+          docker run --rm --read-only --tmpfs /tmp:rw,nosuid,size=64m \
+            --network "$network" \
+            -v "${GITHUB_WORKSPACE}:/work:ro" -w /work \
+            -e GITHUB_ACTIONS -e LICENX_ADMIN_E2E_CI -e COMPOSE_PROJECT_NAME \
+            -e DATABASE_URL -e DATABASE_PROVIDER=postgres -e NODE_ENV=test \
+            -e LM_RG01_PG_ONLY=1 \
+            node:24.12.0-bookworm-slim \
+            node --import tsx --test --test-name-pattern='LM-RG01:' tests/liveMonitorApi.test.ts
 
       - name: Measure bounded 32 Admin WSS sockets, 33rd rejection and resources
         shell: bash
