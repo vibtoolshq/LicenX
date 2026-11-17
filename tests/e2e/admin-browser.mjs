@@ -232,8 +232,18 @@ try {
 
   // LM-RG01: Live Monitor acceptance on the SAME isolated PostgreSQL/Chromium
   // fixture; these are authenticated read-only requests, not license mutations.
-  const anonMonitor = await setupClient.get("/api/monitoring/devices?app_id=ci_e2e_app_a");
-  check("LM-RG01 unauthenticated device monitoring denied", anonMonitor.status() === 401);
+  // /api/setup/init issues an Admin session cookie to setupClient; use a
+  // brand-new context so this negative probe is genuinely unauthenticated.
+  const anonymousMonitorContext = await request.newContext({
+    baseURL: origin, ignoreHTTPSErrors: true
+  });
+  try {
+    const anonMonitor = await anonymousMonitorContext.get(
+      "/api/monitoring/devices?app_id=ci_e2e_app_a");
+    check("LM-RG01 unauthenticated device monitoring denied", anonMonitor.status() === 401);
+  } finally {
+    await anonymousMonitorContext.dispose();
+  }
   await navigate(pageA, "Live Monitor");
   await poll(() => new URL(pageA.url()).pathname === "/vcon/live-monitor" &&
     pageA.getByText("Live Client Monitor").isVisible(), "Live Monitor route and header");
