@@ -3235,7 +3235,7 @@ apiRouter.get(
         }
       }
 
-      res.json({ siteSettings, r2Configured, ...storageStatus(configRes.rows[0]?.r2_config_json) });
+      res.json({ siteSettings: publicSiteSettingsProjection(siteSettings), r2Configured, ...storageStatus(configRes.rows[0]?.r2_config_json) });
     } catch (error: any) {
       res.status(500).json({ error: SAFE_SERVER_ERROR });
     }
@@ -3249,7 +3249,7 @@ apiRouter.post(
   async (req: Request, res: Response) => {
     try {
       const updatedSettings = await saveExistingSiteSettings(getDbClient(), req.body, DEFAULT_SITE_SETTINGS);
-      res.json({ success: true, siteSettings: updatedSettings });
+      res.json({ success: true, siteSettings: publicSiteSettingsProjection(updatedSettings) });
     } catch (error: unknown) {
       if (error instanceof PublicCatalogError) {
         res.status(error.status).json({ code: error.code });

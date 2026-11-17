@@ -137,14 +137,37 @@ test("PN-01 P01: real endpoints, CSRF, safe views, atomic edits and old Site Set
     assert.equal(savedTools.navigation.length, 3);
     assert.equal((await body(await call("/api/public/site-catalog"))).tools.length, 1);
 
-    const siteUpdate = await call("/api/settings/site", "POST",
-      { siteTagline: "Preserved after catalog creation", buyLicenseUrl: "https://example.org/new-buy" }, bearer());
+    // Real Admin flow: a full GET-derived Site Settings payload must be safe to POST
+    // even after Nav Menu and Tools have been persisted in site_settings_json.
+    const adminSiteGet = await call("/api/settings/site", "GET", undefined, bearer());
+    assert.equal(adminSiteGet.status, 200);
+    const adminSite = (await body(adminSiteGet)).siteSettings;
+    assert.equal(adminSite.siteName, "Operator Brand");
+    assert.equal(adminSite.legacyCustomKey, "existing-extension");
+    assert.equal(adminSite.publicNavigation, undefined);
+    assert.equal(adminSite.publicTools, undefined);
+    const beforeSiteSave = JSON.parse(String(
+      (await db.execute("SELECT site_settings_json FROM admin_config")).rows[0].site_settings_json,
+    ));
+
+    const siteUpdate = await call("/api/settings/site", "POST", {
+      ...adminSite,
+      siteTagline: "Preserved after catalog creation",
+      buyLicenseUrl: "https://example.org/new-buy",
+    }, bearer());
     assert.equal(siteUpdate.status, 200);
     const applied = await body(siteUpdate);
     assert.equal(applied.siteSettings.siteTagline, "Preserved after catalog creation");
     assert.equal(applied.siteSettings.buyLicenseUrl, "https://example.org/new-buy");
-    assert.equal(applied.siteSettings.publicTools.length, 2);
-    assert.equal(applied.siteSettings.publicNavigation.length, 3);
+    assert.equal(applied.siteSettings.legacyCustomKey, "existing-extension");
+    assert.equal(applied.siteSettings.publicTools, undefined);
+    assert.equal(applied.siteSettings.publicNavigation, undefined);
+    const afterSiteSave = JSON.parse(String(
+      (await db.execute("SELECT site_settings_json FROM admin_config")).rows[0].site_settings_json,
+    ));
+    assert.deepEqual(afterSiteSave.publicTools, beforeSiteSave.publicTools);
+    assert.deepEqual(afterSiteSave.publicNavigation, beforeSiteSave.publicNavigation);
+    assert.equal(afterSiteSave.legacyCustomKey, "existing-extension");
     const fresh = await body(await call("/api/admin/public-catalog", "GET", undefined, bearer())) as PublicCatalogAdmin;
     assert.equal(fresh.navigation.find(item => item.id === "buy-license")?.href, "https://example.org/new-buy");
     assert.equal(fresh.tools[0].name, "Editor");
@@ -158,6 +181,13 @@ test("PN-01 P01: real endpoints, CSRF, safe views, atomic edits and old Site Set
     assert.equal((await body(rejected)).code, "INVALID_CATALOG_ITEM");
     const afterRejected = await body(await call("/api/public/site-settings"));
     assert.equal(afterRejected.siteName, "Operator Brand");
+    const rejectedNav = await call("/api/settings/site", "POST",
+      { publicNavigation: [], siteName: "should-not-save-either" }, bearer());
+    assert.equal(rejectedNav.status, 400);
+    assert.equal((await body(rejectedNav)).code, "INVALID_CATALOG_ITEM");
+    assert.deepEqual(JSON.parse(String(
+      (await db.execute("SELECT site_settings_json FROM admin_config")).rows[0].site_settings_json,
+    )), afterSiteSave);
 
     const csrfWrite = await call("/api/admin/public-catalog", "PUT",
       { version: fresh.version, section: "tools", items: [tool()] },

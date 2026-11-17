@@ -6,11 +6,36 @@ import { renderToStaticMarkup } from 'react-dom/server';
 import { PublicNavMenuTab, nextNavId, reorderNavItems } from '../src/components/PublicNavMenuTab.js';
 import { PublicToolsTab, nextToolId, reorderToolItems, shouldShowToolIcon, toolDraftError } from '../src/components/PublicToolsTab.js';
 import { DEFAULT_SITE_SETTINGS } from '../src/types.js';
+import { toEditableSiteSettingsPayload } from '../src/services/apiClient.js';
 import type { PublicCatalogPublished, PublicNavItem, PublicToolItem } from '../src/types.js';
 import { PublicHeader, publishedHeaderLinks, safePublicHref } from '../src/components/PublicHeader.js';
 import { PublicToolsGrid, PublicToolsPage, publishedToolCards, safePublicToolIcon } from '../src/components/PublicToolsPage.js';
 
 const source = (file: string) => readFileSync(new URL('../' + file, import.meta.url), 'utf8');
+
+test('HF-01: Site Settings payload includes only 17 editable fields and never mutates its source', () => {
+  const input = {
+    ...DEFAULT_SITE_SETTINGS,
+    siteName: 'Updated Portal',
+    publicNavigation: [{ id: 'injected' }],
+    publicTools: [{ id: 'injected' }],
+    legacyCustomKey: 'keep stored, never POST',
+    constructor: 'blocked',
+    prototype: 'blocked',
+  };
+  Object.defineProperty(input, '__proto__', { value: 'blocked', enumerable: true });
+  const before = JSON.stringify(input);
+  const clean = toEditableSiteSettingsPayload(input);
+  assert.deepEqual(Object.keys(clean).sort(), Object.keys(DEFAULT_SITE_SETTINGS).sort());
+  assert.equal(clean.siteName, 'Updated Portal');
+  for (const reserved of ['publicNavigation', 'publicTools', 'legacyCustomKey', 'constructor', 'prototype', '__proto__']) {
+    assert.equal(Object.hasOwn(clean, reserved), false, reserved);
+  }
+  assert.equal(JSON.stringify(input), before);
+  assert.deepEqual(toEditableSiteSettingsPayload({ siteTagline: 'Only this field' }), {
+    siteTagline: 'Only this field',
+  });
+});
 const nav = (id: string, order: number): PublicNavItem => ({
   id, label: id, href: id === 'tools' ? '/tools' : 'https://example.org',
   kind: 'link', enabled: true, target: 'same', order,

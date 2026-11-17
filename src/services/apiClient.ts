@@ -1,5 +1,6 @@
 import { createAdminRealtimeClient } from "./adminRealtime";
 import type { AdminRealtimeChange } from "../types";
+import { DEFAULT_SITE_SETTINGS } from "../types";
 import {
   AdminApiKeyRecord,
   PublicLicenseApiDomain,
@@ -339,6 +340,15 @@ export const adminRealtime = createAdminRealtimeClient({
     return () => document.removeEventListener("visibilitychange", notify);
   },
 });
+
+/** Keep catalog-only and unknown database keys out of Site Settings writes. */
+export function toEditableSiteSettingsPayload(data: Partial<SiteSettings>): Partial<SiteSettings> {
+  return Object.fromEntries(
+    (Object.keys(DEFAULT_SITE_SETTINGS) as (keyof SiteSettings)[])
+      .filter(key => Object.prototype.hasOwnProperty.call(data, key))
+      .map(key => [key, data[key]]),
+  ) as Partial<SiteSettings>;
+}
 
 export const api = {
   // Cache Controller
@@ -879,7 +889,7 @@ export const api = {
       "/api/settings/site",
       {
         method: "POST",
-        body: JSON.stringify(data),
+        body: JSON.stringify(toEditableSiteSettingsPayload(data)),
       },
     );
   },
