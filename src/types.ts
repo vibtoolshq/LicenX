@@ -204,8 +204,25 @@ export interface FullBackupStatus {
   busy: boolean;
 }
 
+/** SD-01: Safe, sanitized, read-only server diagnostic results. */
+export type ServerDiagnosticState = "PASS" | "FAIL" | "WARN" | "SKIPPED";
+export interface ServerDiagnosticsCheck {
+  id: string;
+  label: string;
+  state: ServerDiagnosticState;
+  detail: string;
+  durationMs: number;
+}
+export interface ServerDiagnosticsReport {
+  startedAt: number;
+  finishedAt: number;
+  checks: ServerDiagnosticsCheck[];
+  summary: { pass: number; fail: number; warn: number; skipped: number };
+}
+
 export type ActiveTab =
   | "overview"
+  | "server"
   | "live-monitor"
   | "apps"
   | "licenses"

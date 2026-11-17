@@ -18,6 +18,7 @@ import { AdminApisTab } from './components/AdminApisTab';
 import { SiteSettingsTab } from './components/SiteSettingsTab';
 import { SettingsTab } from './components/SettingsTab';
 import { BackupTab } from './components/BackupTab';
+import { ServerDiagnosticsTab } from './components/ServerDiagnosticsTab';
 import { CreateLicenseModal } from './components/CreateLicenseModal';
 import { BulkLicenseModal } from './components/BulkLicenseModal';
 import { ManageDevicesModal } from './components/ManageDevicesModal';
@@ -46,6 +47,7 @@ export default function App() {
   const VALID_TABS: ActiveTab[] = [
     'overview',
     'live-monitor',
+    'server',
     'apps',
     'licenses',
     'devices',
@@ -65,6 +67,7 @@ export default function App() {
 
     // 1. Pathname matches
     if (path === '/vcon/live-monitor' || path.startsWith('/vcon/live-monitor/')) return 'live-monitor';
+    if (path === '/vcon/server' || path.startsWith('/vcon/server/')) return 'server';
     if (path.includes('/backup')) return 'backup';
     if (path.includes('/site-settings')) return 'site-settings';
     if (path.includes('/settings')) return 'settings';
@@ -478,6 +481,7 @@ export default function App() {
           )}
 
           {activeTab === 'backup' && <BackupTab />}
+          {activeTab === 'server' && <ServerDiagnosticsTab />}
           {activeTab === 'settings' && (
             <SettingsTab
               publicKeyPem={publicKeyPem}

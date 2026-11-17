@@ -12,6 +12,7 @@ import {
   R2Backup,
   R2Config,
   FullBackupStatus,
+  ServerDiagnosticsReport,
   BackupAccount,
   FullBackupSchedule,
   FullBackupJob,
@@ -991,6 +992,11 @@ export const api = {
     window.URL.revokeObjectURL(url);
     document.body.removeChild(a);
   },
+
+  // SD-01: one-click, Admin-CSRF authenticated read-only diagnostic run.
+  runServerDiagnostics: () => request<ServerDiagnosticsReport>('/api/admin/server-diagnostics/run', {
+    method: 'POST', body: '{}',
+  }),
 
   // Full-system Backup & Recovery (PostgreSQL + local application storage).
   getFullBackupStatus: () => request<FullBackupStatus>('/api/backup/status'),

@@ -59,6 +59,7 @@ import {
 } from "./licensePolicy.js";
 import { isPublicAccessEnabled } from "./publicAccessSettings.js";
 import { R2Config, testR2Connection } from "./r2.js";
+import { runServerDiagnostics } from "./serverDiagnostics.js";
 import {
   clearUserControlPinAttempts,
   getUserControlPinRateLimit,
@@ -68,6 +69,24 @@ const archiver = (archiverModule as any).default || archiverModule;
 const SAFE_SERVER_ERROR = "Internal server error";
 
 export const apiRouter = Router();
+
+// SD-01: fixed probes only; protected by existing Admin session and CSRF middleware.
+apiRouter.post("/admin/server-diagnostics/run", requireAdminAuth, async (req: Request, res: Response) => {
+  res.set("Cache-Control", "no-store");
+  if ((req.body !== undefined && (typeof req.body !== "object" || req.body === null ||
+      Array.isArray(req.body) || Object.keys(req.body).length !== 0)) ||
+      Object.keys(req.query).length !== 0) {
+    res.status(400).json({ code: "INVALID_DIAGNOSTICS_REQUEST" });
+    return;
+  }
+  try {
+    const outcome = await runServerDiagnostics();
+    if (outcome.status === 200) res.json(outcome.report);
+    else res.status(outcome.status).json({ code: outcome.error });
+  } catch {
+    res.status(503).json({ code: "DIAGNOSTICS_UNAVAILABLE" });
+  }
+});
 
 // LX-S01: bounded diagnostic intake; neither endpoint can grant a license/device privilege.
 apiRouter.post("/v1/diagnostics/report", (req: Request, res: Response) => {

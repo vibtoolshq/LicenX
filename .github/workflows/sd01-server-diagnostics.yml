@@ -1,0 +1,61 @@
+name: SD-01 Server Diagnostics focused acceptance
+
+# Source/CI-only; never SSH, deploy or use production data.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/sd01-server-diagnostics.yml'
+      - 'src/components/ServerDiagnosticsTab.tsx'
+      - 'src/server/serverDiagnostics.ts'
+      - 'src/components/Sidebar.tsx'
+      - 'src/components/HeaderBar.tsx'
+      - 'src/App.tsx'
+      - 'src/types.ts'
+      - 'src/services/apiClient.ts'
+      - 'src/server/api.ts'
+      - 'tests/serverDiagnosticsApi.test.ts'
+      - 'tests/serverDiagnosticsUi.test.ts'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sd01-focused-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  sd01-focused-acceptance:
+    name: Read-only Admin Server Diagnostics checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact reviewed commit
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Setup pinned Node major
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+
+      - name: Install locked project dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: TypeScript contracts
+        run: npm run lint
+
+      - name: SD-01 focused API, security, timeout and UI regression tests
+        run: node --import tsx --test tests/serverDiagnosticsApi.test.ts tests/serverDiagnosticsUi.test.ts
+
+      - name: Verify production UI and server bundling
+        run: npm run build
+
+      - name: CI acceptance receipt
+        run: |
+          echo "SD-01 CI PASS: source build, TypeScript, focused read-only diagnostics tests"
+          echo "Commit: ${GITHUB_SHA}"
+          echo "VPS/prod/customer data: NOT ACCESSED"

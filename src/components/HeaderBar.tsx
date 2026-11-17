@@ -45,6 +45,7 @@ export const HeaderBar: React.FC<HeaderBarProps> = ({
   const titles: Record<ActiveTab, string> = {
     overview: 'System Overview',
     'live-monitor': 'Live Monitor',
+    server: 'Server Diagnostics',
     apps: 'Applications',
     licenses: 'License Keys',
     devices: 'HWID Locks',

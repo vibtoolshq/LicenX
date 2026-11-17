@@ -148,6 +148,11 @@ export const Sidebar: React.FC<SidebarProps> = ({
       icon: <Settings className="w-3.5 h-3.5" />,
       items: [
         {
+          id: 'server',
+          label: 'Server',
+          icon: <Activity className="w-3.5 h-3.5" />,
+        },
+        {
           id: 'admin-apis',
           label: 'Admin APIs',
           icon: <Webhook className="w-3.5 h-3.5" />,
