@@ -73,6 +73,272 @@ const MetricCard: React.FC<MetricCardProps> = ({ title, value, hint, icon }) => 
   </div>
 );
 
+
+type AppFilter = 'all' | 'active' | 'inactive';
+type AppConnectionRow = {
+  id: string;
+  name: string;
+  status: string;
+  metrics: MonitorMetrics;
+  unavailable: boolean;
+};
+type AppConnectionPage = { rows: AppConnectionRow[]; total: number };
+type AppConnectionSource = {
+  getApps: (params: { limit: number; offset: number; status?: string }, force: boolean) =>
+    Promise<{ apps: { id: string; display_name: string; status: string }[]; total: number }>;
+  getRealtimePresence: (params: { appId: string }) => Promise<RealtimePresenceReport>;
+};
+const APP_PAGE_SIZE = 10;
+const APP_REQUEST_CONCURRENCY = 2;
+
+export function getAppMonitorMetrics(
+  appId: string,
+  report: RealtimePresenceReport | null,
+  now = Date.now(),
+): MonitorMetrics {
+  if (!appId || !report || report.scope !== appId) return getLiveMonitorMetrics(null, now);
+  return getLiveMonitorMetrics({ ...report, scope: null }, now);
+}
+
+/** Bounded page of independently scoped snapshots; never inferred as global totals. */
+export async function fetchAppConnectionPage(
+  page: number,
+  filter: AppFilter,
+  source: AppConnectionSource = api,
+  cancelled: () => boolean = () => false,
+  now = Date.now(),
+): Promise<AppConnectionPage | null> {
+  const offset = (page - 1) * APP_PAGE_SIZE;
+  const result = await source.getApps({
+    limit: APP_PAGE_SIZE, offset,
+    status: filter === 'all' ? undefined : filter,
+  }, true);
+  if (cancelled()) return null;
+  if (!Number.isSafeInteger(result.total) || result.total < 0 ||
+      !Array.isArray(result.apps) || result.apps.length > APP_PAGE_SIZE) {
+    throw new Error('Invalid app page response');
+  }
+  const rows: AppConnectionRow[] = [];
+  for (let i = 0; i < result.apps.length; i += APP_REQUEST_CONCURRENCY) {
+    if (cancelled()) return null;
+    const pair = result.apps.slice(i, i + APP_REQUEST_CONCURRENCY);
+    const answers = await Promise.allSettled(pair.map(app =>
+      /^[A-Za-z0-9_-]{1,128}$/.test(app.id)
+        ? source.getRealtimePresence({ appId: app.id })
+        : Promise.reject(new Error('Invalid app scope')),
+    ));
+    if (cancelled()) return null;
+    for (let j = 0; j < pair.length; j++) {
+      const app = pair[j];
+      const answer = answers[j];
+      if (answer.status === 'rejected' && isMonitorAuthFailure(answer.reason)) {
+        throw answer.reason;
+      }
+      const report = answer.status === 'fulfilled' ? answer.value : null;
+      const metrics = getAppMonitorMetrics(app.id, report, now);
+      rows.push({
+        id: app.id,
+        name: app.display_name || app.id,
+        status: app.status,
+        metrics,
+        unavailable: answer.status === 'rejected' || metrics.health === 'unavailable',
+      });
+    }
+  }
+  return { rows, total: result.total };
+}
+
+/** Isolated app-table lifecycle: the LM-P01 global snapshot remains untouched. */
+const ApplicationConnections: React.FC = () => {
+  const [page, setPage] = useState(1);
+  const [filter, setFilter] = useState<AppFilter>('all');
+  const [rows, setRows] = useState<AppConnectionRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [unavailable, setUnavailable] = useState(false);
+  const [authExpired, setAuthExpired] = useState(false);
+  const [lastSuccessAt, setLastSuccessAt] = useState<number | null>(null);
+  const mounted = useRef(false);
+  const generation = useRef(0);
+  const authBlocked = useRef(false);
+  const visibleAppIds = useRef(new Set<string>());
+  const currentJob = useRef<Promise<void> | null>(null);
+
+  const refreshApps = useCallback(() => {
+    if (!mounted.current || authBlocked.current ||
+        (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
+    const serial = ++generation.current;
+    setLoading(true);
+    setRows([]);
+    setUnavailable(false);
+    visibleAppIds.current.clear();
+    // Serialize generations: even rapid filter/page changes cannot exceed two in-flight app requests.
+    const previous = currentJob.current;
+    const job = (async () => {
+      if (previous) await previous;
+      if (!mounted.current || serial !== generation.current || authBlocked.current ||
+          (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
+      try {
+        const data = await fetchAppConnectionPage(page, filter, api,
+          () => !mounted.current || serial !== generation.current || authBlocked.current);
+        if (!data || !mounted.current || serial !== generation.current || authBlocked.current) return;
+        setRows(data.rows);
+        visibleAppIds.current = new Set(data.rows.map(row => row.id));
+        setTotal(data.total);
+        setLastSuccessAt(Date.now());
+      } catch (error) {
+        if (!mounted.current || serial !== generation.current || authBlocked.current) return;
+        if (isMonitorAuthFailure(error)) {
+          authBlocked.current = true;
+          setAuthExpired(true);
+        }
+        setUnavailable(true);
+        setRows([]);
+        setTotal(0);
+        visibleAppIds.current.clear();
+      } finally {
+        if (mounted.current && serial === generation.current) setLoading(false);
+      }
+    })();
+    currentJob.current = job;
+  }, [page, filter]);
+
+  useEffect(() => {
+    mounted.current = true;
+    if (adminRealtime.getStatus().state === 'AUTH_EXPIRED') {
+      authBlocked.current = true;
+      setAuthExpired(true);
+      setLoading(false);
+    } else {
+      void refreshApps();
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = adminRealtime.subscribe(notice => {
+      if (notice.type === 'state') {
+        if (notice.state === 'AUTH_EXPIRED') {
+          authBlocked.current = true;
+          generation.current++;
+          setAuthExpired(true);
+          setRows([]);
+          setTotal(0);
+          visibleAppIds.current.clear();
+          setLoading(false);
+        }
+        return;
+      }
+      const relevant = notice.type === 'resync' || (notice.type === 'change' && (
+        notice.change.type === 'presence.changed'
+          ? (notice.change.app_id === null || visibleAppIds.current.has(notice.change.app_id))
+          : notice.change.type === 'resource.changed' &&
+            ['apps', 'devices', 'licenses', 'stats'].includes(notice.change.resource) &&
+            (notice.change.app_id === null || visibleAppIds.current.has(notice.change.app_id))
+      ));
+      if (relevant && !authBlocked.current) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(() => { void refreshApps(); }, 250);
+      }
+    });
+    const interval = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState !== 'hidden') void refreshApps();
+    }, REFRESH_MS);
+    const onVisible = () => {
+      if (document.visibilityState !== 'hidden') void refreshApps();
+    };
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      mounted.current = false;
+      generation.current++;
+      unsubscribe();
+      if (timer) clearTimeout(timer);
+      clearInterval(interval);
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisible);
+    };
+  }, [refreshApps]);
+
+  const totalPages = Math.max(1, Math.ceil(total / APP_PAGE_SIZE));
+  const observed = lastSuccessAt ? new Date(lastSuccessAt).toLocaleTimeString() : 'Not yet verified';
+
+  return (
+    <section className="rounded border border-slate-800/80 bg-slate-900/30 p-3 space-y-3" aria-label="Application connections">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 className="text-xs font-semibold text-slate-200">Application Connections</h3>
+          <p className="text-[10px] text-slate-500">
+            Each row is a separate app-scoped snapshot · not a global total
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <label htmlFor="live-monitor-filter" className="text-[10px] text-slate-500">App status</label>
+          <select id="live-monitor-filter" value={filter}
+            onChange={event => {
+              setFilter(event.target.value as AppFilter);
+              setPage(1);
+            }}
+            className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-[11px] text-slate-200">
+            <option value="all">All</option>
+            <option value="active">Active</option>
+            <option value="inactive">Inactive</option>
+          </select>
+        </div>
+      </div>
+      {authExpired ? <p role="status" className="text-amber-400">Admin session expired · app connection data unavailable</p> :
+        unavailable ? <p role="status" className="text-amber-400">App connection data unavailable · last verified: {observed}</p> : null}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[600px] text-left text-[11px]">
+          <thead className="border-b border-slate-800 text-[10px] uppercase tracking-wide text-slate-500">
+            <tr>
+              <th scope="col" className="py-2 pr-3">Application</th>
+              <th scope="col" className="py-2 px-2">WS devices</th>
+              <th scope="col" className="py-2 px-2">Sockets</th>
+              <th scope="col" className="py-2 px-2">Bound</th>
+              <th scope="col" className="py-2 px-2">Stale lease</th>
+              <th scope="col" className="py-2 pl-2">Snapshot</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-800/70">
+            {rows.map(row => (
+              <tr key={row.id} className="text-slate-300">
+                <td className="py-2 pr-3">
+                  <div className="font-medium">{row.name}</div>
+                  <div className="text-[10px] text-slate-500">{row.status}</div>
+                </td>
+                <td className="py-2 px-2 font-mono">{row.metrics.connected}</td>
+                <td className="py-2 px-2 font-mono">{row.metrics.sockets}</td>
+                <td className="py-2 px-2 font-mono">{row.metrics.bound}</td>
+                <td className="py-2 px-2 font-mono">{row.metrics.stale}</td>
+                <td className="py-2 pl-2 text-[10px] text-slate-500">
+                  {row.unavailable ? 'Unavailable' :
+                    row.metrics.health === 'disabled' ? 'WS disabled' :
+                    row.metrics.health === 'stale' ? 'Stale' :
+                    row.metrics.health === 'live' ? 'Verified' : 'Unknown'}
+                  <div>{row.metrics.observedAt
+                    ? new Date(row.metrics.observedAt).toLocaleTimeString() : 'No verified time'}</div>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {loading && <p role="status" className="py-3 text-center text-slate-500">Loading app snapshots…</p>}
+        {!loading && !unavailable && !authExpired && rows.length === 0 &&
+          <p className="py-3 text-center text-slate-500">No applications in this filter</p>}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500">
+        <span>{unavailable || authExpired ? 'App totals unavailable' :
+          'Applications: ' + total.toLocaleString('en-US')} · Last verified: {observed}</span>
+        <div className="flex items-center gap-2">
+          <button type="button" disabled={page <= 1 || loading || authExpired || unavailable}
+            onClick={() => setPage(p => Math.max(1, p - 1))}
+            className="rounded border border-slate-800 px-2 py-1 disabled:opacity-40">Previous</button>
+          <span>Page {page} / {unavailable ? 'Unknown' : totalPages}</span>
+          <button type="button" disabled={page >= totalPages || loading || authExpired || unavailable}
+            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+            className="rounded border border-slate-800 px-2 py-1 disabled:opacity-40">Next</button>
+        </div>
+      </div>
+    </section>
+  );
+};
+
 export const LiveMonitorTab: React.FC = () => {
   const [presence, setPresence] = useState<RealtimePresenceReport | null>(null);
   const [stats, setStats] = useState<SystemStats | null>(null);
@@ -225,6 +491,8 @@ export const LiveMonitorTab: React.FC = () => {
           hint="Validation log requests in the previous 24 hours"
           icon={<Activity className="h-3.5 w-3.5" />} />
       </div>
+
+      <ApplicationConnections />
 
       <p className="text-[11px] leading-5 text-slate-500">
         Connection presence is a point-in-time Node gateway observation, not proof that
