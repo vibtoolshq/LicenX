@@ -1545,6 +1545,96 @@ apiRouter.get(
   },
 );
 
+// LM-P03: add-only, admin-authenticated, read-only, redacted app device drilldown.
+// Deliberately independent of the legacy global /devices response contract.
+apiRouter.get(
+  "/monitoring/devices",
+  requireAdminAuth,
+  async (req: Request, res: Response) => {
+    res.setHeader("Cache-Control", "no-store");
+    const appId = req.query.app_id;
+    const rawLimit = req.query.limit ?? "25";
+    const rawOffset = req.query.offset ?? "0";
+    const numberPattern = /^(0|[1-9][0-9]*)$/;
+    if (typeof appId !== "string" || !/^[A-Za-z0-9_-]{1,128}$/.test(appId) ||
+        typeof rawLimit !== "string" || !numberPattern.test(rawLimit) ||
+        typeof rawOffset !== "string" || !numberPattern.test(rawOffset)) {
+      res.status(400).json({ code: "INVALID_MONITORING_DEVICE_FILTER" });
+      return;
+    }
+    const limit = Number(rawLimit);
+    const offset = Number(rawOffset);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 25 ||
+        !Number.isSafeInteger(offset) || offset < 0 || offset > 1_000_000) {
+      res.status(400).json({ code: "INVALID_MONITORING_DEVICE_FILTER" });
+      return;
+    }
+    try {
+      const db = getDbClient();
+      const now = Date.now();
+      const from = " FROM devices d JOIN licenses l ON d.license_id = l.id" +
+        " JOIN apps a ON l.app_id = a.id";
+      const where = " WHERE l.app_id = ? AND d.status = 'active' AND l.status = 'active'" +
+        " AND (l.expires_at IS NULL OR l.expires_at > ?) AND a.status = 'active'";
+      const args = [appId, now];
+      const counted = await db.execute({
+        sql: "SELECT COUNT(*) AS total" + from + where,
+        args,
+      });
+      const selected = await db.execute({
+        sql: "SELECT d.id AS id, d.device_name AS device_name," +
+          " d.last_ping_at AS last_ping_at," +
+          " COALESCE(a.device_lease_seconds, 7200) AS lease_seconds" +
+          from + where + " ORDER BY d.last_ping_at DESC, d.id DESC LIMIT ? OFFSET ?",
+        args: [...args, limit, offset],
+      });
+      const rawRows = selected.rows;
+      const deviceIds = rawRows.map(row => String(row.id));
+      // Existing presence helper returns ONLY the explicitly requested IDs.
+      const report = await getRealtimePresenceReport(db, { appId, deviceIds });
+      const snapshotFresh = report.scope === appId &&
+        Number.isFinite(report.observedAt) &&
+        report.observedAt > 0 &&
+        Math.abs(Date.now() - report.observedAt) < 60_000;
+      const socketIds = new Set(snapshotFresh && report.transportEnabled
+        ? report.connectedDeviceIds.filter(id => deviceIds.includes(id))
+        : []);
+      const devices = rawRows.map(row => {
+        const id = String(row.id);
+        const rawPing = row.last_ping_at;
+        const lastPingAt = rawPing === null || rawPing === undefined ||
+          !Number.isFinite(Number(rawPing)) || Number(rawPing) <= 0
+          ? null : Number(rawPing);
+        const lease = Number(row.lease_seconds);
+        const leaseSignal: "recent" | "stale" | "unknown" =
+          lastPingAt === null || lastPingAt > now + 5_000 ||
+          !Number.isFinite(lease) || lease <= 0
+            ? "unknown"
+            : lastPingAt <= now - lease * 1000 ? "stale" : "recent";
+        return {
+          id,
+          deviceName: typeof row.device_name === "string" && row.device_name.trim()
+            ? row.device_name.slice(0, 160) : "Unnamed device",
+          lastPingAt,
+          wsConnected: snapshotFresh && report.transportEnabled
+            ? socketIds.has(id) : null,
+          leaseSignal,
+        };
+      });
+      res.json({
+        appId,
+        observedAt: snapshotFresh ? report.observedAt : now,
+        total: Number(counted.rows[0]?.total ?? 0),
+        limit,
+        offset,
+        devices,
+      });
+    } catch {
+      res.status(503).json({ code: "MONITORING_DEVICES_UNAVAILABLE" });
+    }
+  },
+);
+
 apiRouter.get(
   "/devices",
   requireAdminAuth,

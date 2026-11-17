@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { Activity, AppWindow, Clock3, Key, Laptop, RefreshCw, Wifi } from 'lucide-react';
 import { adminRealtime, api } from '../services/apiClient';
-import type { AdminRealtimeState, RealtimePresenceReport, SystemStats } from '../types';
+import type { AdminRealtimeState, MonitoringDeviceRow, MonitoringDevicesResponse, RealtimePresenceReport, SystemStats } from '../types';
 
 const SNAPSHOT_FRESH_MS = 60_000;
 const REFRESH_MS = 30_000;
@@ -90,6 +90,33 @@ type AppConnectionSource = {
 };
 const APP_PAGE_SIZE = 10;
 const APP_REQUEST_CONCURRENCY = 2;
+const DEVICE_PAGE_SIZE = 25;
+
+export function isUsableMonitoringDeviceResponse(
+  data: MonitoringDevicesResponse | null,
+  appId: string,
+  page: number,
+  now = Date.now(),
+): data is MonitoringDevicesResponse {
+  return Boolean(data && data.appId === appId && data.limit === DEVICE_PAGE_SIZE &&
+    data.offset === (page - 1) * DEVICE_PAGE_SIZE &&
+    Number.isSafeInteger(data.total) && data.total >= 0 &&
+    Number.isFinite(data.observedAt) && data.observedAt > 0 &&
+    data.observedAt <= now + 5_000 && now - data.observedAt < SNAPSHOT_FRESH_MS &&
+    Array.isArray(data.devices) && data.devices.length <= DEVICE_PAGE_SIZE &&
+    data.devices.every(row => typeof row.id === 'string' && row.id.length > 0 &&
+      typeof row.deviceName === 'string' &&
+      (row.lastPingAt === null || Number.isFinite(row.lastPingAt)) &&
+      (row.wsConnected === null || typeof row.wsConnected === 'boolean') &&
+      ['recent', 'stale', 'unknown'].includes(row.leaseSignal)));
+}
+
+export function getDeviceMonitorStatus(row: MonitoringDeviceRow): string {
+  const ws = row.wsConnected === null ? 'WS Unknown' :
+    row.wsConnected ? 'WS Connected' : 'No WS';
+  return ws + ' · ' + (row.leaseSignal === 'recent' ? 'Recent lease' :
+    row.leaseSignal === 'stale' ? 'Stale lease' : 'Lease unknown');
+}
 
 export function getAppMonitorMetrics(
   appId: string,
@@ -149,9 +176,170 @@ export async function fetchAppConnectionPage(
 }
 
 /** Isolated app-table lifecycle: the LM-P01 global snapshot remains untouched. */
+/** Read-only, app-scoped device details; no existing global device operations. */
+export const LiveMonitorDeviceInspector: React.FC<{
+  appId: string;
+  appName: string;
+  onClose: () => void;
+}> = ({ appId, appName, onClose }) => {
+  const [page, setPage] = useState(1);
+  const [devices, setDevices] = useState<MonitoringDeviceRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [observedAt, setObservedAt] = useState<number | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [unavailable, setUnavailable] = useState(false);
+  const [authExpired, setAuthExpired] = useState(false);
+  const mounted = useRef(false);
+  const serial = useRef(0);
+  const authBlocked = useRef(false);
+
+  const refreshDevices = useCallback(() => {
+    if (!mounted.current || authBlocked.current ||
+        (typeof document !== 'undefined' && document.visibilityState === 'hidden')) return;
+    const request = ++serial.current;
+    setLoading(true);
+    setDevices([]);
+    setUnavailable(false);
+    void api.getLiveMonitorDevices({ appId, limit: DEVICE_PAGE_SIZE,
+      offset: (page - 1) * DEVICE_PAGE_SIZE })
+      .then(result => {
+        if (!mounted.current || request !== serial.current || authBlocked.current) return;
+        if (!isUsableMonitoringDeviceResponse(result, appId, page)) {
+          setUnavailable(true);
+          return;
+        }
+        setDevices(result.devices);
+        setTotal(result.total);
+        setObservedAt(result.observedAt);
+      })
+      .catch(error => {
+        if (!mounted.current || request !== serial.current || authBlocked.current) return;
+        if (isMonitorAuthFailure(error)) {
+          authBlocked.current = true;
+          setAuthExpired(true);
+        }
+        setUnavailable(true);
+      })
+      .finally(() => {
+        if (mounted.current && request === serial.current) setLoading(false);
+      });
+  }, [appId, page]);
+
+  useEffect(() => {
+    mounted.current = true;
+    if (adminRealtime.getStatus().state === 'AUTH_EXPIRED') {
+      authBlocked.current = true;
+      setAuthExpired(true);
+      setLoading(false);
+    } else {
+      refreshDevices();
+    }
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const unsubscribe = adminRealtime.subscribe(notice => {
+      if (notice.type === 'state') {
+        if (notice.state === 'AUTH_EXPIRED') {
+          authBlocked.current = true;
+          serial.current++;
+          setAuthExpired(true);
+          setDevices([]);
+          setLoading(false);
+        }
+        return;
+      }
+      const relevant = notice.type === 'resync' || (
+        notice.type === 'change' &&
+        (notice.change.app_id === null || notice.change.app_id === appId) &&
+        (notice.change.type === 'presence.changed' ||
+          (notice.change.type === 'resource.changed' &&
+            ['devices', 'licenses', 'apps'].includes(notice.change.resource)))
+      );
+      if (relevant && !authBlocked.current) {
+        if (timer) clearTimeout(timer);
+        timer = setTimeout(refreshDevices, 250);
+      }
+    });
+    const interval = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState !== 'hidden') refreshDevices();
+    }, REFRESH_MS);
+    return () => {
+      mounted.current = false;
+      serial.current++;
+      unsubscribe();
+      if (timer) clearTimeout(timer);
+      clearInterval(interval);
+    };
+  }, [refreshDevices, appId]);
+
+  const totalPages = Math.max(1, Math.ceil(total / DEVICE_PAGE_SIZE));
+  return (
+    <div className="rounded border border-indigo-800/50 bg-slate-950/50 p-3 space-y-2"
+      aria-label="Selected application devices">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h4 className="text-xs font-semibold text-slate-200">Devices · {appName}</h4>
+          <p className="text-[10px] text-slate-500">
+            Active authorized bindings only · ID, device name and lease signal · no secrets
+          </p>
+        </div>
+        <button type="button" onClick={onClose}
+          className="rounded border border-slate-800 px-2 py-1 text-[11px] text-slate-300"
+          aria-label="Close device inspector">Close</button>
+      </div>
+      {authExpired ? <p role="status" className="text-amber-400">Admin session expired · device data unavailable</p>
+        : unavailable ? <p role="status" className="text-amber-400">Device snapshot unavailable or stale</p>
+          : null}
+      <div className="overflow-x-auto">
+        <table className="w-full min-w-[530px] text-left text-[11px]">
+          <thead className="border-b border-slate-800 text-slate-500">
+            <tr>
+              <th scope="col" className="py-2 pr-3">Device</th>
+              <th scope="col" className="py-2 pr-3">Last heartbeat</th>
+              <th scope="col" className="py-2">Connection / lease</th>
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-slate-800/70">
+            {devices.map(device => (
+              <tr key={device.id}>
+                <td className="py-2 pr-3">
+                  <div className="text-slate-200">{device.deviceName}</div>
+                  <div className="font-mono text-[10px] text-slate-500">{device.id}</div>
+                </td>
+                <td className="py-2 pr-3 text-slate-400">
+                  {device.lastPingAt === null ? 'Unknown' :
+                    new Date(device.lastPingAt).toLocaleString()}
+                </td>
+                <td className="py-2 text-slate-400">{getDeviceMonitorStatus(device)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {loading && <p role="status" className="py-3 text-center text-slate-500">Loading devices…</p>}
+        {!loading && !unavailable && !authExpired && devices.length === 0 &&
+          <p className="py-3 text-center text-slate-500">No matching active devices</p>}
+      </div>
+      <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-500">
+        <span>{unavailable || authExpired ? 'Device count unavailable' :
+          'Matching active devices: ' + total.toLocaleString('en-US')}
+          {' · '}Observed: {observedAt ? new Date(observedAt).toLocaleTimeString() : 'Not verified'}
+        </span>
+        <div className="flex items-center gap-2">
+          <button type="button" disabled={page <= 1 || loading || unavailable || authExpired}
+            onClick={() => setPage(current => Math.max(1, current - 1))}
+            className="rounded border border-slate-800 px-2 py-1 disabled:opacity-40">Previous</button>
+          <span>Page {page} / {unavailable || authExpired ? 'Unknown' : totalPages}</span>
+          <button type="button" disabled={page >= totalPages || loading || unavailable || authExpired}
+            onClick={() => setPage(current => Math.min(totalPages, current + 1))}
+            className="rounded border border-slate-800 px-2 py-1 disabled:opacity-40">Next</button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 const ApplicationConnections: React.FC = () => {
   const [page, setPage] = useState(1);
   const [filter, setFilter] = useState<AppFilter>('all');
+  const [selectedApp, setSelectedApp] = useState<{ id: string; name: string } | null>(null);
   const [rows, setRows] = useState<AppConnectionRow[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -273,6 +461,7 @@ const ApplicationConnections: React.FC = () => {
             onChange={event => {
               setFilter(event.target.value as AppFilter);
               setPage(1);
+              setSelectedApp(null);
             }}
             className="rounded border border-slate-800 bg-slate-950 px-2 py-1 text-[11px] text-slate-200">
             <option value="all">All</option>
@@ -301,6 +490,9 @@ const ApplicationConnections: React.FC = () => {
                 <td className="py-2 pr-3">
                   <div className="font-medium">{row.name}</div>
                   <div className="text-[10px] text-slate-500">{row.status}</div>
+                  <button type="button" onClick={() => setSelectedApp({ id: row.id, name: row.name })}
+                    className="mt-1 rounded border border-slate-700 px-2 py-0.5 text-[10px] text-indigo-300"
+                    aria-label={`Inspect ${row.name} devices`}>Devices</button>
                 </td>
                 <td className="py-2 px-2 font-mono">{row.metrics.connected}</td>
                 <td className="py-2 px-2 font-mono">{row.metrics.sockets}</td>
@@ -327,14 +519,17 @@ const ApplicationConnections: React.FC = () => {
           'Applications: ' + total.toLocaleString('en-US')} · Last verified: {observed}</span>
         <div className="flex items-center gap-2">
           <button type="button" disabled={page <= 1 || loading || authExpired || unavailable}
-            onClick={() => setPage(p => Math.max(1, p - 1))}
+            onClick={() => { setSelectedApp(null); setPage(p => Math.max(1, p - 1)); }}
             className="rounded border border-slate-800 px-2 py-1 disabled:opacity-40">Previous</button>
           <span>Page {page} / {unavailable ? 'Unknown' : totalPages}</span>
           <button type="button" disabled={page >= totalPages || loading || authExpired || unavailable}
-            onClick={() => setPage(p => Math.min(totalPages, p + 1))}
+            onClick={() => { setSelectedApp(null); setPage(p => Math.min(totalPages, p + 1)); }}
             className="rounded border border-slate-800 px-2 py-1 disabled:opacity-40">Next</button>
         </div>
       </div>
+      {selectedApp && !authExpired &&
+        <LiveMonitorDeviceInspector key={selectedApp.id} appId={selectedApp.id}
+          appName={selectedApp.name} onClose={() => setSelectedApp(null)} />}
     </section>
   );
 };

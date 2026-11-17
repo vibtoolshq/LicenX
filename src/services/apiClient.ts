@@ -5,6 +5,7 @@ import {
   PublicLicenseApiDomain,
   AppItem,
   RealtimePresenceReport,
+  MonitoringDevicesResponse,
   CreatedAdminApiKey,
   Device,
   License,
@@ -720,6 +721,16 @@ export const api = {
     if (params.appId) query.set("app_id", params.appId);
     if (params.deviceIds?.length) query.set("device_ids", params.deviceIds.slice(0, 100).join(","));
     return request<RealtimePresenceReport>("/api/realtime/presence?" + query.toString());
+  },
+
+  // Admin-only, bounded, redacted app device inspector.
+  getLiveMonitorDevices: (params: { appId: string; limit?: number; offset?: number }) => {
+    const query = new URLSearchParams({
+      app_id: params.appId,
+      limit: String(params.limit ?? 25),
+      offset: String(params.offset ?? 0),
+    });
+    return request<MonitoringDevicesResponse>("/api/monitoring/devices?" + query.toString());
   },
 
   // Global Devices

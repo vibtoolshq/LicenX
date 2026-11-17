@@ -28,6 +28,24 @@ export interface RealtimePresenceReport {
   scope: string | null;
 }
 
+/** Redacted, app-scoped Admin read-only device monitoring; never returns HWID/IP/key. */
+export interface MonitoringDeviceRow {
+  id: string;
+  deviceName: string;
+  lastPingAt: number | null;
+  wsConnected: boolean | null;
+  leaseSignal: "recent" | "stale" | "unknown";
+}
+
+export interface MonitoringDevicesResponse {
+  appId: string;
+  observedAt: number;
+  total: number;
+  limit: number;
+  offset: number;
+  devices: MonitoringDeviceRow[];
+}
+
 /** Admin browser WSS carries sanitized notifications; authoritative rows come from HTTP. */
 export type AdminRealtimeState =
   | "CONNECTED" | "RECONNECTING" | "HTTP_FALLBACK" | "AUTH_EXPIRED" | "STALE";

@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
-import { fetchAppConnectionPage, getAppMonitorMetrics, getLiveMonitorMetrics, isMonitorAuthFailure, LiveMonitorTab } from '../src/components/LiveMonitorTab.js';
+import { fetchAppConnectionPage, getAppMonitorMetrics, getDeviceMonitorStatus, getLiveMonitorMetrics, isMonitorAuthFailure, isUsableMonitoringDeviceResponse, LiveMonitorDeviceInspector, LiveMonitorTab } from '../src/components/LiveMonitorTab.js';
 import type { RealtimePresenceReport } from '../src/types.js';
 
 const now = 1_800_000_000_000;
@@ -225,4 +225,59 @@ test('LM-P02: app UI is isolated, visible-only, serial-guarded and cleans subscr
   assert.match(component, /clearInterval\(interval\)/);
   assert.match(component, /removeEventListener\('visibilitychange', onVisible\)/);
   assert.doesNotMatch(component, /new WebSocket|api\.getDevices\(|unbindDevice|revokeLicense/);
+});
+
+test('LM-P03: selected device response requires exact app, page, freshness and safe typed rows', () => {
+  const sample = {
+    appId: 'app-a', observedAt: now - 1000, total: 28, limit: 25, offset: 25,
+    devices: [{
+      id: 'dev-a', deviceName: 'Office PC', lastPingAt: now - 3000,
+      wsConnected: null as boolean | null, leaseSignal: 'recent' as const,
+    }],
+  };
+  assert.equal(isUsableMonitoringDeviceResponse(sample, 'app-a', 2, now), true);
+  assert.equal(isUsableMonitoringDeviceResponse(sample, 'app-b', 2, now), false);
+  assert.equal(isUsableMonitoringDeviceResponse(sample, 'app-a', 1, now), false);
+  assert.equal(isUsableMonitoringDeviceResponse({ ...sample, limit: 26 }, 'app-a', 2, now), false);
+  assert.equal(isUsableMonitoringDeviceResponse({ ...sample, observedAt: now - 60_000 }, 'app-a', 2, now), false);
+  assert.equal(isUsableMonitoringDeviceResponse({ ...sample, observedAt: now + 6000 }, 'app-a', 2, now), false);
+  assert.equal(isUsableMonitoringDeviceResponse({ ...sample, devices: Array(26).fill(sample.devices[0]) }, 'app-a', 2, now), false);
+  assert.equal(isUsableMonitoringDeviceResponse({ ...sample, devices: [{ ...sample.devices[0], wsConnected: 'yes' as never }] }, 'app-a', 2, now), false);
+  assert.equal(isUsableMonitoringDeviceResponse(null, 'app-a', 2, now), false);
+});
+
+test('LM-P03: device connection label does not infer running app or HTTP fallback', () => {
+  const row = { id: 'id', deviceName: 'PC', lastPingAt: null,
+    wsConnected: null as boolean | null, leaseSignal: 'unknown' as const };
+  assert.equal(getDeviceMonitorStatus(row), 'WS Unknown · Lease unknown');
+  assert.equal(getDeviceMonitorStatus({ ...row, wsConnected: true, leaseSignal: 'recent' }), 'WS Connected · Recent lease');
+  assert.equal(getDeviceMonitorStatus({ ...row, wsConnected: false, leaseSignal: 'stale' }), 'No WS · Stale lease');
+});
+
+test('LM-P03: app-selected inspector is read-only, bounded and cleans async work', () => {
+  const html = renderToStaticMarkup(React.createElement(LiveMonitorDeviceInspector, {
+    appId: 'app-a', appName: 'Test App', onClose: () => undefined,
+  }));
+  assert.match(html, /Devices · Test App/);
+  assert.match(html, /Selected application devices/);
+  assert.match(html, /Last heartbeat/);
+  assert.match(html, /Loading devices/);
+  assert.match(html, /no secrets/);
+  const sourceText = source('src/components/LiveMonitorTab.tsx');
+  assert.match(sourceText, /api\.getLiveMonitorDevices\(\{ appId, limit: DEVICE_PAGE_SIZE/);
+  assert.match(sourceText, /const DEVICE_PAGE_SIZE = 25/);
+  assert.match(sourceText, /isUsableMonitoringDeviceResponse\(result, appId, page\)/);
+  assert.match(sourceText, /serial\.current\+\+/);
+  assert.match(sourceText, /request !== serial\.current/);
+  assert.match(sourceText, /notice\.change\.app_id === appId/);
+  assert.match(sourceText, /clearTimeout\(timer\)/);
+  assert.match(sourceText, /clearInterval\(interval\)/);
+  assert.match(sourceText, /unsubscribe\(\)/);
+  assert.match(sourceText, /setSelectedApp\(null\)/);
+  assert.match(sourceText, /<LiveMonitorDeviceInspector key=\{selectedApp\.id\}/);
+  assert.doesNotMatch(sourceText, /api\.getDevices\(|unbindDevice|revokeLicense|resetLicense|new WebSocket/);
+  const client = source('src/services/apiClient.ts');
+  assert.match(client, /getLiveMonitorDevices:[\s\S]*?\/api\/monitoring\/devices\?/);
+  const app = source('src/App.tsx');
+  assert.match(app, /activeTab === 'live-monitor' && <LiveMonitorTab \/>/);
 });
