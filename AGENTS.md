@@ -84,6 +84,13 @@ All development-time Markdown plans, forensic notes, error audits, and phase log
 - Once acceptance is satisfied, immediately close the phase and update the relevant plan, roadmap, logs, actual-working status, and required project memory. Do not prolong the phase with unrelated improvements or verification loops.
 - For an authorized implementation phase, publish the reviewed change to GitHub and safely fast-forward-pull it into the remote project after the focused verification; preserve local user changes, data, and ignored notes.
 
+## Strict Single-Pass Phase Verification — User-Mandated
+
+- After implementing the exact approved Scope Lock, perform **one focused verification pass and one exact changed-file/code-block diff audit**, then promptly record the actual result and close that phase. Do not run long verification loops, repeated identical tests, unnecessary full-suite runs, or broad speculative checks.
+- Reuse already successful evidence within the same phase. Re-run **only directly affected focused checks** when a demonstrated in-scope defect is fixed; never prolong the phase for unrelated improvements or repetitive confirmation.
+- A failed or blocked required check must be reported truthfully as `BLOCKED`/`NOT VERIFIED`, **not** relabeled PASS for speed. If a required edit crosses the frozen file/function allowlist, **STOP before product changes** and request an exact scope amendment.
+- Finish each accepted phase's private Markdown receipt and authorized GitHub-to-RDP synchronization promptly. Never auto-start the next phase; never deploy or change live VPS without its separate approval.
+
 ## Mandatory GitHub-to-RDP sync gate (LicenX)
 
 - For every approved LicenX SDK, Admin Panel, API, security, build, or documentation update/fix pushed to GitHub `vibtoolshq/LicenX` (`main`), synchronize the authorized Windows RDP project at `C:\Users\Administrator\Desktop\project\14_LicenX` immediately after the push, during the same authorized work session; do not leave a newer GitHub baseline and an older RDP baseline without explicitly reporting a blocker.
