@@ -118,6 +118,13 @@ export interface Device {
   customer_name?: string;
 }
 
+export interface DeviceStatSnapshot {
+  device_id: string;
+  stats: Record<string, string | number | boolean | null>;
+  reported_at: number | null;
+  active: boolean;
+}
+
 export interface ValidationLog {
   id: string;
   license_key: string;

@@ -49,6 +49,18 @@ print(f"License Activated! Tier: {client.get_tier()}")
 print(f"Hardware ID: {result.hwid}")
 ```
 
+### Optional per-device application statistics (SDK-STAT-01)
+
+After a verified login, applications can explicitly send dynamic flat title/value pairs. Nothing is collected automatically:
+
+```python
+result = client.report_stats({"Total": 5000, "Send": 200, "Failed": 4800, "Logins": 4})
+if not result["success"]:
+    print("Statistics unavailable:", result["code"])
+```
+
+Statistics are **client-reported**, not trusted for billing or license permissions. Up to 40 arbitrary nonsecret labels (max 64 characters), with finite numbers, booleans, null, or strings (max 256 characters); flat JSON, 4096 UTF-8 bytes max. No nested objects, passwords, HWIDs, license keys or tokens. The report-only token is obtained from a verified signed response and kept only in RAM; every upload is checked against the current live server binding and rate limited. Older servers return `STATS_UNSUPPORTED`. Network, expired session and invalid statistics never silently succeed. Avoid reporting from a tight loop.
+
 ### Manual Heartbeat & Logout
 
 On successful login, background heartbeats are enabled by default. Use `client.ping()` for an explicit check and `client.logout()` when the licensed operation ends. `logout()` returns **False** if the remote device release could not be confirmed; the SDK clears local authorization and retains a pending release **in memory** for an explicit retry. The remote logout path requires a session-bound v2 proof; there is **no anonymous v1/deactivate fallback**. Normal exit hooks attempt slot release, but abrupt termination/network failure cannot guarantee remote unbinding. **Do not log license keys, PINs or access tokens.** The basic example above prints the HWID for an *interactive demo only*; do not copy that identifier into unattended production logs.
@@ -84,6 +96,7 @@ The SDK deliberately does **not** persist license keys in reversible local sessi
 | `LoginResult` | Login result, `success`, `code`, `message`, optional `request_id` |
 | `client.login(key)` | Signed online validation and binding |
 | `client.ping()` | Explicit heartbeat |
+| `client.report_stats({...})` | Opt-in per-device dynamic statistics snapshot |
 | `client.logout()` | Logout and slot release request |
 | `client.get_tier()`, `client.get_hwid()` | Active license information |
 

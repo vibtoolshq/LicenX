@@ -741,6 +741,11 @@ export const api = {
       },
     );
   },
+  getLicenseDeviceStats: async (licenseId: string) => {
+    return request<{ devices: import('../types').DeviceStatSnapshot[] }>(
+      "/api/licenses/" + encodeURIComponent(licenseId) + "/device-stats", { cache: "no-store" },
+    );
+  },
   getLicenseDevices: async (licenseId: string) => {
     const data = await request<any>(`/api/licenses/${licenseId}/devices`);
     if (Array.isArray(data)) {

@@ -292,6 +292,22 @@ export async function migratePostgres(db: DatabaseClient): Promise<void> {
         args: [Date.now()],
       });
     }
+    // SDK-STAT-01: separate snapshot table preserves all legacy device/COPY columns.
+    const statsMigration = await transaction.execute("SELECT version FROM licenx_schema_migrations WHERE version = 7");
+    if (!statsMigration.rows.length) {
+      await transaction.execute(`CREATE TABLE IF NOT EXISTS device_stat_snapshots (
+        device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+        stats_json TEXT NOT NULL DEFAULT '{}',
+        reported_at BIGINT NOT NULL DEFAULT 0,
+        report_token_hash TEXT NOT NULL DEFAULT '',
+        report_token_expires BIGINT NOT NULL DEFAULT 0
+      )`);
+      await transaction.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_device_stats_token ON device_stat_snapshots(report_token_hash)");
+      await transaction.execute({
+        sql: "INSERT INTO licenx_schema_migrations (version, applied_at) VALUES (7, ?)",
+        args: [Date.now()],
+      });
+    }
     await transaction.commit();
   } catch (error) {
     await transaction.rollback();

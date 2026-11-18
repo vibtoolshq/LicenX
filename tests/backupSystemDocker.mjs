@@ -25,11 +25,18 @@ const folder = path.join(root, '.backup-manager');
 const archiveDir = path.join(folder, 'archives');
 const source = path.join(archiveDir, 'ci-original.lxbackup');
 const legacyArchive = path.join(archiveDir, 'ci-legacy-v5.lxbackup');
+const v2Archive = path.join(archiveDir, 'ci-v2-groups.lxbackup');
+const statsDeviceId = 'ci_stats_device';
 const marker = path.join(root, 'public', 'ci-backup-marker.txt');
 const groupId = 'grp_' + 'a'.repeat(24);
 const licenseId = 'ci_group_license';
 const oldTables = [
   'admin_config', 'apps', 'licenses', 'devices', 'validation_logs',
+  'r2_backups', 'admin_api_keys', 'admin_login_attempts',
+  'user_control_pin_attempts', 'licenx_schema_migrations',
+];
+const v2Tables = [
+  'admin_config', 'apps', 'license_groups', 'licenses', 'devices', 'validation_logs',
   'r2_backups', 'admin_api_keys', 'admin_login_attempts',
   'user_control_pin_attempts', 'licenx_schema_migrations',
 ];
@@ -44,18 +51,18 @@ const legacyLicenseColumns = [
  * Explicit pre-v6 license columns reproduce the previous production layout,
  * without reading or writing any existing production backup material.
  */
-async function makeLegacyFixture(target, manifestTables = oldTables) {
+async function makeLegacyFixture(target, manifestTables = oldTables, version = 1) {
   const temp = await fs.mkdtemp(path.join(tmpdir(), 'licenx-v5-fixture-'));
   try {
     const dir = path.join(temp, 'db');
     await fs.mkdir(dir, { recursive: true });
     await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
     try {
-      for (const table of oldTables) {
-        const select = table === 'licenses'
+      for (const table of (version === 2 ? v2Tables : oldTables)) {
+        const select = table === 'licenses' && version === 1
           ? 'COPY "licenses" (' + legacyLicenseColumns.map(name => '"' + name + '"').join(', ') + ') TO STDOUT WITH (FORMAT binary)'
           : table === 'licenx_schema_migrations'
-            ? 'COPY (SELECT version, applied_at FROM licenx_schema_migrations WHERE version < 6) TO STDOUT WITH (FORMAT binary)'
+            ? 'COPY (SELECT version, applied_at FROM licenx_schema_migrations WHERE version < ' + (version === 2 ? '7' : '6') + ') TO STDOUT WITH (FORMAT binary)'
             : 'COPY "' + table + '" TO STDOUT WITH (FORMAT binary)';
         await pipeline(db.query(copyTo(select)), createWriteStream(path.join(dir, table + '.copy')));
       }
@@ -65,7 +72,7 @@ async function makeLegacyFixture(target, manifestTables = oldTables) {
       throw error;
     }
     await fs.writeFile(path.join(temp, 'manifest.json'), JSON.stringify({
-      kind: 'licenx-full-v1', tables: manifestTables, createdAt: Date.now(),
+      kind: 'licenx-full-v' + version, tables: manifestTables, createdAt: Date.now(),
     }));
     const tarball = path.join(temp, 'archive.tar.gz');
     await exec('tar', ['-czf', tarball, '-C', temp, 'db', 'manifest.json'], { timeout: 15_000 });
@@ -93,13 +100,15 @@ try {
     ['ci_backup_app', 'ci_backup_slug', 'CI Backup Fixture', 'test-only-nonsecret']);
   await db.query("INSERT INTO license_groups (id, name, name_key, created_at, updated_at, archived_at) VALUES ($1, 'CI Team Alpha', 'ci team alpha', 1, 1, NULL)", [groupId]);
   await db.query("INSERT INTO licenses (id, key, status, tier, app_id, device_limit, validity_type, validity_value, created_at, pin, group_id) VALUES ($1, 'CI-GROUP-LICENSE-0001', 'active', 'Pro', 'ci_backup_app', 1, 'lifetime', 0, 1, '1234', $2)", [licenseId, groupId]);
+  await db.query("INSERT INTO devices (id, license_id, hwid, device_name, first_bound_at, last_ping_at, status) VALUES ($1, $2, 'CI-DISPOSABLE-HWID', 'CI-Device', 1, 1, 'active')", [statsDeviceId, licenseId]);
+  await db.query("INSERT INTO device_stat_snapshots (device_id, stats_json, reported_at, report_token_hash, report_token_expires) VALUES ($1, $2, 1234, $3, 999999)", [statsDeviceId, JSON.stringify({ Total: 5000, Sent: 200, Failed: 4800 }), 'a'.repeat(64)]);
 
   await fs.mkdir(path.dirname(marker), { recursive: true });
   await fs.writeFile(marker, 'before-backup\n', { mode: 0o600 });
 
-  // v2 encrypted snapshot must carry Group names and license associations.
+  // v3 encrypted snapshot must carry Group names and device statistics.
   await runWorker('backup', 'ci-original', 'local');
-  assert.ok((await fs.stat(source)).size > 100, 'encrypted v2 backup was created');
+  assert.ok((await fs.stat(source)).size > 100, 'encrypted v3 backup was created');
 
   // Preserve existing fail-closed AES-GCM tamper rejection contract.
   const tampered = path.join(folder, 'incoming', 'tampered.lxbackup');
@@ -132,9 +141,22 @@ try {
   const restoredLicense = await db.query('SELECT group_id, pin FROM licenses WHERE id = $1', [licenseId]);
   assert.equal(restoredLicense.rows[0]?.group_id, groupId, 'v2 license Group association restored');
   assert.equal(restoredLicense.rows[0]?.pin, '1234', 'existing license PIN preserved');
+  const statsRestored = await db.query('SELECT stats_json FROM device_stat_snapshots WHERE device_id = $1', [statsDeviceId]);
+  assert.deepEqual(JSON.parse(statsRestored.rows[0]?.stats_json), { Total: 5000, Sent: 200, Failed: 4800 }, 'v3 statistics roundtrip');
   assert.equal(await fs.readFile(marker, 'utf8'), 'before-backup\n', 'application assets restored');
   assert.ok((await fs.stat(path.join(archiveDir, 'pre-restore-ci-restore.lxbackup'))).size > 100,
     'encrypted pre-restore checkpoint exists');
+
+  // Genuine v2 Group archive (no stats table) must restore into v7 without loss.
+  await makeLegacyFixture(v2Archive, v2Tables, 2);
+  await db.query("UPDATE license_groups SET name = 'Changed Before V2 Restore' WHERE id = $1", [groupId]);
+  await runWorker('restore', 'ci-v2-restore', v2Archive);
+  assert.equal((await db.query('SELECT name FROM license_groups WHERE id = $1', [groupId])).rows[0]?.name,
+    'CI Team Alpha', 'v2 Group archive restored');
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM device_stat_snapshots')).rows[0].n,
+    0, 'v2 archive leaves v7 statistics empty');
+  assert.equal((await db.query('SELECT count(*)::int AS n FROM licenx_schema_migrations WHERE version = 7')).rows[0].n,
+    1, 'v2 restore retains physical v7 migration ledger');
 
   // Real 17-column v5 binary COPY fixture, without any Group metadata.
   await makeLegacyFixture(legacyArchive);
@@ -161,10 +183,15 @@ try {
   assert.equal(unassigned.rows[0]?.pin, '1234', 'legacy license fields preserved');
   assert.equal((await db.query('SELECT COUNT(*)::int AS n FROM licenx_schema_migrations WHERE version = 6')).rows[0].n,
     1, 'physical v6 schema must retain migration version 6');
+  assert.equal((await db.query('SELECT COUNT(*)::int AS n FROM licenx_schema_migrations WHERE version = 7')).rows[0].n,
+    1, 'physical v7 schema must retain migration version 7');
+  assert.equal((await db.query('SELECT COUNT(*)::int AS n FROM device_stat_snapshots')).rows[0].n, 0,
+    'v1 archive cannot preserve later client statistics');
   assert.ok((await fs.stat(path.join(archiveDir, 'pre-restore-ci-legacy-restore.lxbackup'))).size > 100,
     'legacy restore still writes encrypted rollback checkpoint');
   console.log('BACKUP_RESTORE_INTEGRATION_PASS');
   console.log('LG01A_BR01_V2_GROUP_AND_LEGACY_V1_RESTORE_PASS');
+  console.log('SDK_STAT01_V3_STATS_AND_V2_V1_LEGACY_RESTORE_PASS');
 } finally {
   await db.end();
 }

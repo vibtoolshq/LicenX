@@ -34,6 +34,7 @@ import {
   verifySessionToken,
 } from "./crypto.js";
 import { getDbClient, isTursoPlaceholder } from "./db.js";
+import { acceptDeviceStats, allowDeviceStatsIp, DeviceStatsError, getLicenseDeviceStats, issueDeviceStatsSession, refreshDeviceStatsSession } from "./deviceStats.js";
 import { issueSdkDiagnosticCapability, ingestSdkDiagnostic, ingestAdminDiagnostic,
   listSafeDiagnostics, recordInternalDiagnostic, isDiagnosticCode, isIncidentId } from "./diagnostics.js";
 import { closeRealtimeDeviceSessions, getRealtimePresenceReport } from "./realtime/presence.js";
@@ -1619,6 +1620,16 @@ apiRouter.get(
   },
 );
 
+// SDK-STAT-01: per-license private readout, separate from legacy device JSON.
+apiRouter.get("/licenses/:id/device-stats", requireAdminAuth, async (req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    res.json({ devices: await getLicenseDeviceStats(getDbClient(), String(req.params.id)) });
+  } catch {
+    res.status(503).json({ code: "DEVICE_STATS_UNAVAILABLE" });
+  }
+});
+
 // Unbind/Reset all devices for a license
 apiRouter.delete(
   "/licenses/:id/devices",
@@ -2576,6 +2587,14 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
           signedData.diagnostic_token = diagnostic.token;
           signedData.diagnostic_incident_id = diagnostic.incident_id;
         }
+        if (requestNonce !== undefined && req.body.stats_capability_version === 1) {
+          const device = await tx.execute({
+            sql: "SELECT id FROM devices WHERE license_id = ? AND hwid = ? AND status = 'active' LIMIT 1",
+            args: [license.id as string, hwid],
+          });
+          if (!device.rows[0]?.id) throw new Error("Stats device binding unavailable");
+          signedData.stats_capability = await issueDeviceStatsSession(tx, String(device.rows[0].id), now);
+        }
         if (requestNonce !== undefined && req.body.logout_proof_version === 2) {
           const found = await tx.execute({
             sql: "SELECT id FROM devices WHERE license_id = ? AND hwid = ? LIMIT 1",
@@ -2651,6 +2670,32 @@ apiRouter.post("/v1/license/validate", async (req: Request, res: Response) => {
     );
   } catch (error: any) {
     res.status(500).json({ error: SAFE_SERVER_ERROR });
+  }
+});
+
+// SDK-STAT-01: isolated reporting capability, not license authorization.
+apiRouter.post("/v1/device/stats", async (req: Request, res: Response) => {
+  res.setHeader("Cache-Control", "no-store");
+  const authorization = req.headers.authorization;
+  const token = typeof authorization === "string" && authorization.startsWith("Bearer ")
+    ? authorization.slice(7) : null;
+  if (!allowDeviceStatsIp(req.socket.remoteAddress || "unknown")) {
+    res.status(429).json({ code: "STATS_RATE_LIMITED" }); return;
+  }
+  if (Number(req.headers["content-length"] || 0) > 4608) {
+    res.status(413).json({ code: "STATS_TOO_LARGE" }); return;
+  }
+  try {
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).length !== 1 || !Object.hasOwn(body, "stats")) {
+      res.status(400).json({ code: "INVALID_STATS" }); return;
+    }
+    await acceptDeviceStats(getDbClient(), token, body.stats);
+    res.status(202).json({ code: "STATS_ACCEPTED" });
+  } catch (error) {
+    if (error instanceof DeviceStatsError) res.status(error.status).json({ code: error.code });
+    else res.status(503).json({ code: "STATS_UNAVAILABLE" });
   }
 });
 
@@ -2767,6 +2812,7 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
     // both the transaction and the conditional UPDATE require status='active'.
     let renewalTx: Awaited<ReturnType<typeof db.transaction>> | undefined;
     let renewedDeviceId: string | undefined;
+    let refreshedStatsToken: string | undefined;
     try {
       renewalTx = await db.transaction("write");
       await renewalTx.lockLicense?.(license.id as string);
@@ -2796,6 +2842,10 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
         return;
       }
       renewedDeviceId = String(renewed.rows[0].id);
+      if (req.body.stats_capability_version === 1 && typeof nonce === "string" &&
+          /^[A-Za-z0-9_-]{16,128}$/.test(nonce)) {
+        refreshedStatsToken = await refreshDeviceStatsSession(renewalTx, renewedDeviceId, req.body.stats_capability, now);
+      }
       await renewalTx.commit();
     } catch (error) {
       await renewalTx?.rollback();
@@ -2810,6 +2860,7 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
       server_time: now,
       nonce: typeof nonce === "string" ? nonce : "",
     };
+    if (refreshedStatsToken) signedData.stats_capability = refreshedStatsToken;
     // A validated v2 SDK refreshes its RAM-only logout capability on
     // signed heartbeat, avoiding forced logout after the one-hour proof TTL.
     const refreshedProof = req.body.logout_proof_version === 2

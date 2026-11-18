@@ -144,6 +144,12 @@ try {
   setupClient = await request.newContext({ baseURL: origin, ignoreHTTPSErrors: true });
   const unauth = await setupClient.get("/api/devices");
   check("unauthenticated devices denied", unauth.status() === 401);
+  const unauthStats = await setupClient.get("/api/licenses/ci_e2e_license_a/device-stats");
+  check("SDK-STAT-01 Admin statistics require authenticated session", unauthStats.status() === 401);
+  const noStatsToken = await setupClient.post("/api/v1/device/stats", {
+    data: { stats: { Total: 1 } },
+  });
+  check("SDK-STAT-01 anonymous client cannot write statistics", [401, 403].includes(noStatsToken.status()));
   const unauthWs = await setupClient.post("/api/admin/realtime/bootstrap", {
     headers: { origin, "content-type": "application/json" }, data: {} });
   check("unauthenticated WSS bootstrap denied", unauthWs.status() === 401);
@@ -430,6 +436,41 @@ try {
   check("License server tier filter covers all fixtures", true);
   await pageA.locator('main select').nth(2).selectOption("all");
 
+  // SDK-STAT-01: find a deterministic disposable license with bound devices.
+  const statsSearch = pageA.locator("main form").first();
+  await statsSearch.locator("input").fill("CI-E2E-LICENSE-A");
+  await statsSearch.getByRole("button", { name: "Search" }).click();
+  await poll(async () => (await pageA.locator("main tbody").innerText()).includes("CI-E2E-LICENSE-A"),
+    "SDK-STAT-01 CI license search");
+
+  // SDK-STAT-01: synthetic browser presentation without touching user data.
+  await pageA.route("**/api/licenses/ci_e2e_license_a/device-stats", async route => {
+    await route.fulfill({ status: 200, contentType: "application/json",
+      body: JSON.stringify({ devices: Array.from({ length: 150 }, (_, i) => ({
+        device_id: "ci_e2e_device_" + String(i).padStart(3, "0"),
+        stats: { Total: 5000, Send: 200, Failed: 4800 },
+        reported_at: Date.now(), active: true,
+      })) }),
+    });
+  });
+  const groupRow = pageA.locator("main tbody tr").filter({ hasText: "CI-E2E-LICENSE-A" }).first();
+  await groupRow.locator('button[title="Click to view & unbind locked hardware"]').click();
+  const hwidInspector = pageA.locator("div.fixed").filter({ hasText: "HWID Lock Inspector:" }).last();
+  await poll(async () => await hwidInspector.locator("summary").count() > 0,
+    "SDK-STAT-01 HWID Inspector dynamic section");
+  await hwidInspector.locator("summary").first().click();
+  check("SDK-STAT-01 custom JSON labels and values render",
+    (await hwidInspector.innerText()).includes("Total") &&
+    (await hwidInspector.innerText()).includes("5,000") === false &&
+    (await hwidInspector.innerText()).includes("5000") &&
+    (await hwidInspector.innerText()).includes("Failed") &&
+    (await hwidInspector.innerText()).includes("4800"));
+  check("SDK-STAT-01 preserves Unbind and Reset actions",
+    await hwidInspector.getByText("Unbind HWID").count() > 0 &&
+    await hwidInspector.getByText("Reset All Devices").count() > 0);
+  await hwidInspector.getByRole("button", { name: "Close" }).click();
+  await pageA.unroute("**/api/licenses/ci_e2e_license_a/device-stats");
+
   // Isolate HTTP contract from browser rendering; never mask API errors.
   const historyResponse = await ctxA.request.get(origin + "/api/logs?limit=20");
   check("Logs authenticated history HTTP 200", historyResponse.status() === 200);
@@ -593,6 +634,36 @@ try {
     (await pageA.locator("main tbody").innerText()).includes("ci-e2e-live-device"),
     "Devices page reflects new CI-only binding");
   check("Devices table synchronizes new binding across Admin sessions", true);
+
+  // SDK-STAT-01: real encrypted-transport reporting on CI-only license/device.
+  const reportSession = await ctxB.request.post(origin + "/api/v1/license/validate", {
+    data: { license_key: "CI-E2E-LIVE-LICENSE", hwid: "ci-e2e-live-device",
+      app_name: "ci-e2e-live-created", app_version: "1.0.0",
+      device_name: "CI-only Device", os_info: "CI test",
+      nonce: "CI_STATS_ONLY_NONCE_0123456789", stats_capability_version: 1 }
+  });
+  check("SDK-STAT-01 CI device capability from verified-signed server path", reportSession.status() === 200);
+  const signedReport = await reportSession.json();
+  check("SDK-STAT-01 report capability is independently scoped and opaque",
+    typeof signedReport.signature === "string" &&
+    /^[A-Za-z0-9_-]{43}$/.test(signedReport.stats_capability ?? "") &&
+    signedReport.stats_capability !== signedReport.device_logout_proof);
+  const reportResult = await setupClient.post("/api/v1/device/stats", {
+    headers: { Authorization: "Bearer " + signedReport.stats_capability },
+    data: { stats: { Total: 5000, Send: 200, Failed: 4800 } }
+  });
+  check("SDK-STAT-01 device statistics accepted on disposable PostgreSQL", reportResult.status() === 202);
+  const ciLicenseId = (await newLicense.json()).license.id;
+  const adminReport = await ctxA.request.get(origin + "/api/licenses/" + ciLicenseId + "/device-stats");
+  check("SDK-STAT-01 authenticated inspector returns matching device statistics",
+    adminReport.status() === 200 &&
+    (await adminReport.json()).devices.some(d => d.stats?.Send === 200 && d.stats?.Failed === 4800));
+  const adminReportText = JSON.stringify(await (await ctxA.request.get(
+    origin + "/api/licenses/" + ciLicenseId + "/device-stats")).json());
+  check("SDK-STAT-01 Admin never receives bearer or token hash",
+    !adminReportText.includes(signedReport.stats_capability) &&
+    !adminReportText.includes("report_token_hash"));
+
   check("Admin WSS contains no license key, HWID or private payload",
     !a.frames.some(f => JSON.stringify(f).includes("CI-E2E-LIVE-LICENSE") ||
       JSON.stringify(f).includes("ci-e2e-live-device")));

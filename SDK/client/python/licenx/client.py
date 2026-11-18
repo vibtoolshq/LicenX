@@ -223,6 +223,7 @@ class XLicenseClient:
         self._authenticated = False
         self._current_key = None
         self._license_payload = None
+        self.communicator._stats_capability = None
         return success
 
     def is_authenticated(self) -> bool:
@@ -272,6 +273,12 @@ class XLicenseClient:
         """Returns active license key"""
         return self._current_key
 
+    def report_stats(self, stats: Dict[str, Any]) -> Dict[str, Any]:
+        """Opt-in dynamic per-device snapshot, never a license decision."""
+        if not self.is_authenticated():
+            return {"success": False, "code": "NOT_AUTHENTICATED"}
+        return self.communicator.send_stats(stats)
+
     def ping(self) -> Dict[str, Any]:
         """
         Sends on-demand heartbeat ping to server to check license status.
@@ -304,6 +311,7 @@ class XLicenseClient:
         self._authenticated = False
         self._license_payload = None
         self._current_key = None
+        self.communicator._stats_capability = None
         try:
             # An automatic local invalidation (e.g. WSS TLS/security failure)
             # cannot justify deleting an active server-side device binding.

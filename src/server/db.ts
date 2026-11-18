@@ -448,6 +448,14 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
       )`);
       await ensureColumnExists(db, "licenses", "group_id", "TEXT");
       await db.execute("CREATE INDEX IF NOT EXISTS idx_licenses_group_id ON licenses(group_id)");
+      await db.execute(`CREATE TABLE IF NOT EXISTS device_stat_snapshots (
+        device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+        stats_json TEXT NOT NULL DEFAULT '{}',
+        reported_at INTEGER NOT NULL DEFAULT 0,
+        report_token_hash TEXT NOT NULL DEFAULT '',
+        report_token_expires INTEGER NOT NULL DEFAULT 0
+      )`);
+      await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_device_stats_token ON device_stat_snapshots(report_token_hash)");
       await ensureColumnExists(db, "validation_logs", "app_slug", "TEXT");
       await ensureRealtimeSqliteSchema(db);
 
@@ -568,6 +576,14 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
       await db.execute("ALTER TABLE licenses ADD COLUMN group_id TEXT");
     }
     await db.execute("CREATE INDEX IF NOT EXISTS idx_licenses_group_id ON licenses(group_id)");
+    await db.execute(`CREATE TABLE IF NOT EXISTS device_stat_snapshots (
+        device_id TEXT PRIMARY KEY REFERENCES devices(id) ON DELETE CASCADE,
+        stats_json TEXT NOT NULL DEFAULT '{}',
+        reported_at INTEGER NOT NULL DEFAULT 0,
+        report_token_hash TEXT NOT NULL DEFAULT '',
+        report_token_expires INTEGER NOT NULL DEFAULT 0
+      )`);
+    await db.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_device_stats_token ON device_stat_snapshots(report_token_hash)");
 
     // Ensure app_id column exists if table existed previously without it
     try {

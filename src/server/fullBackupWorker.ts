@@ -21,11 +21,17 @@ const LEGACY_BACKUP_TABLES = [
   'r2_backups', 'admin_api_keys', 'admin_login_attempts',
   'user_control_pin_attempts', 'licenx_schema_migrations',
 ] as const;
-// Version 2 adds Group records; never change either manifest without a new version.
-export const BACKUP_TABLES = [
+// Immutable v2 manifest: preserves every previously encrypted Group archive.
+const V2_BACKUP_TABLES = [
   'admin_config', 'apps', 'license_groups', 'licenses', 'devices', 'validation_logs',
   'r2_backups', 'admin_api_keys', 'admin_login_attempts',
   'user_control_pin_attempts', 'licenx_schema_migrations',
+] as const;
+// SDK-STAT-01 v3: statistics are keyed to devices; import after devices.
+export const BACKUP_TABLES = [
+  'admin_config', 'apps', 'license_groups', 'licenses', 'devices',
+  'device_stat_snapshots', 'validation_logs', 'r2_backups', 'admin_api_keys',
+  'admin_login_attempts', 'user_control_pin_attempts', 'licenx_schema_migrations',
 ] as const;
 // The pre-LG-01A PostgreSQL licenses COPY had 17 columns, before nullable group_id.
 const LEGACY_LICENSE_COLUMNS = [
@@ -34,7 +40,8 @@ const LEGACY_LICENSE_COLUMNS = [
   'created_at', 'customer_name', 'customer_email', 'notes',
   'metadata_json', 'r2_backup_id', 'pin',
 ] as const;
-const BACKUP_KIND = 'licenx-full-v2';
+const BACKUP_KIND = 'licenx-full-v3';
+const V2_BACKUP_KIND = 'licenx-full-v2';
 const LEGACY_BACKUP_KIND = 'licenx-full-v1';
 const MAGIC = Buffer.from('LXBACK01');
 const storageRoot = process.env.LOCAL_STORAGE_PATH ?? '';
@@ -124,9 +131,12 @@ async function restoreDatabase(
       await pipeline(createReadStream(input), db.query(copyFrom('COPY ' + target + ' FROM STDIN WITH (FORMAT binary)')));
     }
     if (legacy) {
-      // The physical v6 schema remains after restoring a v5 data snapshot.
-      // Keep its migration ledger consistent so subsequent starts remain safe.
+      // Physical v6 Group schema remains present after a historical v1 restore.
       await db.query('INSERT INTO licenx_schema_migrations (version, applied_at) VALUES (6, $1) ON CONFLICT(version) DO NOTHING', [Date.now()]);
+    }
+    if (!tables.includes('device_stat_snapshots')) {
+      // Physical v7 snapshot schema remains even when restoring v1/v2 content.
+      await db.query('INSERT INTO licenx_schema_migrations (version, applied_at) VALUES (7, $1) ON CONFLICT(version) DO NOTHING', [Date.now()]);
     }
     await onBeforeCommit();
     await db.query('COMMIT');
@@ -223,10 +233,12 @@ async function restoreBackup(source: string, id: string) {
     // mismatch must fail closed; do not infer columns from untrusted archives.
     const legacy = manifest.kind === LEGACY_BACKUP_KIND &&
       JSON.stringify(manifest.tables) === JSON.stringify(LEGACY_BACKUP_TABLES);
+    const v2 = manifest.kind === V2_BACKUP_KIND &&
+      JSON.stringify(manifest.tables) === JSON.stringify(V2_BACKUP_TABLES);
     const current = manifest.kind === BACKUP_KIND &&
       JSON.stringify(manifest.tables) === JSON.stringify(BACKUP_TABLES);
-    if (!legacy && !current) throw new Error('Backup format or schema mismatch');
-    const tables: readonly string[] = legacy ? LEGACY_BACKUP_TABLES : BACKUP_TABLES;
+    if (!legacy && !v2 && !current) throw new Error('Backup format or schema mismatch');
+    const tables: readonly string[] = legacy ? LEGACY_BACKUP_TABLES : v2 ? V2_BACKUP_TABLES : BACKUP_TABLES;
     for (const table of tables) {
       if (!(await fs.stat(path.join(unpacked, 'db', table + '.copy'))).isFile()) throw new Error('Missing database table file');
     }

@@ -30,6 +30,7 @@ import {
   verifySessionToken,
 } from "./crypto.js";
 import { getDbClient, initDatabaseSchema, isTursoPlaceholder } from "./db.js";
+import { acceptDeviceStats, allowDeviceStatsIp, DeviceStatsError, getLicenseDeviceStats, issueDeviceStatsSession, refreshDeviceStatsSession } from "./deviceStats.js";
 import { decodeAdminLicensePathKey, validateAdminLicenseCreation } from "./adminApiInput.js";
 import { createAdminApiRateLimiter } from "./adminApiRateLimiter.js";
 import { runRestrictedPublicLicenseCheck, PUBLIC_CHECK_MAX_BODY_BYTES } from "./restrictedPublicLicenseCheck.js";
@@ -1744,6 +1745,15 @@ export async function handleCloudflareApi(
       }
     }
 
+    if (normalizedPath.startsWith("/licenses/") &&
+        normalizedPath.endsWith("/device-stats") && method === "GET") {
+      const auth = await verifyAdminAuth(request, env);
+      if (!auth.authorized) return errorResponse(auth.error || "Unauthorized", auth.status || 401);
+      const licenseId = normalizedPath.slice("/licenses/".length, -"/device-stats".length);
+      if (!/^[A-Za-z0-9_-]{1,128}$/.test(licenseId)) return errorResponse("Invalid license", 400);
+      return jsonResponse({ devices: await getLicenseDeviceStats(db, licenseId) }, 200, { "Cache-Control": "no-store" });
+    }
+
     if (
       normalizedPath.includes("/devices") &&
       normalizedPath.startsWith("/licenses/")
@@ -2086,6 +2096,25 @@ export async function handleCloudflareApi(
         publicKeyPem: pubKey,
         serverTime: Date.now(),
       });
+    }
+
+    if (normalizedPath === "/v1/device/stats" && method === "POST") {
+      const token = request.headers.get("authorization");
+      const bearer = token?.startsWith("Bearer ") ? token.slice(7) : null;
+      if (!allowDeviceStatsIp(request.headers.get("cf-connecting-ip") || "unknown"))
+        return jsonResponse({ code: "STATS_RATE_LIMITED" }, 429);
+      if (Number(request.headers.get("content-length") || 0) > 4608)
+        return jsonResponse({ code: "STATS_TOO_LARGE" }, 413);
+      try {
+        if (!body || typeof body !== "object" || Array.isArray(body) ||
+            Object.keys(body).length !== 1 || !Object.hasOwn(body, "stats"))
+          return jsonResponse({ code: "INVALID_STATS" }, 400);
+        await acceptDeviceStats(db, bearer, body.stats);
+        return jsonResponse({ code: "STATS_ACCEPTED" }, 202, { "Cache-Control": "no-store" });
+      } catch (error) {
+        if (error instanceof DeviceStatsError) return jsonResponse({ code: error.code }, error.status);
+        return jsonResponse({ code: "STATS_UNAVAILABLE" }, 503);
+      }
     }
 
     if (normalizedPath === "/v1/license/validate" && method === "POST") {
@@ -2493,6 +2522,14 @@ export async function handleCloudflareApi(
         signedData.request_app = typeof app_name === "string" ? app_name.trim() : "";
       }
 
+      if (requestNonce !== undefined && body.stats_capability_version === 1) {
+        const dev = await db.execute({
+          sql: "SELECT id FROM devices WHERE license_id = ? AND hwid = ? AND status = 'active' LIMIT 1",
+          args: [lic.id as string, cleanHwid],
+        });
+        if (!dev.rows[0]?.id) return jsonResponse({ code: "STATS_DEVICE_UNAVAILABLE" }, 503);
+        signedData.stats_capability = await issueDeviceStatsSession(db, String(dev.rows[0].id), now);
+      }
       const canonicalPayload = canonicalJson(signedData);
       validationStage = "response_signing";
       const signature = await signPayloadForCloudflare(
@@ -2621,6 +2658,17 @@ export async function handleCloudflareApi(
         server_time: now,
         nonce: typeof nonce === "string" ? nonce : "",
       };
+      if (body.stats_capability_version === 1 && typeof nonce === "string" &&
+          /^[A-Za-z0-9_-]{16,128}$/.test(nonce)) {
+        const bound = await db.execute({
+          sql: "SELECT id FROM devices WHERE license_id = ? AND hwid = ? AND status = 'active' LIMIT 1",
+          args: [licRes.rows[0].id as string, cleanHwid],
+        });
+        if (bound.rows[0]?.id) {
+          const refreshed = await refreshDeviceStatsSession(db, String(bound.rows[0].id), body.stats_capability, now);
+          if (refreshed) signedData.stats_capability = refreshed;
+        }
+      }
       const signature = await signPayloadForCloudflare(
         canonicalJson(signedData),
         configRes.rows[0].ed25519_private_key as string,

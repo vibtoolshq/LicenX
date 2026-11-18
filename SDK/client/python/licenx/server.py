@@ -46,6 +46,7 @@ class ServerCommunicator:
         self.config = config
         self.diagnostics = SafeDiagnosticBuffer()
         self._diagnostic_token = None
+        self._stats_capability = None
 
     def record_diagnostic(self, stage, code, attempt=0, verify_code=None):
         return self.diagnostics.record(stage, code, attempt, verify_code)
@@ -418,6 +419,7 @@ class ServerCommunicator:
         self._diagnostic_token = None
         self._logout_proof = None
         self._logout_proof_session = None
+        self._stats_capability = None
         url = self._build_url("api/v1/license/validate")
         app_version = self.config.app_version
         if not isinstance(app_version, str) or not app_version.strip():
@@ -435,6 +437,7 @@ class ServerCommunicator:
             "app_version": app_version.strip(),
             "nonce": secrets.token_urlsafe(32),
             "logout_proof_version": 2,
+            "stats_capability_version": 1,
         }
 
         status_code, data = self._http_post(url, body, self.config.request_timeout_seconds)
@@ -457,6 +460,9 @@ class ServerCommunicator:
 
             # Keep the signed, short-lived diagnostic bearer capability in RAM only.
             # Never expose it via LoginResult/license_data or session storage.
+            stats_token = data.pop("stats_capability", None)
+            if isinstance(stats_token, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", stats_token):
+                self._stats_capability = stats_token
             capability = data.pop("diagnostic_token", None)
             if isinstance(capability, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", capability):
                 self._diagnostic_token = capability
@@ -484,7 +490,10 @@ class ServerCommunicator:
             "app_name": self.config.app_name,
             "nonce": nonce,
             "logout_proof_version": 2,
+            "stats_capability_version": 1,
         }
+        if isinstance(self._stats_capability, str):
+            body["stats_capability"] = self._stats_capability
 
         # Honor the SDK request timeout, but bound heartbeat attempts so that
         # a network outage does not stall the grace recovery worker indefinitely.
@@ -507,6 +516,9 @@ class ServerCommunicator:
                     "error": "Heartbeat signature or challenge verification failed",
                     "code": "HEARTBEAT_SIGNATURE_FAILED",
                 }
+            stats_token = data.pop("stats_capability", None)
+            if isinstance(stats_token, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", stats_token):
+                self._stats_capability = stats_token
             # Rotate the session's RAM-only proof from this signed response.
             # An old proof is never trusted as a replacement for a new session.
             proof = data.pop("device_logout_proof", None)
@@ -565,6 +577,53 @@ class ServerCommunicator:
         elif data.get("code") in transient_codes:
             data = {**data, "code": "INVALID_RESPONSE"}
         return False, data
+
+    def send_stats(self, stats: Dict[str, Any]) -> Dict[str, Any]:
+        """Explicit report-only request: no retries, no authorization grants."""
+        token = self._stats_capability
+        if not isinstance(token, str):
+            return {"success": False, "code": "STATS_UNSUPPORTED"}
+        if not isinstance(stats, dict) or not 1 <= len(stats) <= 40:
+            return {"success": False, "code": "INVALID_STATS"}
+        forbidden = re.compile(r"password|passwd|secret|token|private|credential|cookie|authorization|license.?key|hwid|bearer|access.?key|api.?key", re.I)
+        for label, value in stats.items():
+            if (not isinstance(label, str) or not label or len(label) > 64 or
+                    label != label.strip() or re.search(r"[ --]", label) or
+                    label.lower() in ("__proto__", "constructor", "prototype") or forbidden.search(label)):
+                return {"success": False, "code": "INVALID_STAT_LABEL"}
+            if (value is not None and type(value) not in (str, int, float, bool)) or (
+                isinstance(value, str) and (len(value) > 256 or re.search(r"[ --]", value))
+            ):
+                return {"success": False, "code": "INVALID_STAT_VALUE"}
+            if type(value) is int and abs(value) > 9007199254740991:
+                return {"success": False, "code": "INVALID_STAT_VALUE"}
+            if type(value) is float:
+                import math
+                if not math.isfinite(value):
+                    return {"success": False, "code": "INVALID_STAT_VALUE"}
+        try:
+            raw_stats = json.dumps(stats, ensure_ascii=False, allow_nan=False, separators=(",", ":")).encode("utf-8")
+            body = b'{"stats":' + raw_stats + b'}'
+            if len(raw_stats) > 4096 or len(body) > 4608:
+                return {"success": False, "code": "STATS_TOO_LARGE"}
+        except (TypeError, ValueError, OverflowError):
+            return {"success": False, "code": "INVALID_STATS"}
+        try:
+            req = urllib.request.Request(self._build_url("api/v1/device/stats"),
+                data=body, headers={"Content-Type": "application/json",
+                                    "Authorization": "Bearer " + token}, method="POST")
+            with urllib.request.urlopen(req, timeout=min(10, self.config.request_timeout_seconds),
+                                        context=ssl.create_default_context()) as response:
+                return {"success": response.getcode() == 202,
+                        "code": "STATS_ACCEPTED" if response.getcode() == 202 else "STATS_ERROR"}
+        except urllib.error.HTTPError as e:
+            code = {400:"INVALID_STATS",401:"STATS_UNAUTHORIZED",403:"STATS_UNAUTHORIZED",
+                    404:"STATS_UNSUPPORTED",413:"STATS_TOO_LARGE",429:"STATS_RATE_LIMITED"}.get(e.code,"STATS_UNAVAILABLE")
+            return {"success": False, "code": code}
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return {"success": False, "code": "STATS_NETWORK_ERROR"}
+        except Exception:
+            return {"success": False, "code": "STATS_UNAVAILABLE"}
 
     def send_logout(self, license_key: str, hwid: str) -> bool:
         """Unbind only with the current session's signed, one-use v2 bearer."""

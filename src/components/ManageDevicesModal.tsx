@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { X, Laptop, RotateCcw, Loader2 } from 'lucide-react';
 import { api } from '../services/apiClient';
-import { License, Device } from '../types';
+import { License, Device, DeviceStatSnapshot } from '../types';
 import { TablePagination } from './TablePagination';
 import { useConfirm } from '../context/ConfirmContext';
 
@@ -21,6 +21,9 @@ export const ManageDevicesModal: React.FC<ManageDevicesModalProps> = ({
   const [loading, setLoading] = useState(true);
   const [actionLoading, setActionLoading] = useState(false);
   const [error, setError] = useState('');
+  const [stats, setStats] = useState<Record<string, DeviceStatSnapshot>>({});
+  const [statsError, setStatsError] = useState('');
+  const [statsLoading, setStatsLoading] = useState(false);
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -29,9 +32,21 @@ export const ManageDevicesModal: React.FC<ManageDevicesModalProps> = ({
   const fetchDevices = async () => {
     try {
       setLoading(true);
+      setError('');
       const res = await api.getLicenseDevices(license.id);
       const devList = res?.devices || (Array.isArray(res) ? (res as any) : []);
       setDevices(Array.isArray(devList) ? devList : []);
+      setStatsLoading(true);
+      try {
+        const snapshots = await api.getLicenseDeviceStats(license.id);
+        setStats(Object.fromEntries((snapshots.devices || []).map(item => [item.device_id, item])));
+        setStatsError('');
+      } catch {
+        setStats({});
+        setStatsError('App statistics temporarily unavailable');
+      } finally {
+        setStatsLoading(false);
+      }
     } catch (err: any) {
       setError(err.message || 'Failed to fetch devices');
     } finally {
@@ -42,6 +57,24 @@ export const ManageDevicesModal: React.FC<ManageDevicesModalProps> = ({
   useEffect(() => {
     setCurrentPage(1);
     fetchDevices();
+  }, [license.id]);
+
+  // Only the open inspector refreshes custom snapshots; no global polling.
+  useEffect(() => {
+    let mounted = true;
+    const refresh = async () => {
+      try {
+        const result = await api.getLicenseDeviceStats(license.id);
+        if (mounted) {
+          setStats(Object.fromEntries((result.devices || []).map(item => [item.device_id, item])));
+          setStatsError('');
+        }
+      } catch {
+        if (mounted) setStatsError('App statistics temporarily unavailable');
+      }
+    };
+    const timer = window.setInterval(() => { void refresh(); }, 15000);
+    return () => { mounted = false; window.clearInterval(timer); };
   }, [license.id]);
 
   const totalPages = Math.max(1, Math.ceil(devices.length / pageSize));
@@ -93,7 +126,7 @@ export const ManageDevicesModal: React.FC<ManageDevicesModalProps> = ({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-3 bg-black/75 backdrop-blur-xs">
-      <div className="w-full max-w-2xl bg-slate-950 border border-slate-800 rounded-lg shadow-xl overflow-hidden">
+      <div className="w-full max-w-5xl max-h-[90vh] overflow-y-auto bg-slate-950 border border-slate-800 rounded-lg shadow-xl">
         <div className="p-3 border-b border-slate-800 bg-slate-900/40 flex items-center justify-between">
           <div className="flex items-center gap-2">
             <Laptop className="w-4 h-4 text-slate-400" />
@@ -115,6 +148,7 @@ export const ManageDevicesModal: React.FC<ManageDevicesModalProps> = ({
         </div>
 
         <div className="p-4 space-y-3">
+          {statsError && <div className="text-xs text-amber-400" role="status">{statsError}</div>}
           {error && (
             <div className="p-2 text-xs text-rose-400 bg-rose-950/30 border border-rose-900/40 rounded font-mono">
               {error}
@@ -148,7 +182,8 @@ export const ManageDevicesModal: React.FC<ManageDevicesModalProps> = ({
                     {paginatedDevices.map((d) => {
                       const isActive = d.status === 'active';
                       return (
-                        <tr key={d.id} className="hover:bg-slate-900/30 transition-colors">
+                        <React.Fragment key={d.id}>
+                        <tr className="hover:bg-slate-900/30 transition-colors">
                           <td className="py-2 px-2.5">
                             <span className="font-medium text-slate-300 select-all" title={d.hwid}>
                               {d.hwid.slice(0, 16)}...
@@ -191,6 +226,30 @@ export const ManageDevicesModal: React.FC<ManageDevicesModalProps> = ({
                             </button>
                           </td>
                         </tr>
+                        <tr className="bg-slate-950/60">
+                          <td colSpan={6} className="px-3 py-2">
+                            <details className="group">
+                              <summary className="cursor-pointer select-none text-xs font-medium text-slate-400 hover:text-slate-200">
+                                App Statistics {stats[d.id]?.reported_at ? '· Updated ' + formatTime(Number(stats[d.id].reported_at)) : ''}
+                              </summary>
+                              <div className="mt-2 rounded border border-slate-800/80 bg-slate-900/30 p-3">
+                                {statsLoading ? <span className="text-slate-500">Loading statistics...</span> :
+                                !stats[d.id]?.reported_at ? <span className="text-slate-500">No app statistics reported</span> :
+                                <div className="grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+                                  {Object.entries(stats[d.id].stats).map(([label, value]) => (
+                                    <div key={label} className="min-w-0 rounded border border-slate-800 bg-slate-950/60 p-2">
+                                      <div className="break-words text-[10px] text-slate-500">{label}</div>
+                                      <div className="mt-1 break-words text-sm font-medium text-slate-200">{value === null ? 'null' : String(value)}</div>
+                                    </div>
+                                  ))}
+                                </div>}
+                                {stats[d.id]?.reported_at && Date.now() - stats[d.id].reported_at! > 3600000 &&
+                                  <p className="mt-2 text-[10px] text-amber-500">Statistics may be stale</p>}
+                              </div>
+                            </details>
+                          </td>
+                        </tr>
+                        </React.Fragment>
                       );
                     })}
                   </tbody>
