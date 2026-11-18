@@ -523,17 +523,6 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
             ))}
           </select>
 
-          <select aria-label="Filter licenses by Group"
-            value={groupFilter}
-            onChange={event => { setGroupFilter(event.target.value); setCurrentPage(1); }}
-            className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none max-w-[150px] truncate">
-            <option value="all">Group: All</option>
-            <option value="unassigned">Unassigned</option>
-            {groups.map(group => <option key={group.id} value={group.id}>
-              {group.name}{group.archived_at != null ? ' (Archived)' : ''}
-            </option>)}
-          </select>
-
           <select
             value={statusFilter}
             onChange={(e) => { setStatusFilter(e.target.value); setCurrentPage(1); }}
@@ -556,6 +545,17 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
             <option value="Pro">Pro</option>
             <option value="Enterprise">Enterprise</option>
             <option value="VIP">VIP</option>
+          </select>
+
+          <select aria-label="Filter licenses by Group"
+            value={groupFilter}
+            onChange={event => { setGroupFilter(event.target.value); setCurrentPage(1); }}
+            className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none max-w-[150px] truncate">
+            <option value="all">Group: All</option>
+            <option value="unassigned">Unassigned</option>
+            {groups.map(group => <option key={group.id} value={group.id}>
+              {group.name}{group.archived_at != null ? ' (Archived)' : ''}
+            </option>)}
           </select>
 
           <button
