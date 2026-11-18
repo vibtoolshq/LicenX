@@ -51,7 +51,7 @@ print(f"Hardware ID: {result.hwid}")
 
 ### Optional per-device application statistics (SDK-STAT-01)
 
-After a verified login, applications can explicitly send dynamic flat title/value pairs. Nothing is collected automatically:
+After a verified login, applications can explicitly send dynamic flat title/value pairs. Nothing is collected automatically. The first report performs an additional signed, nonce-bound validation solely to obtain a RAM-held report token; ordinary login/heartbeat request formats and logout proof remain unchanged:
 
 ```python
 result = client.report_stats({"Total": 5000, "Send": 200, "Failed": 4800, "Logins": 4})

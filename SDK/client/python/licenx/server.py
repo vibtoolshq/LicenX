@@ -437,7 +437,6 @@ class ServerCommunicator:
             "app_version": app_version.strip(),
             "nonce": secrets.token_urlsafe(32),
             "logout_proof_version": 2,
-            "stats_capability_version": 1,
         }
 
         status_code, data = self._http_post(url, body, self.config.request_timeout_seconds)
@@ -460,9 +459,9 @@ class ServerCommunicator:
 
             # Keep the signed, short-lived diagnostic bearer capability in RAM only.
             # Never expose it via LoginResult/license_data or session storage.
-            stats_token = data.pop("stats_capability", None)
-            if isinstance(stats_token, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", stats_token):
-                self._stats_capability = stats_token
+            # Default login has no statistics opt-in. Never export any unsolicited
+            # report capability to the host or retain it in normal session state.
+            data.pop("stats_capability", None)
             capability = data.pop("diagnostic_token", None)
             if isinstance(capability, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", capability):
                 self._diagnostic_token = capability
@@ -490,9 +489,10 @@ class ServerCommunicator:
             "app_name": self.config.app_name,
             "nonce": nonce,
             "logout_proof_version": 2,
-            "stats_capability_version": 1,
         }
         if isinstance(self._stats_capability, str):
+            # Refresh only a previously signed and stored report-only token.
+            body["stats_capability_version"] = 1
             body["stats_capability"] = self._stats_capability
 
         # Honor the SDK request timeout, but bound heartbeat attempts so that
@@ -577,6 +577,57 @@ class ServerCommunicator:
         elif data.get("code") in transient_codes:
             data = {**data, "code": "INVALID_RESPONSE"}
         return False, data
+
+    def request_stats_capability(self, license_key: str, hwid: str,
+                                 telemetry: Dict[str, Any]) -> Dict[str, Any]:
+        """Explicit opt-in revalidation, leaving existing login/logout session intact.
+
+        An unverified license-key/HWID heartbeat is never sufficient to mint the
+        first report capability. The server signs a fresh challenge and binding.
+        """
+        version = self.config.app_version
+        if not isinstance(version, str) or not version.strip():
+            return {"success": False, "code": "STATS_UNAVAILABLE"}
+        try:
+            nonce = secrets.token_urlsafe(32)
+            request = {
+                "license_key": license_key.strip().upper(),
+                "hwid": hwid.strip(),
+                "device_name": telemetry.get("device_name", "Unknown-PC"),
+                "os_info": telemetry.get("os_info", "Generic-OS"),
+                "app_name": self.config.app_name,
+                "app_version": version.strip(),
+                "nonce": nonce,
+                "stats_capability_version": 1,
+            }
+            status, response = self._http_post(
+                self._build_url("api/v1/license/validate"),
+                request, self.config.request_timeout_seconds
+            )
+            if status != 200 or not isinstance(response, dict):
+                code = "STATS_UNAUTHORIZED" if status in (400, 401, 403, 404) else "STATS_NETWORK_ERROR"
+                return {"success": False, "code": code}
+            signed = dict(response)
+            signature = signed.pop("signature", None)
+            signed.pop("public_key", None)
+            if (signed.get("valid") is not True or
+                    signed.get("status") != "active" or
+                    signed.get("nonce") != nonce or
+                    signed.get("request_app") != self.config.app_name.strip() or
+                    signed.get("license_key") != request["license_key"] or
+                    signed.get("hwid") != request["hwid"] or
+                    not isinstance(signature, str) or
+                    not self.verify_signature(signed, signature)):
+                return {"success": False, "code": "STATS_UNAUTHORIZED"}
+            capability = signed.get("stats_capability")
+            if capability is None:
+                return {"success": False, "code": "STATS_UNSUPPORTED"}
+            if not isinstance(capability, str) or not re.fullmatch(r"[A-Za-z0-9_-]{43}", capability):
+                return {"success": False, "code": "STATS_UNAUTHORIZED"}
+            self._stats_capability = capability
+            return {"success": True, "code": "STATS_CAPABILITY_READY"}
+        except Exception:
+            return {"success": False, "code": "STATS_UNAVAILABLE"}
 
     def send_stats(self, stats: Dict[str, Any]) -> Dict[str, Any]:
         """Explicit report-only request: no retries, no authorization grants."""

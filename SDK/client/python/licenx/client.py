@@ -223,7 +223,9 @@ class XLicenseClient:
         self._authenticated = False
         self._current_key = None
         self._license_payload = None
-        self.communicator._stats_capability = None
+        communicator = getattr(self, "communicator", None)
+        if communicator is not None:
+            communicator._stats_capability = None
         return success
 
     def is_authenticated(self) -> bool:
@@ -274,10 +276,28 @@ class XLicenseClient:
         return self._current_key
 
     def report_stats(self, stats: Dict[str, Any]) -> Dict[str, Any]:
-        """Opt-in dynamic per-device snapshot, never a license decision."""
-        if not self.is_authenticated():
+        """Opt-in per-device snapshot; normal login and heartbeat stay unchanged."""
+        if not self.is_authenticated() or not self._current_key:
             return {"success": False, "code": "NOT_AUTHENTICATED"}
-        return self.communicator.send_stats(stats)
+        if not isinstance(stats, dict) or not 1 <= len(stats) <= 40:
+            return {"success": False, "code": "INVALID_STATS"}
+        communicator = getattr(self, "communicator", None)
+        if communicator is None:
+            return {"success": False, "code": "STATS_UNAVAILABLE"}
+        if not isinstance(getattr(communicator, "_stats_capability", None), str):
+            try:
+                ready = communicator.request_stats_capability(
+                    self._current_key, self.get_hwid(),
+                    DeviceManager.get_validation_telemetry(),
+                )
+            except Exception:
+                return {"success": False, "code": "STATS_UNAVAILABLE"}
+            if not ready.get("success"):
+                return ready
+        result = communicator.send_stats(stats)
+        if result.get("code") == "STATS_UNAUTHORIZED":
+            communicator._stats_capability = None
+        return result
 
     def ping(self) -> Dict[str, Any]:
         """
@@ -311,7 +331,9 @@ class XLicenseClient:
         self._authenticated = False
         self._license_payload = None
         self._current_key = None
-        self.communicator._stats_capability = None
+        communicator = getattr(self, "communicator", None)
+        if communicator is not None:
+            communicator._stats_capability = None
         try:
             # An automatic local invalidation (e.g. WSS TLS/security failure)
             # cannot justify deleting an active server-side device binding.

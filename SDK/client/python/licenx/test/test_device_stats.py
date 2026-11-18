@@ -28,8 +28,10 @@ class TestDeviceStats(unittest.TestCase):
     def test_unverified_or_old_server_never_grants_reporting(self):
         self.assertEqual(self.comm.send_stats({"Sent": 1})["code"], "STATS_UNSUPPORTED")
         token = "Z" * 43
+        requests_seen = []
         def fake_validate(_url, body, _timeout):
-            return 200, dict(valid=True, signature="signed", nonce=body["nonce"],
+            requests_seen.append(dict(body))
+            return 200, dict(valid=True, status="active", signature="signed", nonce=body["nonce"],
                 request_app=body["app_name"], license_key=body["license_key"],
                 hwid=body["hwid"], stats_capability=token)
         with patch.object(self.comm, "_http_post", side_effect=fake_validate), \
@@ -41,8 +43,18 @@ class TestDeviceStats(unittest.TestCase):
              patch.object(self.comm, "verify_signature", return_value=True):
             valid, _, data = self.comm.validate_license("CI-CHECK", "hwid-test", {"device_name":"CI"})
         self.assertTrue(valid)
-        self.assertEqual(self.comm._stats_capability, token)
+        self.assertIsNone(self.comm._stats_capability)
         self.assertNotIn("stats_capability", data)
+        self.assertNotIn("stats_capability_version", requests_seen[-1],
+                         "existing login validation contract must not change")
+        with patch.object(self.comm, "_http_post", side_effect=fake_validate), \
+             patch.object(self.comm, "verify_signature", return_value=True):
+            ready = self.comm.request_stats_capability("CI-CHECK", "hwid-test", {"device_name":"CI"})
+        self.assertEqual(ready, {"success": True, "code": "STATS_CAPABILITY_READY"})
+        self.assertEqual(requests_seen[-1]["stats_capability_version"], 1)
+        self.assertNotIn("logout_proof_version", requests_seen[-1],
+                         "reporting must not alter existing logout bearer")
+        self.assertEqual(self.comm._stats_capability, token)
 
     def test_flat_dynamic_json_sent_once_with_bearer_and_never_leaked(self):
         self.comm._stats_capability = "Z" * 43
