@@ -476,6 +476,34 @@ class LiveConfigTests(unittest.TestCase):
         self.assertEqual(full_telemetry["public_ip"], "198.51.100.20")
         public_ip_lookup.assert_called_once_with()
 
+    def test_public_ip_failure_is_unavailable_not_lan_and_retry_can_recover(self):
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return False
+
+            def read(self):
+                return b"198.51.100.25"
+
+        for outage in (TimeoutError("timeout"), OSError("offline")):
+            with self.subTest(error=type(outage).__name__), patch.object(
+                DeviceManager, "_cached_public_ip", None
+            ), patch.object(
+                DeviceManager, "get_local_ip",
+                side_effect=AssertionError("LAN IP must not be labeled public"),
+            ) as local_ip, patch(
+                "licenx.device.urllib.request.urlopen",
+                side_effect=[outage, FakeResponse()],
+            ) as urlopen:
+                self.assertEqual(DeviceManager.get_public_ip(), "")
+                self.assertIsNone(DeviceManager._cached_public_ip)
+                local_ip.assert_not_called()
+                self.assertEqual(DeviceManager.get_public_ip(), "198.51.100.25")
+                self.assertEqual(DeviceManager.get_public_ip(), "198.51.100.25")
+                self.assertEqual(urlopen.call_count, 2)
+
     def test_validation_request_omits_nested_full_telemetry(self):
         communicator = ServerCommunicator(SDKConfig(app_version="2.4.1"))
         communicator._http_post = Mock(return_value=(400, {"error": "invalid"}))

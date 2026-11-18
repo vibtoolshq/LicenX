@@ -97,14 +97,14 @@ All development-time Markdown plans, forensic notes, error audits, and phase log
 - After implementation, run one focused verification pass and audit the exact patch against the phase target, acceptance criteria, and file allowlist. Reuse passing evidence; do not repeat identical tests/checks or broaden into full suites without a new reason.
 - If verification finds an in-scope defect, fix it and rerun only the affected checks. Record environment failures or scope-crossing blockers honestly; do not hide a failure to close the phase.
 - Once acceptance is satisfied, immediately close the phase and update the relevant plan, roadmap, logs, actual-working status, and required project memory. Do not prolong the phase with unrelated improvements or verification loops.
-- For an authorized implementation phase, publish the reviewed change to GitHub and safely fast-forward-pull it into the remote project after the focused verification; preserve local user changes, data, and ignored notes.
+- **Git publication is scope-gated:** publish a reviewed tracked change to GitHub and safely fast-forward-sync the authorized Windows repo **only when that phase's explicit owner approval includes commit/push**. For generated ignored artifacts or notes-only phases (including NX-P01), do **not** create a commit or push; preserve local user changes, data, and ignored notes.
 
 ## Strict Single-Pass Phase Verification — User-Mandated
 
 - After implementing the exact approved Scope Lock, perform **one focused verification pass and one exact changed-file/code-block diff audit**, then promptly record the actual result and close that phase. Do not run long verification loops, repeated identical tests, unnecessary full-suite runs, or broad speculative checks.
 - Reuse already successful evidence within the same phase. Re-run **only directly affected focused checks** when a demonstrated in-scope defect is fixed; never prolong the phase for unrelated improvements or repetitive confirmation.
 - A failed or blocked required check must be reported truthfully as `BLOCKED`/`NOT VERIFIED`, **not** relabeled PASS for speed. If a required edit crosses the frozen file/function allowlist, **STOP before product changes** and request an exact scope amendment.
-- Finish each accepted phase's private Markdown receipt and authorized GitHub-to-RDP synchronization promptly. Never auto-start the next phase; never deploy or change live VPS without its separate approval.
+- After the single successful focused verification and exact scope/patch audit, **close the phase immediately**; do not run another verification loop or add unrequested tests. Only a demonstrated in-scope defect permits correction and rechecking the affected test. Update all relevant private Markdown phase/status/actual-working receipts and provide a short, truthful update/benefit/out-of-scope summary plus **one paste-ready next-phase approval prompt**. Perform GitHub-to-RDP synchronization only when explicitly authorized; never auto-start the next phase or deploy/change the live VPS.
 
 ## Mandatory GitHub-to-RDP sync gate (LicenX)
 

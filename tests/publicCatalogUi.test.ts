@@ -101,6 +101,12 @@ test('PN-01 P02: both pages render compact loading state and disabled save witho
   assert.match(toolsHtml, /Save Tools/);
   assert.match(toolsHtml, /Loading saved tools/);
   assert.match(toolsHtml, /disabled=""/);
+  // NX-P02: the admin copy must describe the already published /tools page.
+  assert.match(toolsHtml, /Manage public Tools cards shown on \/tools after saving enabled items\./);
+  assert.match(toolsHtml, /Public enabled cards are shown on the \/tools page after Save Tools\./);
+  const toolsSource = source('src/components/PublicToolsTab.tsx');
+  assert.match(toolsSource, /setFeedback\('Tools saved\. Enabled items appear on the public \/tools page\.'\)/);
+  assert.doesNotMatch(toolsSource, /Phase-03/);
 });
 
 test('PN-01 P02: Admin routes, sidebar/titles and tab types are strictly additive', () => {

@@ -181,7 +181,7 @@ export function PublicToolsTab() {
       setItems(updated.tools.map(item => ({ ...item })));
       setDirty(false);
       setConflict(false);
-      setFeedback('Tools saved. Public /tools gallery will be added in Phase-03.');
+      setFeedback('Tools saved. Enabled items appear on the public /tools page.');
     } catch (error) {
       if (error instanceof ApiError && error.status === 409) {
         setConflict(true);
@@ -202,7 +202,7 @@ export function PublicToolsTab() {
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="text-lg font-semibold">Public · Tools</h2>
-          <p className="text-xs text-slate-400 mt-1">Manage the public Tools directory. Cards become visible after Phase-03 integration.</p>
+          <p className="text-xs text-slate-400 mt-1">Manage public Tools cards shown on /tools after saving enabled items.</p>
         </div>
         <div className="flex flex-wrap gap-2">
           <button type="button" className={actionStyle} onClick={() => void load()}
@@ -301,7 +301,7 @@ export function PublicToolsTab() {
       <p className="text-xs text-slate-500">
         Drag cards or use Move Up/Down for keyboard and touch ordering. Uploaded icons use the existing
         Site Settings branding storage; no new upload service is added. Save Tools explicitly to persist changes.
-        Public cards and the /tools route are Phase-03 only.
+        Public enabled cards are shown on the /tools page after Save Tools.
       </p>
     </section>
   );

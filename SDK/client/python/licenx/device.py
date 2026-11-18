@@ -138,8 +138,9 @@ class DeviceManager:
                 cls._cached_public_ip = resp.read().decode("utf-8").strip()
                 return cls._cached_public_ip
         except Exception:
-            cls._cached_public_ip = cls.get_local_ip()
-            return cls._cached_public_ip
+            # External lookup failed: a LAN IP is not a public IP.
+            # Keep the str return type without caching an unverified address.
+            return ""
 
     @classmethod
     def get_hwid(cls) -> str:
