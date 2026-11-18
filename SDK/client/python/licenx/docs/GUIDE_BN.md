@@ -66,7 +66,7 @@ SDK license key স্বয়ংক্রিয়ভাবে local file-এ save �
 | --- | --- |
 | নতুন production integration | `SDK/client/python/licenx/` → `import licenx` |
 
-আরও দেখুন: [Config guide](../../docs/CONFIGURATION.md), [API reference](../../docs/API_REFERENCE.md), [Package README](../README.md)।
+বিস্তারিত configuration ও API reference **শুধু repository source checkout-এ** আছে: `SDK/client/python/docs/CONFIGURATION.md` এবং `SDK/client/python/docs/API_REFERENCE.md`। Package README-ও source checkout/source ZIP-এ পাওয়া যায়; installed wheel-এর তিনটি packaged Markdown-এর মধ্যে সেটি নেই। Installed SDK-তে [bundled documentation index](README.md) এবং এই English/Bangla guide ব্যবহার করুন।
 
 ## ৬. Safe testing
 
@@ -75,3 +75,21 @@ python -m unittest discover -s SDK/client/python/licenx/test -p "test_*.py"
 ```
 
 Diagnostic console-এ live hostname/license দিলে server-side binding/log তৈরি হতে পারে। Production credentials দিয়ে পরীক্ষা করবেন না; isolated authorized test data ব্যবহার করুন। Local tests production readiness-এর প্রমাণ নয়।
+
+## ৭. Optional realtime এবং authorization বনাম UI continuity (v1.2.6)
+
+Compatible application-এ literal `app_config`-এর `"useWebSocket": True` (সত্যিকারের Boolean) দিয়ে opt-in করুন, optional `websocket-client` / `licenx[realtime]` dependency ব্যবহার করুন। Server operator-কে Node realtime gateway এবং সংশ্লিষ্ট App-এর WebSocket permission চালু করতে হবে। পুরোনো HTTP-only integration অপরিবর্তিত থাকবে। Global/unscoped license-এর জন্য device-bound WSS ticket তৈরি হয় না; সেক্ষেত্রে signed HTTPS চলবে।
+
+Successful **signed online login**-এর পর SDK short-lived ticket নিয়ে trusted, signed, app/device-bound `license.snapshot` যাচাই করে। Socket connect, unsigned event বা UI hint কোনোভাবেই license permission দেয় না। `client.get_connection_state()` থেকে `CONNECTING`, `CONNECTED`, `RECONNECTING`, `HTTP_FALLBACK`, `OFFLINE_GRACE`, `PAUSED_UNVERIFIED`, `INVALIDATED` ইত্যাদি state পাওয়া যেতে পারে। `on_connection_state_change(state)` background thread-এ চলতে পারে; Qt/Tkinter UI-তে main thread-এ dispatch করুন।
+
+Network failure-এ `offline_grace_seconds` শেষ হলে opted-in client-এর `has_login_session()` **শুধু UI-only in-memory hint** হিসেবে True থাকতে পারে, কিন্তু `is_authenticated()` ও `is_valid()` **False** থাকবে এবং protected কাজ বন্ধ রাখতে হবে। আবার authorization পেতে fresh, nonce-bound signed HTTPS heartbeat প্রয়োজন। Server-এর signed `keep_login_on_network_error` Boolean SDK store করে; তবে **v1.2.6 implementation-এ এর ON/OFF value অনুযায়ী UI hint retention বদলায় না**। তাই OFF থাকলেই visible login স্বয়ংক্রিয়ভাবে বন্ধ হবে—এমন দাবি করবেন না। HTTP-only mode-এর invalidation policy আলাদা। Verified revoke/expiry/unbound denial সব সময় permission বাতিল করে।
+
+## ৮. Error handling এবং নিরাপদ cleanup
+
+- `LoginResult` fields হলো `success`, `status_code`, `message`, `code`, `license_data`, `hwid`, `license_key`, optional `request_id`। Key, PIN, HWID বা session তথ্য log করবেন না। Empty key → `EMPTY_KEY`; saved key না থাকলে `auto_login()` → `NO_SAVED_SESSION`; পূর্বের unconfirmed logout থাকলে নতুন login → `PREVIOUS_SESSION_LOGOUT_FAILED`।
+- `client.login(key, pin=None)` পুরোনো `pin` argument গ্রহণ করলেও **ignore করে**। PIN web public-control-এর জন্য; SDK signed login-এর জন্য নয়।
+- `client.logout()` Boolean দেয়। `False` মানে remote slot release **confirm হয়নি**। SDK local permission clear করে এবং RAM-এ pending-release information রাখে, যাতে explicit retry সম্ভব হয়। Force-kill-এ unbind নিশ্চিত নয়; anonymous legacy logout fallback নেই।
+- `client.ping()` response dictionary দেয়; login key না থাকলে `NOT_AUTHENTICATED`। TLS/signature/security failure-কে normal transient network outage ধরে permission দেবেন না।
+- বিস্তারিত [bundled docs index](README.md) ব্যবহার করুন। Repository-only extended `SDK/client/python/docs/API_REFERENCE.md` ও `CONFIGURATION.md` এবং historical source-map notes installed wheel-এর তিনটি packaged Markdown file-এর অংশ নয়।
+
+**Evidence:** `licenx/client.py`, `realtime.py`, `storage.py`, `server.py`, `logout.py`, `test/test_realtime.py` এবং `pyproject.toml`। এই audit-এ source দেখে documentation মিলানো হয়েছে; নতুন wheel-install, GUI বা live network test চালানো হয়নি।

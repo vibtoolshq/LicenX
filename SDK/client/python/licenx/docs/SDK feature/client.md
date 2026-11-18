@@ -9,12 +9,20 @@ Source: `SDK/client/python/licenx/client.py`
 ```python
 from licenx import XLicenseClient
 
-client = XLicenseClient(app_version="2.4.1", on_license_revoked=handle_revocation)
-result = client.login(user_supplied_key)
-if result.success:
-    run_premium_features()
+# Requires an app-root licenx.config.py with a trusted public key and
+# the real installed app_version; this does not work with placeholder PEM.
+client = XLicenseClient()
+result = client.login(input("License key: ").strip())
+if not result.success:
+    raise SystemExit(result.message)
+
+try:
+    print("Licensed tier:", client.get_tier())
+    # Invoke the host application's protected features here.
 finally:
-    client.logout()
+    confirmed = client.logout()
+    if not confirmed:
+        print("Remote device release was not confirmed")
 ```
 
 ## Lifecycle Methods

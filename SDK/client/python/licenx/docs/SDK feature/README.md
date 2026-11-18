@@ -1,5 +1,7 @@
 # Primary LicenX SDK — Source and Feature Map
 
+> **Repository-only source/audit map:** not included in the built source ZIP or the wheel's declared package data. Older dated per-module summaries may describe earlier versions; use the current 1.2.6 implementation and the maintained [API reference](../../../docs/API_REFERENCE.md) when they disagree.
+
 **Single supported Python SDK:** `licenx`, using literal app-root `licenx.config.py` and a verified wheel or primary source kit.
 
 
@@ -18,6 +20,8 @@
 | [`offline.py`](offline.md) | Online and limited outage/clock policy |
 | [`example_app.py`](example-app.md) | Minimal example app |
 | [`requirements.txt`](requirements.md) | Dependencies |
+| `realtime.py` | Optional WebSocket ticket, signed snapshot, event checks and signed HTTPS fallback; source-only feature overview (see repository `SDK/client/python/docs/CONFIGURATION.md`) |
+| `diagnostics.py` | Bounded process-local diagnostics and allowlisted TLS metadata |
 
 ## Tests and diagnostics
 

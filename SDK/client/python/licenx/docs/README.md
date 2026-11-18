@@ -6,6 +6,6 @@ This directory is packaged with the **primary `licenx` Python SDK** at `SDK/clie
 
 - [English guide](GUIDE_EN.md)
 - [বাংলা guide](GUIDE_BN.md)
-- [Source and feature map](SDK%20feature/README.md)
-- [Primary package README](../README.md)
+
+The package-level `README.md`, repository developer references at `SDK/client/python/docs/`, and the historical `docs/SDK feature/` audit notes belong to the **source checkout**, not the installed wheel's documented data payload. The generated source ZIP includes the package README but intentionally excludes `SDK feature/`. Use the two packaged language guides above after installation.
 

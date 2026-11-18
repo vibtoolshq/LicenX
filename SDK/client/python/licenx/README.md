@@ -1,6 +1,6 @@
 # LicenX Python SDK — `licenx`
 
-**Primary Python client SDK for LicenX applications.** Version **1.2.6** (stable release target; requires a compatible hardened Node/VPS server); Python **3.8+**. Package/install/import name: `licenx`. Repository overview: [LicenX README](../../../../README.md).
+**Primary Python client SDK for LicenX applications.** Version **1.2.6** (current source version; requires a compatible hardened Node/VPS server); Python **3.8+**. Package/install/import name: `licenx`. Repository overview: the root `README.md` in the trusted LicenX source checkout (not a file automatically installed next to this wheel metadata).
 
 > **Single supported SDK:** `licenx` (installable from a verified wheel or the Admin's primary `licenx-python-sdk.zip` source kit). The reference SDK is retired. PyPI publication is not automatic.
 
@@ -51,7 +51,27 @@ print(f"Hardware ID: {result.hwid}")
 
 ### Manual Heartbeat & Logout
 
-On successful login, background heartbeats are enabled by default. Use `client.ping()` for an explicit check and `client.logout()` when the licensed operation ends. Normal exit hooks also attempt slot release, but abrupt termination/network failure cannot guarantee remote unbinding. **Do not log license keys, PINs or access tokens.**
+On successful login, background heartbeats are enabled by default. Use `client.ping()` for an explicit check and `client.logout()` when the licensed operation ends. `logout()` returns **False** if the remote device release could not be confirmed; the SDK clears local authorization and retains a pending release **in memory** for an explicit retry. The remote logout path requires a session-bound v2 proof; there is **no anonymous v1/deactivate fallback**. Normal exit hooks attempt slot release, but abrupt termination/network failure cannot guarantee remote unbinding. **Do not log license keys, PINs or access tokens.** The basic example above prints the HWID for an *interactive demo only*; do not copy that identifier into unattended production logs.
+
+A lifecycle-safe host integration uses a `finally` block after an authenticated login:
+
+```python
+from licenx import XLicenseClient
+
+client = XLicenseClient()  # Read your trusted app-root licenx.config.py
+result = client.login(input("License key: ").strip())
+if not result.success:
+    raise SystemExit(result.message)
+
+try:
+    print("Licensed tier:", client.get_tier())
+    # Run only licensed host functionality while authorized.
+finally:
+    if not client.logout():
+        print("Warning: remote device unbind was not confirmed")
+```
+
+For opt-in `useWebSocket=True`, distinguish `client.has_login_session()` (UI-only hint) from `client.is_authenticated()` or `client.is_valid()` (authorization status). A signed legacy `keep_login_on_network_error` metadata flag does **not** change the current opted-in worker's UI-hint retention behavior between true/false; after grace expires, protected operations remain blocked until a fresh verified HTTPS check.
 
 The SDK deliberately does **not** persist license keys in reversible local session files. `auto_login()` commonly returns `NO_SAVED_SESSION`; prompt the user again or integrate your own secure OS-backed credential management. Initial login always requires online validation; configured outage grace applies only to allowed temporary conditions after validation.
 
@@ -72,8 +92,9 @@ Other modules (`server`, `storage`, `device`, `offline`, `login`, `logout`) supp
 ## Documentation and testing
 
 - [English integration guide](docs/GUIDE_EN.md) · [বাংলা integration guide](docs/GUIDE_BN.md)
-- [Configuration reference](../docs/CONFIGURATION.md) · [API reference](../docs/API_REFERENCE.md)
-- [SDK feature/source index](docs/SDK%20feature/README.md) · [Diagnostic test console](test/README.md)
+- Extended configuration and API references: `SDK/client/python/docs/CONFIGURATION.md` and `SDK/client/python/docs/API_REFERENCE.md` (**repository-only; not included in a standard installed wheel or source ZIP**).
+- Source-level historical feature notes: `SDK/client/python/licenx/docs/SDK feature/` (**repository-only and deliberately excluded from the source ZIP**).
+- Diagnostic console and tests: `SDK/client/python/licenx/test/` (**repository-only; not included in the generated source ZIP**).
 
 ```bash
 python -m unittest discover -s SDK/client/python/licenx/test -p "test_*.py"
