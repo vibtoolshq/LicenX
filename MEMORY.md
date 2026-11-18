@@ -65,6 +65,10 @@ The central deployment design is one shared licensing API implemented for both N
 
 For endpoint details and deployment/setup guidance, see the root `README.md`. For SDK module responsibilities and integration policy, see `SDK/x_license_python/README.md`.
 
+## Approval Handoff Preference (Mandatory for Future Work)
+
+The owner wants a **ready-to-approve continuation package** whenever a new explicit authorization is required. Do not finish with only "approval needed" or ask the owner to request a plan. In that same response, identify **where and why approval is required**, exact current state, **what fix/update will be made**, locked changed-file/service scope and non-goals, focused implementation/test/rollback plan, and a **complete plain-text copy-paste ChatGPT approval command**. Create/reference the ignored `notes/` Scope Lock first when appropriate. The user can then review and paste that command, and the agent should proceed within its terms without repeated questions. **Supplying a command is not authorization**; always wait for the user's explicit message at each independently protected gate (especially VPS/production/database/secrets/release), and do not auto-expand scope. See `AGENTS.md` → "Mandatory Approval-Ready Handoff" for the binding detailed rule.
+
 ## Coding and Workflow Conventions
 
 - Follow the complete root `AI_INSTRUCTIONS.md` and this repository's `AGENTS.md` before work. Preserve architecture, public APIs, data, security controls, user changes, and deployment strategy.

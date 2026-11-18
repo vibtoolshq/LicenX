@@ -48,6 +48,21 @@ Do not turn a small fix into an audit, migration, redesign, broad refactor, or d
 
 Keep progress updates concise. At completion, state what changed, identify changed files with links where supported, list the checks run and their outcomes, and disclose any remaining task-related limitation. Follow the user's language where practical.
 
+## Mandatory Approval-Ready Handoff — User Workflow Rule
+
+When a task reaches a point requiring **separate owner approval** (a new phase, Scope Lock amendment, production/VPS deployment, Git push outside existing authorization, risky operation, blocked verification, or another explicit permission gate), **never stop with only "approval required", "ask me to continue", or a bare next-step suggestion**.
+
+In the **same response** that identifies the gate, proactively provide a compact approval package:
+
+1. **Where and why:** exact repository/environment/phase/current SHA or verified state, the issue or dependency, and why a fresh approval is required.
+2. **What will change:** the specific implementation/fix/update, expected result, and exact allowed files, features, data or services; identify what must stay unchanged.
+3. **How it will proceed:** a bounded, actionable implementation plan, focused verification/CI, safety/rollback checks if relevant, and stop conditions. Distinguish confirmed facts from pending checks.
+4. **Paste-ready approval command:** a complete **plain-text ChatGPT instruction** (not an unreviewed terminal command) stating the approved next scope, implementation, testing/publish/deploy boundaries, and explicit non-goals. Make it directly usable without the owner having to ask for a plan or formulate an approval prompt.
+
+If a scope lock or implementation plan is required, record it in ignored `notes/` **before asking for approval**, and point to the exact document. If specific details are unknown, say so and bound the approved preflight accordingly; do not invent paths, SHAs, outcomes, or credentials. Offer **one next relevant authorization**, not a list of speculative phases. For recurring approval gates, repeat this package whenever a new gate actually arises.
+
+**Approval remains mandatory:** the prepared command is a proposal, never permission by itself. Wait for the user to send it, then continue the newly authorized scope without asking again for details already supplied; stop again only at a genuinely separate gate. Never auto-deploy, alter production data, broaden Scope Lock, commit private notes, or weaken the existing security/authorization controls. Respect the user's preference for compact Bangla/Banglish explanations, with approval commands separately provided as plain, copyable text.
+
 ## Mandatory Pre-Update Planning
 
 Before any bug fix, feature change, production update, deployment change, or other implementation:
