@@ -1,0 +1,20 @@
+# LicenX — Universal Cross-IDE AI Rules
+
+**CRITICAL RULE: This is a multi-IDE project. Whenever any modification, update, or bug fix is completed in our session, you must automatically update the `MEMORY.md` file or provide the exact markdown blocks so the project context remains perfectly synchronized across all IDEs.**
+
+## Read-first contract
+
+1. Before project changes, read `AGENTS.md`, `AI_INSTRUCTIONS.md`, and root `MEMORY.md`. Consult current source/manifests, `git status`, and relevant private notes only when access permits. These repository instructions apply to VS Code, Google Antigravity, GitHub Copilot and any other agent that reads them.
+2. Treat `MEMORY.md` as the shared, tracked, source-backed project orientation, **not** an automatic transcript or guaranteed IDE memory service. Newly opened IDEs must load the latest checked-out commit and these rule files. Source and current Git/CI/runtime evidence outrank stale memory entries.
+3. After **each authorized** code, configuration, feature, security, infrastructure, or bug-fix change, update the relevant `MEMORY.md` section **in the same completed session**. Record (a) what changed and exact paths, (b) tested behavior and test/CI results, (c) current version/commit/deployment scope, and (d) known limitations and the next approved gate. Make small factual edits; preserve dated history without claiming old snapshots are current.
+4. If memory cannot be safely written (no editor/permissions, conflicting changes, unverified facts), explicitly provide the **exact ready-to-paste Markdown block** and location, mark the repository update as pending, and do not claim it was synchronized.
+5. Never put credentials, tokens, license keys, recovery keys, personally identifying data or local forensic material in tracked `MEMORY.md`. Keep `notes/` private and Git-ignored. Do not overwrite other agents' or the user's unsaved work.
+6. Preserve the existing Scope Lock, approval-ready handoff, single focused verification, Git safety and production/VPS safeguards from `AGENTS.md` / `AI_INSTRUCTIONS.md`. Updating memory is **not** authorization for unrelated source work, Git push, new phase, release, or deployment. Ask for fresh approval when those gates apply.
+7. For documentation or memory-only updates, update the appropriate memory entry once and **do not recurse** by generating further memory-only revisions. Do not run irrelevant app test suites just to edit project instructions.
+
+## Cross-IDE entry points
+
+- **Shared rule:** this `.ai-rules` file. It is a readable convention, **not** itself an auto-loaded instruction format in every IDE.
+- **Google Antigravity and other AGENTS-aware coding agents:** root `AGENTS.md` is the native always-on workspace entry; it explicitly points to this file and `MEMORY.md`.
+- **VS Code with GitHub Copilot:** `.github/copilot-instructions.md` is the native repository instruction entry and points here. Other VS Code coding extensions may need explicit configuration to read project rules.
+- **Continuity procedure:** commit/publish only within authorization, safely fast-forward pull the latest `main` in the other workspace, then instruct the new agent to read `AGENTS.md`, `.ai-rules` and `MEMORY.md` before resuming. Use the current repo state as evidence; never claim cross-IDE state updated before the files actually synchronize.

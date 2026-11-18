@@ -118,6 +118,8 @@ All development-time Markdown plans, forensic notes, error audits, and phase log
 
 ## Project Memory Maintenance
 
+**Multi-IDE rule loading:** Google Antigravity loads this root `AGENTS.md` as an always-on workspace instruction; GitHub Copilot in VS Code loads `.github/copilot-instructions.md`. Both must follow the shared `.ai-rules` contract and read root `MEMORY.md` at the start of a new session. A file-based rule does not automatically transfer uncommitted chat context or replace explicit permissions.
+
 Use the root [`MEMORY.md`](./MEMORY.md) as the maintained project orientation. Source code and manifests remain authoritative; keep the memory factual, avoid secrets, and do not treat dated notes or local test results as current without verification.
 
 **CRITICAL RULE: Whenever a change, update, bug fix, or new feature is implemented in this project during our conversation, you (the AI) must automatically prompt me to update the `MEMORY.md` file, or directly write/suggest the exact markdown updates needed to keep the project memory 100% up-to-date in real-time.**
