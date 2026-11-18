@@ -15,11 +15,27 @@ import { Upload } from '@aws-sdk/lib-storage';
 import { GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getR2Client, type R2Config } from './r2.js';
 
-export const BACKUP_TABLES = [
+// Version 1 archive table order is immutable: existing encrypted backups use it.
+const LEGACY_BACKUP_TABLES = [
   'admin_config', 'apps', 'licenses', 'devices', 'validation_logs',
   'r2_backups', 'admin_api_keys', 'admin_login_attempts',
   'user_control_pin_attempts', 'licenx_schema_migrations',
 ] as const;
+// Version 2 adds Group records; never change either manifest without a new version.
+export const BACKUP_TABLES = [
+  'admin_config', 'apps', 'license_groups', 'licenses', 'devices', 'validation_logs',
+  'r2_backups', 'admin_api_keys', 'admin_login_attempts',
+  'user_control_pin_attempts', 'licenx_schema_migrations',
+] as const;
+// The pre-LG-01A PostgreSQL licenses COPY had 17 columns, before nullable group_id.
+const LEGACY_LICENSE_COLUMNS = [
+  'id', 'key', 'status', 'tier', 'app_id', 'device_limit',
+  'validity_type', 'validity_value', 'activated_at', 'expires_at',
+  'created_at', 'customer_name', 'customer_email', 'notes',
+  'metadata_json', 'r2_backup_id', 'pin',
+] as const;
+const BACKUP_KIND = 'licenx-full-v2';
+const LEGACY_BACKUP_KIND = 'licenx-full-v1';
 const MAGIC = Buffer.from('LXBACK01');
 const storageRoot = process.env.LOCAL_STORAGE_PATH ?? '';
 const store = path.join(storageRoot, '.backup-manager');
@@ -83,17 +99,34 @@ async function exportDatabase(folder: string) {
     throw err;
   } finally { await db.end(); }
 }
-async function restoreDatabase(folder: string, onBeforeCommit: () => Promise<void>) {
+async function restoreDatabase(
+  folder: string,
+  tables: readonly string[],
+  legacy: boolean,
+  onBeforeCommit: () => Promise<void>,
+) {
   const db = new Client({ connectionString: process.env.DATABASE_URL });
   await db.connect();
   try {
     await db.query('BEGIN');
     await db.query('SET LOCAL lock_timeout = \'20s\'');
+    // Always clear both current tables and Group records on a historical restore.
+    // This prevents stale Groups or dangling assignments surviving a v1 restore.
     await db.query('LOCK TABLE ' + BACKUP_TABLES.map(t => '"' + t + '"').join(', ') + ' IN ACCESS EXCLUSIVE MODE');
     await db.query('TRUNCATE TABLE ' + BACKUP_TABLES.map(t => '"' + t + '"').join(', ') + ' CASCADE');
-    for (const table of BACKUP_TABLES) {
+    for (const table of tables) {
       const input = path.join(folder, table + '.copy');
-      await pipeline(createReadStream(input), db.query(copyFrom('COPY "' + table + '" FROM STDIN WITH (FORMAT binary)')));
+      // Historic binary COPY contains 17 licenses columns. Current v6 has 18;
+      // supplying the exact old ordered target list preserves binary alignment.
+      const target = table === 'licenses' && legacy
+        ? '"licenses" (' + LEGACY_LICENSE_COLUMNS.map(c => '"' + c + '"').join(', ') + ')'
+        : '"' + table + '"';
+      await pipeline(createReadStream(input), db.query(copyFrom('COPY ' + target + ' FROM STDIN WITH (FORMAT binary)')));
+    }
+    if (legacy) {
+      // The physical v6 schema remains after restoring a v5 data snapshot.
+      // Keep its migration ledger consistent so subsequent starts remain safe.
+      await db.query('INSERT INTO licenx_schema_migrations (version, applied_at) VALUES (6, $1) ON CONFLICT(version) DO NOTHING', [Date.now()]);
     }
     await onBeforeCommit();
     await db.query('COMMIT');
@@ -111,7 +144,7 @@ async function makeBackup(destination: string, id: string): Promise<{ path?: str
   try {
     await exportDatabase(path.join(temp, 'db'));
     await fs.writeFile(path.join(temp, 'manifest.json'), JSON.stringify({
-      kind: 'licenx-full-v1', tables: BACKUP_TABLES, createdAt: Date.now()
+      kind: BACKUP_KIND, tables: BACKUP_TABLES, createdAt: Date.now()
     }), { mode: 0o600 });
     const zipped = path.join(temp, 'backup.tar.gz');
     const dirs = ['public', 'private'];
@@ -186,10 +219,15 @@ async function restoreBackup(source: string, id: string) {
     await shell('tar', ['-xzf', zipped, '--no-same-owner', '--no-same-permissions', '-C', unpacked]);
     await assertNoSymlinks(unpacked);
     const manifest = JSON.parse(await fs.readFile(path.join(unpacked, 'manifest.json'), 'utf8'));
-    if (manifest.kind !== 'licenx-full-v1' || JSON.stringify(manifest.tables) !== JSON.stringify(BACKUP_TABLES)) {
-      throw new Error('Backup format or schema mismatch');
-    }
-    for (const table of BACKUP_TABLES) {
+    // Only these exact versioned table inventories are supported. A manifest
+    // mismatch must fail closed; do not infer columns from untrusted archives.
+    const legacy = manifest.kind === LEGACY_BACKUP_KIND &&
+      JSON.stringify(manifest.tables) === JSON.stringify(LEGACY_BACKUP_TABLES);
+    const current = manifest.kind === BACKUP_KIND &&
+      JSON.stringify(manifest.tables) === JSON.stringify(BACKUP_TABLES);
+    if (!legacy && !current) throw new Error('Backup format or schema mismatch');
+    const tables: readonly string[] = legacy ? LEGACY_BACKUP_TABLES : BACKUP_TABLES;
+    for (const table of tables) {
       if (!(await fs.stat(path.join(unpacked, 'db', table + '.copy'))).isFile()) throw new Error('Missing database table file');
     }
     // Copy extracted assets onto the SAME persistent filesystem before atomic renames.
@@ -206,7 +244,7 @@ async function restoreBackup(source: string, id: string) {
     // Recovery checkpoint before any destructive operation.
     const checkpoint = await makeBackup('local', 'pre-restore-' + id);
     await fs.mkdir(restoreBase, { recursive: false, mode: 0o700 });
-    await restoreDatabase(path.join(unpacked, 'db'), async () => {
+    await restoreDatabase(path.join(unpacked, 'db'), tables, legacy, async () => {
       for (const name of ['public', 'private']) {
         const incoming = path.join(staged, name);
         const previous = path.join(storageRoot, name);
