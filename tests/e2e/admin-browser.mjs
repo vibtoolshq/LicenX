@@ -440,7 +440,7 @@ try {
   const statsSearch = pageA.locator("main form").first();
   await statsSearch.locator("input").fill("CI-E2E-LICENSE-A");
   await statsSearch.getByRole("button", { name: "Search" }).click();
-  await poll(async () => (await pageA.locator("main tbody").innerText()).includes("CI-E2E-LICENSE-A"),
+  await poll(async () => await pageA.locator('main tbody span[title="Click to copy: CI-E2E-LICENSE-A"]').count() === 1,
     "SDK-STAT-01 CI license search");
 
   // SDK-STAT-01: synthetic browser presentation without touching user data.
@@ -453,7 +453,9 @@ try {
       })) }),
     });
   });
-  const groupRow = pageA.locator("main tbody tr").filter({ hasText: "CI-E2E-LICENSE-A" }).first();
+  const groupRow = pageA.locator("main tbody tr").filter({
+    has: pageA.locator('span[title="Click to copy: CI-E2E-LICENSE-A"]'),
+  }).first();
   await groupRow.locator('button[title="Click to view & unbind locked hardware"]').click();
   const hwidInspector = pageA.locator("div.fixed").filter({ hasText: "HWID Lock Inspector:" }).last();
   await poll(async () => await hwidInspector.locator("summary").count() > 0,

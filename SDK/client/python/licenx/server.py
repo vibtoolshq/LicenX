@@ -588,11 +588,11 @@ class ServerCommunicator:
         forbidden = re.compile(r"password|passwd|secret|token|private|credential|cookie|authorization|license.?key|hwid|bearer|access.?key|api.?key", re.I)
         for label, value in stats.items():
             if (not isinstance(label, str) or not label or len(label) > 64 or
-                    label != label.strip() or re.search(r"[ --]", label) or
+                    label != label.strip() or re.search(r"[\x00-\x1f\x7f-\x9f]", label) or
                     label.lower() in ("__proto__", "constructor", "prototype") or forbidden.search(label)):
                 return {"success": False, "code": "INVALID_STAT_LABEL"}
             if (value is not None and type(value) not in (str, int, float, bool)) or (
-                isinstance(value, str) and (len(value) > 256 or re.search(r"[ --]", value))
+                isinstance(value, str) and (len(value) > 256 or re.search(r"[\x00-\x1f\x7f-\x9f]", value))
             ):
                 return {"success": False, "code": "INVALID_STAT_VALUE"}
             if type(value) is int and abs(value) > 9007199254740991:
