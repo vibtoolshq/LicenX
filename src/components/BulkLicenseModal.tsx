@@ -1,7 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import { X, Layers, Download, Cloud, Loader2, CheckCircle2, Copy, Check, ShieldCheck } from 'lucide-react';
 import { api } from '../services/apiClient';
-import { AppItem } from '../types';
+import { AppItem, LicenseGroup } from '../types';
+import { LicenseGroupsDialog } from './LicenseGroupsDialog';
 
 interface BulkLicenseModalProps {
   r2Configured: boolean;
@@ -15,6 +16,9 @@ export const BulkLicenseModal: React.FC<BulkLicenseModalProps> = ({
   onCompleted,
 }) => {
   const [apps, setApps] = useState<AppItem[]>([]);
+  const [groups, setGroups] = useState<LicenseGroup[]>([]);
+  const [selectedGroupId, setSelectedGroupId] = useState('');
+  const [managingGroups, setManagingGroups] = useState(false);
   const [selectedAppId, setSelectedAppId] = useState<string>('global');
   const [count, setCount] = useState<number>(50);
   const [prefix, setPrefix] = useState('VCON');
@@ -39,6 +43,17 @@ export const BulkLicenseModal: React.FC<BulkLicenseModalProps> = ({
     }).catch(() => {});
   }, []);
 
+  const loadGroups = async () => {
+    try {
+      const response = await api.getLicenseGroups();
+      setGroups(Array.isArray(response?.groups) ? response.groups : []);
+    } catch {
+      // A temporary Group lookup failure must not affect unassigned bulk generation.
+    }
+  };
+
+  useEffect(() => { void loadGroups(); }, []);
+
   const handleGenerate = async (e: React.FormEvent) => {
     e.preventDefault();
     setLoading(true);
@@ -54,6 +69,7 @@ export const BulkLicenseModal: React.FC<BulkLicenseModalProps> = ({
         validity_type: validityType,
         validity_value: Number(validityValue),
         notes: notes.trim(),
+        ...(selectedGroupId ? { group_id: selectedGroupId } : {}),
         backupToR2: backupToR2 && r2Configured,
       });
 
@@ -247,6 +263,24 @@ export const BulkLicenseModal: React.FC<BulkLicenseModalProps> = ({
               </select>
             </div>
 
+            <div>
+              <div className="mb-1 flex items-center justify-between gap-2">
+                <label className="text-xs font-medium text-slate-400">Assign to License Group (optional)</label>
+                <button type="button" onClick={() => setManagingGroups(true)}
+                  className="rounded border border-slate-700 px-2 py-0.5 text-[10px] text-indigo-300 hover:bg-slate-900">
+                  Manage Groups
+                </button>
+              </div>
+              <select aria-label="Assign bulk licenses to Group" value={selectedGroupId}
+                onChange={event => setSelectedGroupId(event.target.value)}
+                className="w-full rounded border border-slate-800 bg-slate-900 px-2.5 py-1.5 text-slate-200 outline-none">
+                <option value="">Unassigned (default)</option>
+                {groups.filter(group => group.archived_at == null).map(group => (
+                  <option key={group.id} value={group.id}>{group.name}</option>
+                ))}
+              </select>
+            </div>
+
             <div className="grid grid-cols-2 gap-2.5">
               <div>
                 <label className="text-[10px] text-slate-400 block mb-1">Quantity</label>
@@ -377,6 +411,9 @@ export const BulkLicenseModal: React.FC<BulkLicenseModalProps> = ({
           </form>
         )}
       </div>
+      {managingGroups && <LicenseGroupsDialog groups={groups}
+        onChanged={async () => { await loadGroups(); }}
+        onClose={() => { setManagingGroups(false); void loadGroups(); }} />}
     </div>
   );
 };

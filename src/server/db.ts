@@ -441,6 +441,13 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
       );
       await ensureColumnExists(db, "licenses", "app_id", "TEXT");
       await ensureColumnExists(db, "licenses", "pin", "TEXT");
+      // LG-01A: upgrade existing libSQL databases without altering old license values.
+      await db.execute(`CREATE TABLE IF NOT EXISTS license_groups (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
+        created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER
+      )`);
+      await ensureColumnExists(db, "licenses", "group_id", "TEXT");
+      await db.execute("CREATE INDEX IF NOT EXISTS idx_licenses_group_id ON licenses(group_id)");
       await ensureColumnExists(db, "validation_logs", "app_slug", "TEXT");
       await ensureRealtimeSqliteSchema(db);
 
@@ -550,6 +557,17 @@ export async function initDatabaseSchema(env?: any): Promise<void> {
       pin TEXT
     );
   `);
+
+    // LG-01A: additive SQLite/libSQL group schema; no existing license data modified.
+    await db.execute(`CREATE TABLE IF NOT EXISTS license_groups (
+      id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL, archived_at INTEGER
+    )`);
+    const licenseColumns = await db.execute("PRAGMA table_info(licenses)");
+    if (!licenseColumns.rows.some(row => row.name === "group_id")) {
+      await db.execute("ALTER TABLE licenses ADD COLUMN group_id TEXT");
+    }
+    await db.execute("CREATE INDEX IF NOT EXISTS idx_licenses_group_id ON licenses(group_id)");
 
     // Ensure app_id column exists if table existed previously without it
     try {

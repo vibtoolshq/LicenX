@@ -21,8 +21,9 @@ import React, { useEffect, useMemo, useState, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { useConfirm } from '../context/ConfirmContext';
 import { adminRealtime, api } from '../services/apiClient';
-import { AppItem, License } from '../types';
+import { AppItem, License, LicenseGroup } from '../types';
 import { TablePagination } from './TablePagination';
+import { LicenseGroupsDialog } from './LicenseGroupsDialog';
 
 interface LicensesTabProps {
   onOpenCreate: () => void;
@@ -38,6 +39,8 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
   const confirm = useConfirm();
   const [licenses, setLicenses] = useState<License[]>([]);
   const [apps, setApps] = useState<AppItem[]>([]);
+  const [groups, setGroups] = useState<LicenseGroup[]>([]);
+  const [managingGroups, setManagingGroups] = useState(false);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
@@ -65,6 +68,10 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
       return 'all';
     }
   });
+  const [groupFilter, setGroupFilter] = useState(() => {
+    try { return sessionStorage.getItem('vcon_licenses_group_filter') || 'all'; }
+    catch { return 'all'; }
+  });
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [copiedKey, setCopiedKey] = useState<string | null>(null);
 
@@ -85,9 +92,10 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
       sessionStorage.setItem('vcon_licenses_status_filter', statusFilter);
       sessionStorage.setItem('vcon_licenses_tier_filter', tierFilter);
       sessionStorage.setItem('vcon_licenses_app_filter', appFilter);
+      sessionStorage.setItem('vcon_licenses_group_filter', groupFilter);
       sessionStorage.setItem('vcon_licenses_page', String(currentPage));
     } catch {}
-  }, [statusFilter, tierFilter, appFilter, currentPage]);
+  }, [statusFilter, tierFilter, appFilter, groupFilter, currentPage]);
 
   // Settings dropdown state per license
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
@@ -182,6 +190,15 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
     }
   };
 
+  const loadGroupOptions = async () => {
+    try {
+      const result = await api.getLicenseGroups();
+      setGroups(Array.isArray(result?.groups) ? result.groups : []);
+    } catch {
+      // A transient Group lookup error must not disable existing License Management.
+    }
+  };
+
   const loadLicenses = async (force = false) => {
     const serial = ++loadSerial.current;
     try {
@@ -191,6 +208,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
         status: statusFilter !== 'all' ? statusFilter : undefined,
         tier: tierFilter !== 'all' ? tierFilter : undefined,
         app_id: appFilter !== 'all' ? appFilter : undefined,
+        group_id: groupFilter !== 'all' ? groupFilter : undefined,
         limit: pageSize,
         offset: (currentPage - 1) * pageSize,
       }, force);
@@ -211,10 +229,11 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
   useEffect(() => {
     void loadLicenses(true);
     return () => { loadSerial.current++; };
-  }, [statusFilter, tierFilter, appFilter, appliedSearch, currentPage, pageSize]);
+  }, [statusFilter, tierFilter, appFilter, groupFilter, appliedSearch, currentPage, pageSize]);
 
   useEffect(() => {
     void loadAppOptions(true);
+    void loadGroupOptions();
     return () => { appOptionsSerial.current++; };
   }, []);
 
@@ -242,7 +261,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
       }
     }, 30_000);
     return () => { unsubscribe(); if (timer) clearTimeout(timer); clearInterval(fallback); };
-  }, [statusFilter, tierFilter, appFilter, appliedSearch, currentPage, pageSize]);
+  }, [statusFilter, tierFilter, appFilter, groupFilter, appliedSearch, currentPage, pageSize]);
 
   const handleSearchSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -409,6 +428,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
           status: statusFilter !== 'all' ? statusFilter : undefined,
           tier: tierFilter !== 'all' ? tierFilter : undefined,
           app_id: appFilter !== 'all' ? appFilter : undefined,
+          group_id: groupFilter !== 'all' ? groupFilter : undefined,
           limit: 100, offset,
         }, true);
         const batch: License[] = Array.isArray(response?.licenses) ? response.licenses : [];
@@ -503,6 +523,17 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
             ))}
           </select>
 
+          <select aria-label="Filter licenses by Group"
+            value={groupFilter}
+            onChange={event => { setGroupFilter(event.target.value); setCurrentPage(1); }}
+            className="px-2 py-1 text-xs font-sans bg-slate-900 border border-slate-800 rounded text-slate-300 focus:outline-none max-w-[150px] truncate">
+            <option value="all">Group: All</option>
+            <option value="unassigned">Unassigned</option>
+            {groups.map(group => <option key={group.id} value={group.id}>
+              {group.name}{group.archived_at != null ? ' (Archived)' : ''}
+            </option>)}
+          </select>
+
           <select
             value={statusFilter}
             onChange={(e) => { setStatusFilter(e.target.value); setCurrentPage(1); }}
@@ -533,6 +564,11 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
             className="p-1 rounded bg-slate-900 border border-slate-800 text-slate-400 hover:text-slate-200 transition-colors"
           >
             <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+          </button>
+
+          <button type="button" onClick={() => setManagingGroups(true)}
+            className="px-2.5 py-1 text-xs font-medium rounded bg-slate-900 hover:bg-slate-850 text-slate-300 border border-slate-800">
+            Groups
           </button>
 
           <button
@@ -625,6 +661,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
                 </th>
                 <th className="py-2.5 px-3">License Key</th>
                 <th className="py-2.5 px-3">App Scope</th>
+                <th className="py-2.5 px-3">Group</th>
                 <th className="py-2.5 px-3">Status</th>
                 <th className="py-2.5 px-3">Tier</th>
                 <th className="py-2.5 px-3">HWID Lock</th>
@@ -635,7 +672,7 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
             <tbody className="divide-y divide-slate-800/40 text-slate-300 text-xs">
               {licenses.length === 0 ? (
                 <tr>
-                  <td colSpan={8} className="py-8 text-center text-slate-500 font-sans">
+                  <td colSpan={9} className="py-8 text-center text-slate-500 font-sans">
                     {loading ? 'Loading licenses...' : 'No licenses matching filter criteria.'}
                   </td>
                 </tr>
@@ -694,6 +731,11 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
                       <span className="text-slate-300 font-sans font-medium">
                         {lic.app_name || 'Global'}
                       </span>
+                    </td>
+
+                    {/* LG-01A Group assignment (informational; no license lifecycle changes) */}
+                    <td className="py-2 px-3 text-slate-400" title={lic.group_name || 'Unassigned'}>
+                      <span className="block max-w-[140px] truncate">{lic.group_name || 'Unassigned'}</span>
                     </td>
 
                     {/* Status */}
@@ -1020,6 +1062,9 @@ export const LicensesTab: React.FC<LicensesTabProps> = ({
         </div>,
         document.body
       )}
+      {managingGroups && <LicenseGroupsDialog groups={groups}
+        onChanged={async () => { await loadGroupOptions(); await loadLicenses(true); }}
+        onClose={() => setManagingGroups(false)} />}
     </div>
   );
 };

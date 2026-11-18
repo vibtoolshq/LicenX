@@ -69,6 +69,15 @@ export type AdminRealtimeChange =
       reason: "cursor" | "backlog" | "log_overflow";
     });
 
+export interface LicenseGroup {
+  id: string;
+  name: string;
+  archived_at: number | null;
+  created_at: number;
+  updated_at: number;
+  license_count: number;
+}
+
 export interface License {
   id: string;
   key: string;
@@ -77,6 +86,8 @@ export interface License {
   app_id?: string | null;
   app_name?: string | null;
   app_slug?: string | null;
+  group_id?: string | null;
+  group_name?: string | null;
   device_limit: number;
   validity_type: "hourly" | "daily" | "lifetime";
   validity_value: number;

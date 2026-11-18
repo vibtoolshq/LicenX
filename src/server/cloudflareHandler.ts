@@ -1234,6 +1234,79 @@ export async function handleCloudflareApi(
     // -----------------------------------------------------------------
     // LICENSES MANAGEMENT
     // -----------------------------------------------------------------
+
+    // LG-01A: Groups are admin labels; archive never deletes assigned licenses.
+    if (normalizedPath === "/license-groups" || normalizedPath.startsWith("/license-groups/")) {
+      const auth = await verifyAdminAuth(request, env);
+      if (!auth.authorized)
+        return errorResponse(auth.error || "Unauthorized", auth.status || 401);
+
+      if (normalizedPath === "/license-groups" && method === "GET") {
+        const groups = await db.execute({
+          sql: "SELECT g.id, g.name, g.created_at, g.updated_at, g.archived_at, COUNT(l.id) AS license_count "
+             + "FROM license_groups g LEFT JOIN licenses l ON l.group_id = g.id "
+             + "GROUP BY g.id, g.name, g.created_at, g.updated_at, g.archived_at "
+             + "ORDER BY CASE WHEN g.archived_at IS NULL THEN 0 ELSE 1 END, g.name, g.id",
+        });
+        return jsonResponse({ groups: groups.rows }, 200, { "Cache-Control": "private, no-store" });
+      }
+
+      const groupName = typeof body.name === "string" ? body.name.trim().replace(/\s+/g, " ") : "";
+      if ((method === "POST" || method === "PATCH") &&
+          (!groupName || groupName.length > 80 || /[\u0000-\u001f\u007f]/.test(groupName))) {
+        return errorResponse("Group name must be 1–80 printable characters", 400);
+      }
+
+      if (normalizedPath === "/license-groups" && method === "POST") {
+        const nameKey = groupName.toLowerCase();
+        const duplicate = await db.execute({ sql: "SELECT id FROM license_groups WHERE name_key = ? LIMIT 1", args: [nameKey] });
+        if (duplicate.rows.length) return errorResponse("Group name already exists", 409);
+        const now = Date.now();
+        const group = { id: "grp_" + crypto.randomBytes(12).toString("hex"), name: groupName,
+          archived_at: null, created_at: now, updated_at: now, license_count: 0 };
+        try {
+          await db.execute({
+            sql: "INSERT INTO license_groups (id, name, name_key, created_at, updated_at, archived_at) VALUES (?, ?, ?, ?, ?, NULL)",
+            args: [group.id, group.name, nameKey, now, now],
+          });
+        } catch (error: any) {
+          if (/unique|duplicate/i.test(String(error?.message))) return errorResponse("Group name already exists", 409);
+          throw error;
+        }
+        return jsonResponse({ success: true, group }, 201);
+      }
+
+      const id = normalizedPath.startsWith("/license-groups/") ? normalizedPath.slice("/license-groups/".length) : "";
+      if (!/^grp_[a-f0-9]{24}$/.test(id)) return errorResponse("Group not found", 404);
+      const found = await db.execute({ sql: "SELECT id, archived_at FROM license_groups WHERE id = ?", args: [id] });
+      if (!found.rows.length) return errorResponse("Group not found", 404);
+
+      if (method === "PATCH") {
+        if (found.rows[0].archived_at !== null) return errorResponse("Archived group cannot be renamed", 409);
+        const nameKey = groupName.toLowerCase();
+        const duplicate = await db.execute({
+          sql: "SELECT id FROM license_groups WHERE name_key = ? AND id <> ? LIMIT 1",
+          args: [nameKey, id],
+        });
+        if (duplicate.rows.length) return errorResponse("Group name already exists", 409);
+        try {
+          await db.execute({
+            sql: "UPDATE license_groups SET name = ?, name_key = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL",
+            args: [groupName, nameKey, Date.now(), id],
+          });
+        } catch (error: any) {
+          if (/unique|duplicate/i.test(String(error?.message))) return errorResponse("Group name already exists", 409);
+          throw error;
+        }
+        return jsonResponse({ success: true });
+      }
+      if (method === "DELETE") {
+        const now = Date.now();
+        await db.execute({ sql: "UPDATE license_groups SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL", args: [now, now, id] });
+        return jsonResponse({ success: true });
+      }
+      return errorResponse("Method not allowed", 405);
+    }
     if (normalizedPath === "/licenses" && method === "GET") {
       const auth = await verifyAdminAuth(request, env);
       if (!auth.authorized)
@@ -1242,15 +1315,18 @@ export async function handleCloudflareApi(
       const status = url.searchParams.get("status");
       const appId = url.searchParams.get("app_id");
       const tier = url.searchParams.get("tier");
+      const groupId = url.searchParams.get("group_id");
       const search = url.searchParams.get("search");
       const limit = Number(url.searchParams.get("limit") || "50");
       const offset = Number(url.searchParams.get("offset") || "0");
 
       let sql = `
         SELECT l.*, a.display_name as app_name, a.app_slug as app_slug,
+               g.name as group_name,
                (SELECT COUNT(*) FROM devices d WHERE d.license_id = l.id AND d.status = 'active') as bound_devices_count
         FROM licenses l
         LEFT JOIN apps a ON l.app_id = a.id
+        LEFT JOIN license_groups g ON l.group_id = g.id
         WHERE 1=1
       `;
       const args: any[] = [];
@@ -1276,6 +1352,11 @@ export async function handleCloudflareApi(
           " AND (l.key LIKE ? OR l.customer_name LIKE ? OR l.customer_email LIKE ? OR l.pin LIKE ?)";
         const query = `%${search.trim()}%`;
         args.push(query, query, query, query);
+      }
+
+      if (groupId && groupId !== "all") {
+        if (groupId === "unassigned") sql += " AND l.group_id IS NULL";
+        else { sql += " AND l.group_id = ?"; args.push(groupId); }
       }
 
       sql += " ORDER BY l.created_at DESC LIMIT ? OFFSET ?";
@@ -1305,6 +1386,11 @@ export async function handleCloudflareApi(
           " AND (l.key LIKE ? OR l.customer_name LIKE ? OR l.customer_email LIKE ? OR l.pin LIKE ?)";
         const query = `%${search.trim()}%`;
         countArgs.push(query, query, query, query);
+      }
+
+      if (groupId && groupId !== "all") {
+        if (groupId === "unassigned") countSql += " AND l.group_id IS NULL";
+        else { countSql += " AND l.group_id = ?"; countArgs.push(groupId); }
       }
 
       const [result, countRes] = await Promise.all([
@@ -1408,8 +1494,17 @@ export async function handleCloudflareApi(
         validity_value = 0,
         notes,
         pin,
+        group_id = null,
         backupToR2 = false,
       } = body;
+
+      // Validate the optional group before creating ANY license or backup.
+      if (group_id !== null && (typeof group_id !== "string" || !/^grp_[a-f0-9]{24}$/.test(group_id)))
+        return errorResponse("Invalid license group", 400);
+      if (group_id !== null) {
+        const existing = await db.execute({ sql: "SELECT id FROM license_groups WHERE id = ? AND archived_at IS NULL", args: [group_id] });
+        if (!existing.rows.length) return errorResponse("Active license group not found", 400);
+      }
 
       const numCount = Math.min(Math.max(1, Number(count)), 2000);
       const backupRequested = Boolean(body.backupToStorage ?? backupToR2);
@@ -1434,6 +1529,14 @@ export async function handleCloudflareApi(
         const key = generateLicenseKey(prefix);
         generatedKeys.push(key);
 
+        if (group_id) {
+          statements.push({
+            sql: "INSERT INTO licenses (id, key, status, tier, app_id, device_limit, validity_type, validity_value, created_at, notes, pin, group_id) "
+               + "VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            args: [id, key, tier, app_id ? app_id.trim() : null, Number(device_limit),
+              validity_type, Number(validity_value), now, notes || null, batchPin, group_id],
+          });
+        } else {
         statements.push({
           sql: `INSERT INTO licenses (id, key, status, tier, app_id, device_limit, validity_type, validity_value, created_at, notes, pin)
                 VALUES (?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1450,6 +1553,9 @@ export async function handleCloudflareApi(
             batchPin,
           ],
         });
+
+
+        }
 
         csvContent += `"${key}","${batchPin}","${tier}","${app_id || "GLOBAL"}",${Number(device_limit)},"${validity_type}",${Number(validity_value)},"${new Date(now).toISOString()}","${notes || ""}"\n`;
 

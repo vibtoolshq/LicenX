@@ -1016,6 +1016,85 @@ apiRouter.get(
 // LICENSES MANAGEMENT (ADMIN)
 // -------------------------------------------------------------
 
+// LG-01A: Admin-only Group names are labels, not an authentication/tenant boundary.
+function normalizedLicenseGroupName(input: unknown): string | null {
+  if (typeof input !== "string") return null;
+  const name = input.trim().replace(/\s+/g, " ");
+  return name.length > 0 && name.length <= 80 && !/[\u0000-\u001f\u007f]/.test(name)
+    ? name : null;
+}
+
+apiRouter.get("/license-groups", requireAdminAuth, async (_req: Request, res: Response) => {
+  try {
+    const db = getDbClient();
+    const result = await db.execute(`SELECT g.id, g.name, g.created_at, g.updated_at,
+      g.archived_at, COUNT(l.id) AS license_count FROM license_groups g
+      LEFT JOIN licenses l ON l.group_id = g.id
+      GROUP BY g.id, g.name, g.created_at, g.updated_at, g.archived_at
+      ORDER BY CASE WHEN g.archived_at IS NULL THEN 0 ELSE 1 END, g.name, g.id`);
+    res.setHeader("Cache-Control", "private, no-store");
+    res.json({ groups: result.rows });
+  } catch {
+    res.status(500).json({ error: SAFE_SERVER_ERROR });
+  }
+});
+
+apiRouter.post("/license-groups", requireAdminAuth, async (req: Request, res: Response) => {
+  const name = normalizedLicenseGroupName(req.body?.name);
+  if (!name) { res.status(400).json({ error: "Group name must be 1–80 printable characters" }); return; }
+  try {
+    const db = getDbClient();
+    const nameKey = name.toLowerCase();
+    const duplicate = await db.execute({ sql: "SELECT id FROM license_groups WHERE name_key = ? LIMIT 1", args: [nameKey] });
+    if (duplicate.rows.length) { res.status(409).json({ error: "Group name already exists" }); return; }
+    const now = Date.now();
+    const group = { id: "grp_" + crypto.randomBytes(12).toString("hex"), name, created_at: now, updated_at: now, archived_at: null, license_count: 0 };
+    await db.execute({
+      sql: "INSERT INTO license_groups (id, name, name_key, created_at, updated_at, archived_at) VALUES (?, ?, ?, ?, ?, NULL)",
+      args: [group.id, name, nameKey, now, now],
+    });
+    res.status(201).json({ success: true, group });
+  } catch (error: any) {
+    res.status(/unique|duplicate/i.test(String(error?.message)) ? 409 : 500).json({
+      error: /unique|duplicate/i.test(String(error?.message)) ? "Group name already exists" : SAFE_SERVER_ERROR,
+    });
+  }
+});
+
+apiRouter.patch("/license-groups/:id", requireAdminAuth, async (req: Request, res: Response) => {
+  const name = normalizedLicenseGroupName(req.body?.name);
+  if (!name) { res.status(400).json({ error: "Group name must be 1–80 printable characters" }); return; }
+  try {
+    const db = getDbClient();
+    const active = await db.execute({ sql: "SELECT id FROM license_groups WHERE id = ? AND archived_at IS NULL", args: [req.params.id] });
+    if (!active.rows.length) { res.status(404).json({ error: "Active group not found" }); return; }
+    const nameKey = name.toLowerCase();
+    const duplicate = await db.execute({ sql: "SELECT id FROM license_groups WHERE name_key = ? AND id <> ? LIMIT 1", args: [nameKey, req.params.id] });
+    if (duplicate.rows.length) { res.status(409).json({ error: "Group name already exists" }); return; }
+    await db.execute({ sql: "UPDATE license_groups SET name = ?, name_key = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL", args: [name, nameKey, Date.now(), req.params.id] });
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(/unique|duplicate/i.test(String(error?.message)) ? 409 : 500).json({
+      error: /unique|duplicate/i.test(String(error?.message)) ? "Group name already exists" : SAFE_SERVER_ERROR,
+    });
+  }
+});
+
+apiRouter.delete("/license-groups/:id", requireAdminAuth, async (req: Request, res: Response) => {
+  try {
+    const db = getDbClient();
+    const found = await db.execute({ sql: "SELECT id FROM license_groups WHERE id = ?", args: [req.params.id] });
+    if (!found.rows.length) { res.status(404).json({ error: "Group not found" }); return; }
+    await db.execute({
+      sql: "UPDATE license_groups SET archived_at = ?, updated_at = ? WHERE id = ? AND archived_at IS NULL",
+      args: [Date.now(), Date.now(), req.params.id],
+    });
+    res.json({ success: true });
+  } catch {
+    res.status(500).json({ error: SAFE_SERVER_ERROR });
+  }
+});
+
 apiRouter.get(
   "/licenses",
   requireAdminAuth,
@@ -1027,6 +1106,7 @@ apiRouter.get(
         status,
         tier,
         app_id,
+        group_id,
         limit = "50",
         offset = "0",
       } = req.query;
@@ -1035,9 +1115,11 @@ apiRouter.get(
       SELECT l.*,
         a.display_name as app_name,
         a.app_slug as app_slug,
+        g.name as group_name,
         (SELECT COUNT(*) FROM devices d WHERE d.license_id = l.id AND d.status = 'active') AS bound_devices_count
       FROM licenses l
       LEFT JOIN apps a ON l.app_id = a.id
+      LEFT JOIN license_groups g ON g.id = l.group_id
       WHERE 1=1
     `;
       const args: any[] = [];
@@ -1065,6 +1147,11 @@ apiRouter.get(
           query += ` AND l.app_id = ?`;
           args.push(app_id);
         }
+      }
+
+      if (typeof group_id === "string" && group_id !== "all") {
+        if (group_id === "unassigned") query += " AND l.group_id IS NULL";
+        else { query += " AND l.group_id = ?"; args.push(group_id); }
       }
 
       query += ` ORDER BY l.created_at DESC, l.id DESC LIMIT ? OFFSET ?`;
@@ -1095,6 +1182,11 @@ apiRouter.get(
           countQuery += ` AND l.app_id = ?`;
           countArgs.push(app_id);
         }
+      }
+
+      if (typeof group_id === "string" && group_id !== "all") {
+        if (group_id === "unassigned") countQuery += " AND l.group_id IS NULL";
+        else { countQuery += " AND l.group_id = ?"; countArgs.push(group_id); }
       }
 
       const countResult = await db.execute({
@@ -1207,8 +1299,25 @@ apiRouter.post(
         validity_value = 0,
         notes = "Bulk Generated",
         pin,
+        group_id = null,
         backupToR2 = false,
       } = req.body;
+
+      // Reject invalid/archived groups BEFORE creating licenses or preparing backup.
+      if (group_id !== null && (typeof group_id !== "string" || !/^grp_[a-f0-9]{24}$/.test(group_id))) {
+        res.status(400).json({ error: "Invalid license group" });
+        return;
+      }
+      if (group_id !== null) {
+        const matching = await getDbClient().execute({
+          sql: "SELECT id FROM license_groups WHERE id = ? AND archived_at IS NULL",
+          args: [group_id],
+        });
+        if (!matching.rows.length) {
+          res.status(400).json({ error: "Active license group not found" });
+          return;
+        }
+      }
 
       const totalCount = Math.min(Math.max(Number(count) || 1, 1), 2000);
       const db = getDbClient();
@@ -1247,23 +1356,22 @@ apiRouter.post(
           notes,
         });
 
-        statements.push({
+        const baseArgs = [
+          id, key, tier, app_id ? app_id.trim() : null, Number(device_limit),
+          validity_type, Number(validity_value), now, notes, batchPin,
+        ];
+        statements.push(group_id ? {
+          sql: `INSERT INTO licenses (
+            id, key, status, tier, app_id, device_limit, validity_type, validity_value,
+            activated_at, expires_at, created_at, notes, pin, group_id
+          ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?)`,
+          args: [...baseArgs, group_id],
+        } : {
           sql: `INSERT INTO licenses (
           id, key, status, tier, app_id, device_limit, validity_type, validity_value,
           activated_at, expires_at, created_at, notes, pin
         ) VALUES (?, ?, 'active', ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
-          args: [
-            id,
-            key,
-            tier,
-            app_id ? app_id.trim() : null,
-            Number(device_limit),
-            validity_type,
-            Number(validity_value),
-            now,
-            notes,
-            batchPin,
-          ],
+          args: baseArgs,
         });
       }
 

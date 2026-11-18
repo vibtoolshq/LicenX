@@ -10,6 +10,7 @@ import {
   CreatedAdminApiKey,
   Device,
   License,
+  LicenseGroup,
   R2Backup,
   R2Config,
   FullBackupStatus,
@@ -595,6 +596,30 @@ export const api = {
     URL.revokeObjectURL(url);
   },
 
+  // LG-01A: admin-only Group labels; no public key lookup.
+  getLicenseGroups: async () => request<{ groups: LicenseGroup[] }>("/api/license-groups"),
+  createLicenseGroup: async (name: string) => {
+    const result = await request<{ success: boolean; group: LicenseGroup }>("/api/license-groups", {
+      method: "POST", body: JSON.stringify({ name }),
+    });
+    invalidateCache("licenses");
+    return result;
+  },
+  renameLicenseGroup: async (id: string, name: string) => {
+    const result = await request<{ success: boolean }>(`/api/license-groups/${encodeURIComponent(id)}`, {
+      method: "PATCH", body: JSON.stringify({ name }),
+    });
+    invalidateCache("licenses");
+    return result;
+  },
+  archiveLicenseGroup: async (id: string) => {
+    const result = await request<{ success: boolean }>(`/api/license-groups/${encodeURIComponent(id)}`, {
+      method: "DELETE",
+    });
+    invalidateCache("licenses");
+    return result;
+  },
+
   // Licenses
   getLicenses: async (
     params: {
@@ -602,6 +627,7 @@ export const api = {
       status?: string;
       tier?: string;
       app_id?: string;
+      group_id?: string;
       limit?: number;
       offset?: number;
     } = {},
@@ -612,6 +638,7 @@ export const api = {
     if (params.status) q.set("status", params.status);
     if (params.tier) q.set("tier", params.tier);
     if (params.app_id) q.set("app_id", params.app_id);
+    if (params.group_id) q.set("group_id", params.group_id);
     if (params.limit) q.set("limit", params.limit.toString());
     if (params.offset) q.set("offset", params.offset.toString());
     const key = `licenses_${q.toString()}`;
@@ -666,6 +693,7 @@ export const api = {
     notes?: string;
     backupToR2?: boolean;
     backupToStorage?: boolean;
+    group_id?: string | null;
   }) => {
     invalidateCache("licenses");
     invalidateCache("system_stats");

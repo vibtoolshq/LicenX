@@ -278,6 +278,20 @@ export async function migratePostgres(db: DatabaseClient): Promise<void> {
         args: [Date.now()],
       });
     }
+    // LG-01A: nullable group association; existing license rows remain unassigned.
+    const groupMigration = await transaction.execute("SELECT version FROM licenx_schema_migrations WHERE version = 6");
+    if (!groupMigration.rows.length) {
+      await transaction.execute(`CREATE TABLE IF NOT EXISTS license_groups (
+        id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
+        created_at BIGINT NOT NULL, updated_at BIGINT NOT NULL, archived_at BIGINT
+      )`);
+      await transaction.execute("ALTER TABLE licenses ADD COLUMN IF NOT EXISTS group_id TEXT");
+      await transaction.execute("CREATE INDEX IF NOT EXISTS idx_licenses_group_id ON licenses(group_id)");
+      await transaction.execute({
+        sql: "INSERT INTO licenx_schema_migrations (version, applied_at) VALUES (6, ?)",
+        args: [Date.now()],
+      });
+    }
     await transaction.commit();
   } catch (error) {
     await transaction.rollback();
