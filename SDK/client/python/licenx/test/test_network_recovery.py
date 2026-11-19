@@ -81,8 +81,9 @@ class HeartbeatRecoveryTests(unittest.TestCase):
         def fake_wait(timeout):
             waits.append(timeout)
             clock[0] += timeout
-            # Once supplied response sequence is exhausted, stop before another ping.
-            return len(waits) > len(steps) and worker._remaining_grace_seconds() is None
+            # End the simulated run after its supplied responses, even if the
+            # HTTP worker remains alive in a paused, retrying session.
+            return len(waits) > len(steps)
 
         worker._stop_event.wait = fake_wait
         with patch("licenx.storage.time.monotonic", side_effect=lambda: clock[0]):
@@ -190,32 +191,37 @@ class HeartbeatRecoveryTests(unittest.TestCase):
         self.assertEqual(callbacks, [{"valid": True}])
         self.assertIsNone(worker._remaining_grace_seconds())
 
-    def test_grace_boundary_invalidates_without_extra_request(self):
-        waits, invalidations, communicator, _ = self.run_worker(
+    def test_grace_boundary_pauses_without_false_logout_or_busy_loop(self):
+        waits, invalidations, communicator, worker = self.run_worker(
             [(False, {"code": "SERVER_UNREACHABLE"}), (False, {"code": "TIMEOUT"})],
             grace=45,
         )
         self.assertEqual(waits, [600, 30, 15])
         self.assertEqual(communicator.ping_heartbeat.call_count, 2)
-        self.assertEqual(invalidations, ["Offline grace period expired"])
+        self.assertEqual(invalidations, [])
+        self.assertTrue(worker._running)
+        self.assertEqual(worker._remaining_grace_seconds(), 0.0)
 
-    def test_signed_security_failure_invalidates_immediately(self):
-        waits, invalidations, communicator, _ = self.run_worker(
+    def test_unverified_signature_pauses_not_revokes(self):
+        waits, invalidations, communicator, worker = self.run_worker(
             [(False, {"code": "HEARTBEAT_SIGNATURE_FAILED"})],
             grace=1200,
         )
-        self.assertEqual(waits, [600])
+        self.assertEqual(waits, [600, 30])
         self.assertEqual(communicator.ping_heartbeat.call_count, 1)
-        self.assertTrue(invalidations)
+        self.assertEqual(invalidations, [])
+        self.assertTrue(worker._running)
+        self.assertTrue(worker._realtime_paused)
 
-    def test_unexpected_exception_does_not_expose_secret_to_callback(self):
-        waits, invalidations, _, _ = self.run_worker(
+    def test_unexpected_exception_does_not_expose_secret_or_revoke(self):
+        waits, invalidations, _, worker = self.run_worker(
             [RuntimeError("SECRET-PRIVATE-TOKEN")],
             grace=0,
         )
-        self.assertEqual(waits, [600])
-        self.assertEqual(len(invalidations), 1)
-        self.assertNotIn("SECRET", invalidations[0])
+        self.assertEqual(waits, [600, 30])
+        self.assertEqual(invalidations, [])
+        self.assertTrue(worker._running)
+        self.assertTrue(worker._realtime_paused)
 
     def test_callback_errors_do_not_log_raw_details(self):
         def callback(_payload):

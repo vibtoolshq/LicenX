@@ -157,17 +157,16 @@ class BackgroundLicenseWorker:
             wait_seconds = (
                 self.ping_interval_seconds
                 if remaining_grace is None
-                else min(HEARTBEAT_RETRY_INTERVAL_SECONDS, remaining_grace)
+                else (min(HEARTBEAT_RETRY_INTERVAL_SECONDS, remaining_grace)
+                      if remaining_grace > 0 else HEARTBEAT_RETRY_INTERVAL_SECONDS)
             )
 
             interrupted = self._stop_event.wait(timeout=wait_seconds)
             if interrupted or not self._running:
                 break
 
-            if self._grace_expired():
-                self._invalidate("Offline grace period expired")
-                break
-
+            # Grace expiry pauses authorization; it is never a signed logout.
+            # Keep the worker alive for bounded signed re-verification.
             if not self._server_communicator or not self._current_license_key or not self._current_hwid:
                 break
 
@@ -183,8 +182,16 @@ class BackgroundLicenseWorker:
                     "code": "SERVER_UNREACHABLE",
                 }
 
+            if (not self._running or self._stop_event.is_set()
+                    or (self._thread is not None
+                        and self._thread is not threading.current_thread())):
+                # A completed request from a prior monitor may not alter a
+                # replacement session, even when it uses the same license key.
+                break
             if is_valid:
                 self.record_heartbeat_success()
+                with self._state_lock:
+                    self._realtime_paused = False
                 if self.on_heartbeat_success:
                     try:
                         self.on_heartbeat_success(data)
@@ -192,13 +199,10 @@ class BackgroundLicenseWorker:
                         print("[VCON-SDK] Heartbeat success callback failed")
                 continue
 
-            reason = (
-                data.get("message")
-                or data.get("code")
-                or "Heartbeat could not be verified; access is denied"
-            )
+            if not isinstance(data, dict):
+                data = {"code": "INVALID_RESPONSE"}
             if self.should_invalidate_for_heartbeat_failure(data):
-                self._invalidate(reason)
+                self._invalidate(data.get("code", "LICENSE_INVALID"))
                 break
 
     def enable_realtime(self, on_state_change: Optional[Callable[[str], None]] = None) -> None:
@@ -379,18 +383,21 @@ class BackgroundLicenseWorker:
             self.realtime_signed_heartbeat(valid, data)
 
     def should_invalidate_for_heartbeat_failure(self, data: Dict[str, Any]) -> bool:
-        code = data.get("code")
-        if code not in TRANSIENT_HEARTBEAT_CODES:
-            return True
-        if self.offline_grace_seconds == 0:
+        """Only a nonce-bound, signature-verified terminal denial ends login."""
+        if isinstance(data, dict) and data.get("_licenx_terminal_denial") is True:
             return True
 
+        code = data.get("code") if isinstance(data, dict) else None
         now = time.monotonic()
         with self._state_lock:
             if self._offline_since is None:
                 self._offline_since = now
-                return False
-            return now - self._offline_since >= self.offline_grace_seconds
+            elapsed = now - self._offline_since
+            if (code not in TRANSIENT_HEARTBEAT_CODES
+                    or elapsed < 0 or self.offline_grace_seconds == 0
+                    or elapsed >= self.offline_grace_seconds):
+                self._realtime_paused = True
+        return False
 
     def record_heartbeat_success(self) -> None:
         with self._state_lock:

@@ -1,5 +1,9 @@
 # LicenX Project Memory
 
+## Python SDK Continuity Phase-01 — Local Status (2026-11-20)
+
+The current working program has five phases, separately scoped in the Git-ignored local `notes/` documents. Phase-01 (legacy Python HTTP heartbeat: network/timeout/TLS/unverified failure must not erase a signed-in UI session, while protected actions remain fail-closed; signed terminal denial still revokes) is **implemented in the authorized Windows worktree only**. Four approved files changed: `SDK/client/python/licenx/{client.py,storage.py,test/test_heartbeat.py,test/test_network_recovery.py}`. One current focused run passed **94/94** tests; `git diff --check` passed, and local/GitHub `main` still point to **`32724f0771f5efa968ce9c511d8cc8eaeec9f2f6`**. These code edits are **uncommitted/unpublished**; no changed-source GitHub CI, SDK release, RDP fast-forward, VPS deployment, database write, or UI change has taken place. This is **not** production acceptance or a guarantee of indefinite offline authorization. Phase-02 is the separately approved next implementation gate (device lease + Node/Cloudflare license protocol parity), with Phases 03–05 still pending. Do not discard or overwrite the four uncommitted edits; source publication needs explicit owner authorization.
+
 ## Current Verified Repository Snapshot — 2026-11-18
 
 This is the **current working orientation** for agents switching among VS Code, Google Antigravity and other IDEs. It is a versioned **repository file**, not an automatic cross-app conversation history. Open the current checkout and read `AGENTS.md`, `AI_INSTRUCTIONS.md`, `.ai-rules` and this file before changing code; source/manifests remain authoritative. Older dated sections below are historical evidence and can be superseded by this snapshot.

@@ -229,10 +229,15 @@ class XLicenseClient:
         return success
 
     def is_authenticated(self) -> bool:
-        """Safe authorization check; returns False if new-mode grace has expired."""
+        """Require signed freshness for licensed work; preserve the UI session."""
+        if not self._authenticated:
+            return False
         if getattr(getattr(self, "config", None), "useWebSocket", False):
-            return bool(self._authenticated and self.storage.is_authorized())
-        return self._authenticated
+            return bool(self.storage.is_authorized())
+        remaining = self.storage._remaining_grace_seconds()
+        if remaining is None:
+            return True
+        return remaining > 0 and not self.storage._realtime_paused
 
     def has_login_session(self) -> bool:
         """New UI-continuity hint: retained key in memory, not authorization."""
@@ -307,18 +312,29 @@ class XLicenseClient:
         key = self._current_key or self.storage.load_saved_session()
         if not key:
             return {"valid": False, "code": "NOT_AUTHENTICATED", "message": "No active session"}
+        current_payload = getattr(self, "_license_payload", None)
         is_active, data = self.server.ping_heartbeat(key, self.get_hwid())
+        if (key != self._current_key
+                or current_payload is not getattr(self, "_license_payload", None)
+                or not self._authenticated):
+            # An in-flight ping for a replaced or logged-out session cannot
+            # revoke (or authorize) the new session.
+            return {"valid": False, "code": "SESSION_CHANGED"}
         if not is_active:
-            reason = data.get("message") or data.get("code") or "Heartbeat failed"
+            reason = data.get("code") if isinstance(data, dict) else "INVALID_RESPONSE"
+            if not isinstance(data, dict):
+                data = {"valid": False, "code": "INVALID_RESPONSE"}
             if getattr(getattr(self, "config", None), "useWebSocket", False):
                 self.storage.realtime_signed_heartbeat(False, data)
             elif self.storage.should_invalidate_for_heartbeat_failure(data):
-                self._handle_license_revoked(reason)
+                self._handle_license_revoked(reason or "LICENSE_INVALID")
         else:
             if getattr(getattr(self, "config", None), "useWebSocket", False):
                 self.storage.realtime_signed_heartbeat(True, data)
             else:
                 self.storage.record_heartbeat_success()
+                with self.storage._state_lock:
+                    self.storage._realtime_paused = False
         return data
 
     # -------------------------------------------------------------

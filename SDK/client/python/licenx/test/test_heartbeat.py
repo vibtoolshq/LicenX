@@ -218,16 +218,15 @@ class HeartbeatVerificationTests(unittest.TestCase):
         callback.assert_called_once_with("DEVICE_UNBOUND")
         self.assertFalse(storage.is_authorized())
 
-    def test_background_worker_fails_closed_without_retry_on_transport_error(self):
+    def test_background_worker_pauses_authorization_and_retries_after_transport_error(self):
         communicator = Mock()
         communicator.ping_heartbeat.side_effect = [
             TimeoutError("network sentinel"),
-            (False, {"code": "SHOULD_NOT_RETRY"}),
+            (False, {"code": "INVALID_RESPONSE"}),
         ]
         invalidated = Mock()
         worker = BackgroundLicenseWorker(
-            "heartbeat-test",
-            ping_interval_seconds=60,
+            "heartbeat-test", ping_interval_seconds=60,
             on_invalidated=invalidated,
         )
         worker._server_communicator = communicator
@@ -236,13 +235,14 @@ class HeartbeatVerificationTests(unittest.TestCase):
         worker._running = True
         worker._stop_event.clear()
 
-        with patch.object(worker._stop_event, "wait", return_value=False) as wait:
+        with patch.object(worker._stop_event, "wait", side_effect=[False, False, True]) as wait:
             worker._worker_loop()
 
-        wait.assert_called_once_with(timeout=60)
-        communicator.ping_heartbeat.assert_called_once_with("LIC-TEST", "HWID-TEST")
-        invalidated.assert_called_once()
-        self.assertFalse(worker._running)
+        self.assertEqual([c.kwargs["timeout"] for c in wait.call_args_list], [60, 30, 30])
+        self.assertEqual(communicator.ping_heartbeat.call_count, 2)
+        self.assertTrue(worker._realtime_paused)
+        self.assertTrue(worker._running)
+        invalidated.assert_not_called()
 
     def test_stopping_worker_from_its_own_callback_does_not_self_join(self):
         worker = BackgroundLicenseWorker("heartbeat-self-stop-test")
@@ -255,31 +255,122 @@ class HeartbeatVerificationTests(unittest.TestCase):
         self.assertFalse(worker._running)
         self.assertIsNone(worker._thread)
 
-    def test_manual_ping_invalidates_local_client_on_failure(self):
+    def test_manual_ping_unverified_response_preserves_ui_but_not_authorization(self):
         client = XLicenseClient.__new__(XLicenseClient)
         client._current_key = "LIC-TEST"
         client._authenticated = True
         client._license_payload = {"valid": True}
         client.server = Mock()
         client.server.ping_heartbeat.return_value = (
-            False,
-            {"code": "HEARTBEAT_SIGNATURE_FAILED"},
+            False, {"code": "HEARTBEAT_SIGNATURE_FAILED"},
         )
         client.logout_manager = Mock()
-        client.storage = Mock()
-        client.storage.should_invalidate_for_heartbeat_failure.return_value = True
+        client.storage = BackgroundLicenseWorker("manual-ping-test")
+        client.on_license_revoked = Mock()
+        client.get_hwid = Mock(return_value="HWID-TEST")
+
+        result = client.ping()
+
+        self.assertEqual(result["code"], "HEARTBEAT_SIGNATURE_FAILED")
+        self.assertTrue(client.has_login_session())
+        self.assertFalse(client.is_authenticated())
+        self.assertEqual(client._current_key, "LIC-TEST")
+        client.logout_manager.logout.assert_not_called()
+        client.on_license_revoked.assert_not_called()
+
+    def test_signed_terminal_denial_still_invalidates_legacy_http_session(self):
+        client = XLicenseClient.__new__(XLicenseClient)
+        client._current_key = "LIC-TEST"
+        client._authenticated = True
+        client._license_payload = {"valid": True}
+        client.server = Mock()
+        client.server.ping_heartbeat.return_value = (
+            False, {"code": "DEVICE_UNBOUND", "_licenx_terminal_denial": True},
+        )
+        client.storage = BackgroundLicenseWorker("signed-terminal-test")
+        client.logout_manager = Mock()
+        client._stop_realtime = Mock()
         client.on_license_revoked = Mock()
         client.get_hwid = Mock(return_value="HWID-TEST")
 
         with patch("builtins.print"):
             result = client.ping()
 
-        self.assertEqual(result["code"], "HEARTBEAT_SIGNATURE_FAILED")
-        self.assertFalse(client._authenticated)
+        self.assertEqual(result["code"], "DEVICE_UNBOUND")
+        self.assertFalse(client.has_login_session())
+        self.assertFalse(client.is_authenticated())
         self.assertIsNone(client._current_key)
-        self.assertIsNone(client._license_payload)
+        client.logout_manager.set_active_session.assert_called_once_with(None)
         client.logout_manager.logout.assert_called_once_with(clear_saved_data=True)
-        client.on_license_revoked.assert_called_once()
+        client.on_license_revoked.assert_called_once_with("DEVICE_UNBOUND")
+
+    def test_http_grace_expires_without_logout_then_signed_heartbeat_recovers(self):
+        worker = BackgroundLicenseWorker(
+            "http-grace-test", offline_grace_seconds=60,
+        )
+        client = XLicenseClient.__new__(XLicenseClient)
+        client._authenticated = True
+        client.storage = worker
+        for timestamp, expected in ((100.0, True), (130.0, True), (160.0, False)):
+            with patch("licenx.storage.time.monotonic", return_value=timestamp):
+                if timestamp == 100.0:
+                    self.assertFalse(worker.should_invalidate_for_heartbeat_failure(
+                        {"code": "TIMEOUT"}
+                    ))
+                self.assertEqual(client.is_authenticated(), expected)
+        self.assertFalse(worker.should_invalidate_for_heartbeat_failure(
+            {"code": "DENIAL_UNVERIFIED"}
+        ))
+        self.assertFalse(client.is_authenticated())
+        worker.record_heartbeat_success()  # Only after communicator verified signed success.
+        self.assertTrue(client.is_authenticated())
+
+    def test_stale_manual_ping_cannot_invalidate_replacement_session(self):
+        client = XLicenseClient.__new__(XLicenseClient)
+        client._authenticated = True
+        client._current_key = "LIC-TEST"
+        client._license_payload = {"session": "original"}
+        client.storage = BackgroundLicenseWorker("manual-replaced-test")
+        client.logout_manager = Mock()
+        client.on_license_revoked = Mock()
+        client.get_hwid = Mock(return_value="HWID-TEST")
+        client.server = Mock()
+
+        def replaced(_license, _hwid):
+            client._license_payload = {"session": "replacement"}
+            return False, {"code": "DEVICE_UNBOUND", "_licenx_terminal_denial": True}
+
+        client.server.ping_heartbeat.side_effect = replaced
+        result = client.ping()
+
+        self.assertEqual(result["code"], "SESSION_CHANGED")
+        self.assertEqual(client._license_payload["session"], "replacement")
+        self.assertTrue(client.is_authenticated())
+        client.on_license_revoked.assert_not_called()
+        client.logout_manager.logout.assert_not_called()
+
+    def test_stale_background_heartbeat_cannot_invalidate_new_worker(self):
+        worker = BackgroundLicenseWorker("worker-replaced-test", ping_interval_seconds=60)
+        worker._running = True
+        worker._current_license_key = "LIC-TEST"
+        worker._current_hwid = "HWID-TEST"
+        worker._thread = threading.current_thread()
+        worker._server_communicator = Mock()
+        invalidated = Mock()
+        worker.on_invalidated = invalidated
+
+        def replaced(_license, _hwid):
+            worker._thread = threading.Thread(target=lambda: None)
+            return False, {"code": "DEVICE_UNBOUND", "_licenx_terminal_denial": True}
+
+        worker._server_communicator.ping_heartbeat.side_effect = replaced
+        with patch.object(worker._stop_event, "wait", return_value=False) as wait:
+            worker._worker_loop()
+
+        wait.assert_called_once_with(timeout=60)
+        invalidated.assert_not_called()
+        self.assertTrue(worker._running)
+        self.assertTrue(worker.is_authorized())
 
     def test_automatic_invalidation_denies_locally_without_remote_unbind(self):
         # A TLS/signed-proof failure is not an authorized server decision to
@@ -342,61 +433,58 @@ class HeartbeatVerificationTests(unittest.TestCase):
         worker._current_hwid = "HWID-TEST"
         worker._running = True
 
-        with patch.object(worker._stop_event, "wait", side_effect=[False, False]) as wait, patch(
-            "licenx.storage.time.monotonic", side_effect=[100.0, 160.0, 160.0]
+        with patch.object(worker._stop_event, "wait", side_effect=[False, False, True]) as wait, patch(
+            "licenx.storage.time.monotonic", side_effect=[100.0, 160.0, 160.0, 160.0]
         ):
             worker._worker_loop()
 
-        self.assertEqual(wait.call_args_list[0].kwargs, {"timeout": 60})
-        self.assertEqual(wait.call_args_list[1].kwargs, {"timeout": 0.0})
-        communicator.ping_heartbeat.assert_called_once_with("LIC-TEST", "HWID-TEST")
-        invalidated.assert_called_once_with("Offline grace period expired")
-        self.assertFalse(worker._running)
+        self.assertEqual([c.kwargs["timeout"] for c in wait.call_args_list], [60, 30, 30])
+        self.assertEqual(communicator.ping_heartbeat.call_count, 2)
+        invalidated.assert_not_called()
+        self.assertTrue(worker._running)
+        self.assertTrue(worker._realtime_paused)
 
-    def test_security_failure_invalidates_immediately_even_with_grace(self):
+    def test_security_failure_pauses_authorization_without_false_logout(self):
         communicator = Mock()
         communicator.ping_heartbeat.return_value = (
-            False,
-            {"code": "HEARTBEAT_SIGNATURE_FAILED"},
+            False, {"code": "HEARTBEAT_SIGNATURE_FAILED"},
         )
         invalidated = Mock()
         worker = BackgroundLicenseWorker(
-            "offline-grace-security-test",
-            ping_interval_seconds=60,
-            offline_grace_seconds=3600,
-            on_invalidated=invalidated,
+            "offline-grace-security-test", ping_interval_seconds=60,
+            offline_grace_seconds=3600, on_invalidated=invalidated,
         )
         worker._server_communicator = communicator
         worker._current_license_key = "LIC-TEST"
         worker._current_hwid = "HWID-TEST"
         worker._running = True
 
-        with patch.object(worker._stop_event, "wait", return_value=False):
+        with patch.object(worker._stop_event, "wait", side_effect=[False, True]):
             worker._worker_loop()
 
-        invalidated.assert_called_once_with("HEARTBEAT_SIGNATURE_FAILED")
-        self.assertFalse(worker._running)
+        invalidated.assert_not_called()
+        self.assertTrue(worker._realtime_paused)
+        self.assertTrue(worker._running)
 
-    def test_tls_failure_invalidates_immediately_even_with_grace(self):
+    def test_tls_failure_pauses_authorization_without_false_logout(self):
         communicator = Mock()
         communicator.ping_heartbeat.return_value = (False, {"code": "SSL_ERROR"})
         invalidated = Mock()
         worker = BackgroundLicenseWorker(
-            "offline-grace-tls-test",
-            ping_interval_seconds=60,
-            offline_grace_seconds=3600,
-            on_invalidated=invalidated,
+            "offline-grace-tls-test", ping_interval_seconds=60,
+            offline_grace_seconds=3600, on_invalidated=invalidated,
         )
         worker._server_communicator = communicator
         worker._current_license_key = "LIC-TEST"
         worker._current_hwid = "HWID-TEST"
         worker._running = True
 
-        with patch.object(worker._stop_event, "wait", return_value=False):
+        with patch.object(worker._stop_event, "wait", side_effect=[False, True]):
             worker._worker_loop()
 
-        invalidated.assert_called_once_with("SSL_ERROR")
-        self.assertFalse(worker._running)
+        invalidated.assert_not_called()
+        self.assertTrue(worker._realtime_paused)
+        self.assertTrue(worker._running)
 
     def test_successful_heartbeat_clears_offline_grace(self):
         communicator = Mock()
