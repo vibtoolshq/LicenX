@@ -168,14 +168,121 @@ class XLicenseClient:
                     message="Previous device release is unverified. Retry after server connectivity returns.",
                     code="PREVIOUS_SESSION_LOGOUT_FAILED",
                 )
-        if self._current_key and not self.logout():
-            return LoginResult(
-                success=False,
-                status_code=503,
-                message="Previous license session could not be closed. Please retry when the license server is reachable.",
-                code="PREVIOUS_SESSION_LOGOUT_FAILED",
-                license_key=license_key.strip().upper() or None,
-            )
+        if self._current_key and self._authenticated:
+            # Replacing a verified session is a two-phase handoff. Validation
+            # may fail, and validate_license resets the communicator's RAM-only
+            # v2 logout proof; never disturb the old live communicator first.
+            old_key = self._current_key
+            old_payload = self._license_payload
+            old_hwid = getattr(self.logout_manager, "_current_hwid", None)
+            try:
+                candidate_transport = ServerCommunicator(self.config)
+
+                class _ValidationOnlyStorage:
+                    # A candidate must not stop the old heartbeat or write a
+                    # saved session before its signed proof is accepted.
+                    def save_session(self, *args, **kwargs):
+                        return None
+
+                    def start_monitoring(self, *args, **kwargs):
+                        return None
+
+                candidate_manager = LoginManager(
+                    self.config, candidate_transport, _ValidationOnlyStorage()
+                )
+                candidate = candidate_manager.login(license_key)
+            except Exception:
+                return LoginResult(
+                    success=False, status_code=503,
+                    message="License verification is temporarily unavailable",
+                    code="VALIDATION_UNAVAILABLE",
+                )
+            if not candidate.success:
+                return candidate  # Existing UI, monitor and server slot intact.
+
+            replacement_key = candidate.license_key or license_key.strip().upper()
+            if (self._current_key != old_key or
+                    self._license_payload is not old_payload or
+                    not self._authenticated):
+                # Never turn a late candidate response into a new active login.
+                if replacement_key != old_key.strip().upper() and candidate.hwid:
+                    try:
+                        candidate_transport.send_logout(replacement_key, candidate.hwid)
+                    except Exception:
+                        pass
+                return LoginResult(False, 409, "Login session changed", "SESSION_CHANGED")
+
+            if replacement_key != old_key.strip().upper():
+                # Only an authenticated v2 logout of the old device may release
+                # its slot. A failed release MUST NOT destroy its UI session.
+                try:
+                    old_hwid = old_hwid or self.get_hwid()
+                    released = bool(self.communicator.send_logout(old_key, old_hwid))
+                except Exception:
+                    released = False
+                if not released:
+                    # The server may have consumed the old proof even if its
+                    # HTTP response was lost. Retain the login UI and monitor,
+                    # but require signed re-verification before protected work.
+                    if getattr(self.config, "useWebSocket", False):
+                        self.storage.pause_for_signed_reverification()
+                    else:
+                        self.storage.should_invalidate_for_heartbeat_failure(
+                            {"code": "DENIAL_UNVERIFIED"}
+                        )
+                    # Candidate binding was just verified; best-effort v2
+                    # release prevents a stranded newly allocated device slot.
+                    # This never unbinds the old license or makes a v1 call.
+                    if candidate.hwid:
+                        try:
+                            candidate_transport.send_logout(replacement_key, candidate.hwid)
+                        except Exception:
+                            pass
+                    return LoginResult(
+                        success=False, status_code=503,
+                        message="Previous device release is unverified. Existing session retained.",
+                        code="PREVIOUS_SESSION_LOGOUT_FAILED",
+                        license_key=replacement_key,
+                    )
+
+            if (self._current_key != old_key or
+                    self._license_payload is not old_payload or
+                    not self._authenticated):
+                # A concurrent signed revocation/replacement during old release
+                # takes precedence over a delayed candidate activation.
+                if replacement_key != old_key.strip().upper() and candidate.hwid:
+                    try:
+                        candidate_transport.send_logout(replacement_key, candidate.hwid)
+                    except Exception:
+                        pass
+                return LoginResult(False, 409, "Login session changed", "SESSION_CHANGED")
+
+            # Signed candidate is ready; only now replace running workers and
+            # switch the authenticated logout proof to the new communicator.
+            self._stop_realtime()
+            self.storage.stop_monitoring()
+            self.communicator = candidate_transport
+            self.server = candidate_transport
+            self.login_manager.communicator = candidate_transport
+            self.logout_manager.communicator = candidate_transport
+            self._current_key = replacement_key
+            self._license_payload = candidate.license_data
+            self._authenticated = True
+            self.logout_manager.set_active_session(replacement_key, candidate.hwid)
+            if (getattr(self.config, "auto_login_enabled", True)
+                    and getattr(self.config, "auto_save_session", True)):
+                # Preserve normal login's legacy-temp-file purge, never
+                # introduce plaintext restart persistence or new credentials.
+                self.storage.save_session(replacement_key, candidate.license_data)
+            if (getattr(self.config, "enable_background_heartbeat", True)
+                    or getattr(self.config, "useWebSocket", False)):
+                self.storage.start_monitoring(
+                    server_communicator=candidate_transport,
+                    license_key=replacement_key,
+                    hwid=candidate.hwid,
+                )
+            self._start_realtime(candidate)
+            return candidate
 
         result = self.login_manager.login(license_key)
         if result.success:
@@ -316,7 +423,18 @@ class XLicenseClient:
         if not key:
             return {"valid": False, "code": "NOT_AUTHENTICATED", "message": "No active session"}
         current_payload = getattr(self, "_license_payload", None)
-        is_active, data = self.server.ping_heartbeat(key, self.get_hwid())
+        try:
+            is_active, data = self.server.ping_heartbeat(key, self.get_hwid())
+        except Exception:
+            # GUI callers must never receive an SDK transport exception.
+            # An unverified error is NOT signed revocation or a valid grant.
+            is_active, data = False, {
+                "valid": False, "code": "SERVER_UNREACHABLE",
+            }
+        if is_active and (not isinstance(data, dict) or data.get("valid") is not True):
+            is_active, data = False, {
+                "valid": False, "code": "INVALID_RESPONSE",
+            }
         if (key != self._current_key
                 or current_payload is not getattr(self, "_license_payload", None)
                 or not self._authenticated):
@@ -346,7 +464,10 @@ class XLicenseClient:
 
     def _handle_license_revoked(self, reason: str) -> None:
         """Called when background 20-min heartbeat detects revocation / unbind"""
-        self._stop_realtime()
+        try:
+            self._stop_realtime()
+        except Exception:
+            pass  # A misbehaving optional WSS stop cannot undo revocation.
         self._authenticated = False
         self._license_payload = None
         self._current_key = None
@@ -364,7 +485,12 @@ class XLicenseClient:
             pass
         print("\n[VCON-SDK] CRITICAL: License session invalidated; local authorization denied")
         if self.on_license_revoked:
-            self.on_license_revoked(reason)
+            try:
+                self.on_license_revoked(reason)
+            except Exception:
+                # User callbacks cannot propagate into the host UI thread.
+                # The verified local revocation above remains authoritative.
+                print("[VCON-SDK] License invalidation callback failed")
 
     def _handle_heartbeat_success(self, data: Dict[str, Any]) -> None:
         """Called on periodic successful heartbeat"""

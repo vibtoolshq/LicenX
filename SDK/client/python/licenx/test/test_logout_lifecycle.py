@@ -155,5 +155,26 @@ class LogoutLifecycleTests(unittest.TestCase):
         register_exit.assert_not_called()
 
 
+    def test_failed_v2_release_from_exit_is_once_only_and_never_fakes_success(self):
+        from licenx.config import SDKConfig
+        self.assertTrue(SDKConfig().auto_logout_on_exit)
+        previous_handler = Mock()
+        self.communicator.send_logout.side_effect = OSError("PRIVATE NETWORK")
+        with patch("licenx.logout.signal.getsignal", return_value=previous_handler), \
+             patch("licenx.logout.signal.signal") as set_signal, \
+             patch("licenx.logout.atexit.register") as register_exit:
+            manager = LogoutManager(self.communicator, self.storage)
+            manager.set_active_session("SYNTHETIC-KEY", "ORIGINAL-HWID")
+            callbacks = self._registered_signal_handlers(set_signal)
+            callbacks[signal.SIGTERM](signal.SIGTERM, None)
+            register_exit.call_args.args[0]()
+        previous_handler.assert_called_once_with(signal.SIGTERM, None)
+        self.communicator.send_logout.assert_called_once_with(
+            "SYNTHETIC-KEY", "ORIGINAL-HWID",
+        )
+        self.assertTrue(manager.has_pending_release())
+        self.assertIsNone(manager._current_license_key)
+        self.assertEqual(manager._pending_release, ("SYNTHETIC-KEY", "ORIGINAL-HWID"))
+
 if __name__ == "__main__":
     unittest.main()

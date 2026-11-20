@@ -316,6 +316,112 @@ class HeartbeatRecoveryTests(unittest.TestCase):
         self.assertEqual(worker.get_realtime_state(), "PAUSED_UNVERIFIED")
         worker.stop_monitoring()
 
+class ClientPingBoundaryTests(unittest.TestCase):
+    """F06: SDK-owned failures cannot unwind a host GUI call stack."""
+
+    @staticmethod
+    def fixture():
+        from licenx.client import XLicenseClient
+        client = XLicenseClient.__new__(XLicenseClient)
+        client.config = SDKConfig(useWebSocket=False, offline_grace_seconds=0)
+        client.storage = BackgroundLicenseWorker("manual-ping-boundary", offline_grace_seconds=0)
+        client._authenticated = True
+        client._current_key = "REDACTED-KEY"
+        client._license_payload = {"tier": "Pro"}
+        client.server = Mock()
+        client.communicator = client.server
+        client.logout_manager = Mock()
+        client.on_license_revoked = Mock()
+        client._realtime = None
+        return client
+
+    def test_manual_ping_exception_keeps_ui_session_and_denies_unverified_work(self):
+        from licenx.device import DeviceManager
+        client = self.fixture()
+        client.server.ping_heartbeat.side_effect = OSError("PRIVATE HOST TOKEN")
+        with patch.object(DeviceManager, "get_hwid", return_value="HWID-TEST"):
+            response = client.ping()
+        self.assertEqual(response["code"], "SERVER_UNREACHABLE")
+        self.assertNotIn("PRIVATE", str(response))
+        self.assertTrue(client.has_login_session())
+        self.assertFalse(client.is_authenticated())
+        client.on_license_revoked.assert_not_called()
+        client.logout_manager.logout.assert_not_called()
+
+        client.server.ping_heartbeat.side_effect = None
+        client.server.ping_heartbeat.return_value = (
+            True, {"valid": True, "status": "active", "server_time": 1732000000000},
+        )
+        with patch.object(DeviceManager, "get_hwid", return_value="HWID-TEST"):
+            response = client.ping()
+        self.assertTrue(response["valid"])
+        self.assertTrue(client.is_authenticated())
+        self.assertTrue(client.has_login_session())
+
+    def test_signed_revocation_remains_terminal_even_if_callback_throws(self):
+        from licenx.device import DeviceManager
+        client = self.fixture()
+        client.server.ping_heartbeat.return_value = (
+            False, {"code": "DEVICE_UNBOUND", "_licenx_terminal_denial": True},
+        )
+        client.on_license_revoked.side_effect = RuntimeError("PRIVATE CALLBACK SECRET")
+        stdout = io.StringIO()
+        with patch.object(DeviceManager, "get_hwid", return_value="HWID-TEST"):
+            with contextlib.redirect_stdout(stdout):
+                result = client.ping()
+        self.assertEqual(result["code"], "DEVICE_UNBOUND")
+        self.assertFalse(client.has_login_session())
+        self.assertFalse(client.is_authenticated())
+        self.assertIsNone(client.get_current_key())
+        self.assertNotIn("PRIVATE", stdout.getvalue())
+        client.on_license_revoked.assert_called_once_with("DEVICE_UNBOUND")
+        client.logout_manager.set_active_session.assert_called_once_with(None)
+        client.logout_manager.logout.assert_called_once_with(clear_saved_data=True)
+        # No unverified remote unbind on an invalidation callback.
+        client.communicator.send_logout.assert_not_called()
+
+    def test_manual_ping_malformed_positive_response_fails_closed(self):
+        from licenx.device import DeviceManager
+        client = self.fixture()
+        client.server.ping_heartbeat.return_value = (True, "bad-response")
+        with patch.object(DeviceManager, "get_hwid", return_value="HWID-TEST"):
+            result = client.ping()
+        self.assertEqual(result["code"], "INVALID_RESPONSE")
+        self.assertFalse(client.is_authenticated())
+        self.assertTrue(client.has_login_session())
+        client.on_license_revoked.assert_not_called()
+
+    def test_mismatched_positive_ping_flag_never_grants_access(self):
+        from licenx.device import DeviceManager
+        client = self.fixture()
+        client.server.ping_heartbeat.return_value = (True, {
+            "valid": False, "status": "active",
+        })
+        with patch.object(DeviceManager, "get_hwid", return_value="HWID-TEST"):
+            result = client.ping()
+        self.assertEqual(result["code"], "INVALID_RESPONSE")
+        self.assertFalse(client.is_authenticated())
+        self.assertTrue(client.has_login_session())
+        client.on_license_revoked.assert_not_called()
+
+    def test_late_terminal_ping_from_replaced_session_is_discarded(self):
+        from licenx.device import DeviceManager
+        client = self.fixture()
+
+        def swap_while_pending(*_args):
+            client._current_key = "NEW-KEY"
+            client._license_payload = {"tier": "New"}
+            return False, {"code": "DEVICE_UNBOUND", "_licenx_terminal_denial": True}
+
+        client.server.ping_heartbeat.side_effect = swap_while_pending
+        with patch.object(DeviceManager, "get_hwid", return_value="HWID-TEST"):
+            result = client.ping()
+        self.assertEqual(result["code"], "SESSION_CHANGED")
+        self.assertTrue(client.has_login_session())
+        self.assertEqual(client.get_current_key(), "NEW-KEY")
+        client.logout_manager.logout.assert_not_called()
+        client.on_license_revoked.assert_not_called()
+
 
 class BoundedTransportTests(unittest.TestCase):
     def setUp(self):
