@@ -141,30 +141,32 @@ test("refreshes an already active device without consuming another slot", async 
   });
 });
 
-test("releases stale active bindings before enforcing the device limit", async () => {
+test("stale active identity retains status but releases its fresh device slot", async () => {
   await db.execute({
     sql: `INSERT INTO devices (id, license_id, hwid, first_bound_at, last_ping_at, status)
           VALUES ('stale-device', 'license-1', 'hwid-stale', 1, 1, 'active')`,
   });
 
   const result = await bind("hwid-new");
-
   assert.deepEqual(result, {
-    status: "bound",
-    existingDevice: false,
-    activeDevicesCount: 0,
-    boundDevicesCount: 1,
+    status: "bound", existingDevice: false,
+    activeDevicesCount: 0, boundDevicesCount: 1,
   });
-  const rows = await db.execute(
-    "SELECT hwid, status FROM devices ORDER BY hwid",
-  );
-  assert.deepEqual(
-    rows.rows.map((row) => [row.hwid, row.status]),
-    [
-      ["hwid-new", "active"],
-      ["hwid-stale", "logged_out"],
-    ],
-  );
+  const rows = await db.execute("SELECT hwid, status FROM devices ORDER BY hwid");
+  assert.deepEqual(rows.rows.map((row) => [row.hwid, row.status]), [
+    ["hwid-new", "active"], ["hwid-stale", "active"],
+  ]);
+  // The recovered stale identity cannot consume a slot already in use.
+  const denied = await bind("hwid-stale");
+  assert.deepEqual(denied, {
+    status: "limit", existingDevice: true,
+    activeDevicesCount: 1, deviceLimit: 1,
+  });
+  const fresh = await db.execute({
+    sql: "SELECT COUNT(*) AS count FROM devices WHERE license_id = ? AND status = 'active' AND last_ping_at > ?",
+    args: ["license-1", Date.now() - 7200_000],
+  });
+  assert.equal(Number(fresh.rows[0]?.count), 1);
 });
 
 test("accepts default and compatible per-app lease policies only", () => {

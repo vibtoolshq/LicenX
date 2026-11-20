@@ -285,3 +285,93 @@ test("validation diagnostics redact credentials and request identifiers", () => 
   assert.doesNotMatch(unconfiguredDatabaseUrl, /postgres:\/\//);
   assert.match(unconfiguredDatabaseUrl, /\[REDACTED DATABASE URL\]/);
 });
+
+test("F08 Cloudflare v2 proof is signed, one-use, and invalid after same-device rebind", async () => {
+  const validate = async () => {
+    const response = await handleCloudflareApi(
+      new Request("https://licenx.test/api/v1/license/validate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          license_key: licenseKey, hwid, app_name: "vcon_default",
+          app_version: "1.0.0", nonce: "CF_PROOF_VALIDATION_1234567890",
+          logout_proof_version: 2, device_name: "Proof Test", os_info: "test",
+        }),
+      }), undefined,
+    );
+    assert.equal(response.status, 200);
+    const data = await response.json() as Record<string, any>;
+    const { signature, public_key, ...signed } = data;
+    assert.equal(verifySignature(canonicalJson(signed), signature, publicKeyPem), true);
+    assert.equal(typeof data.device_logout_proof, "string");
+    return data.device_logout_proof as string;
+  };
+  const logout = async (token: string) => {
+    const response = await handleCloudflareApi(
+      new Request("https://licenx.test/api/v2/license/logout", {
+        method: "POST", headers: { Authorization: "Bearer " + token },
+        body: "{}",
+      }), undefined,
+    );
+    return { status: response.status, body: await response.json() as Record<string, any> };
+  };
+
+  const first = await validate();
+  const forgedParts = first.split(".");
+  forgedParts[2] = (forgedParts[2][0] === "A" ? "B" : "A") + forgedParts[2].slice(1);
+  const forged = forgedParts.join(".");
+  assert.equal((await logout(forged)).status, 403);
+  assert.equal((await logout(first)).status, 200);
+  assert.equal((await logout(first)).status, 403, "replay must fail on another request");
+  const afterFirst = await db.execute({
+    sql: "SELECT status FROM devices WHERE license_id = ? AND hwid = ?", args: [licenseId, hwid],
+  });
+  assert.equal(afterFirst.rows[0]?.status, "logged_out");
+
+  const replacement = await validate();
+  assert.notEqual(first, replacement);
+  assert.equal((await logout(first)).status, 403, "old token cannot unbind replacement");
+  const concurrent = await Promise.all([logout(replacement), logout(replacement)]);
+  assert.deepEqual(concurrent.map((result) => result.status).sort(), [200, 403],
+    "exactly one parallel logout may consume a durable generation");
+});
+
+test("F08 Cloudflare refresh invalidates prior proof and expiry is fail-closed", async () => {
+  const request = (route: string, payload: Record<string, unknown>) =>
+    handleCloudflareApi(new Request("https://licenx.test/api/" + route, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }), undefined);
+  const first = await request("v1/license/validate", {
+    license_key: licenseKey, hwid, app_name: "vcon_default",
+    app_version: "1.0.0", device_name: "V2", os_info: "test",
+    nonce: "CF_REPLAY_VALIDATION_1234567890", logout_proof_version: 2,
+  });
+  assert.equal(first.status, 200);
+  const firstProof = (await first.json() as Record<string, any>).device_logout_proof as string;
+  const refreshed = await request("v1/license/ping", {
+    license_key: licenseKey, hwid, app_name: "vcon_default",
+    nonce: "CF_PROOF_HEARTBEAT_1234567890", logout_proof_version: 2,
+  });
+  assert.equal(refreshed.status, 200);
+  const refreshedProof = (await refreshed.json() as Record<string, any>).device_logout_proof as string;
+  const loginGeneration = JSON.parse(Buffer.from(firstProof.split(".")[1], "base64url").toString()).generation;
+  const pingGeneration = JSON.parse(Buffer.from(refreshedProof.split(".")[1], "base64url").toString()).generation;
+  assert.ok(pingGeneration > loginGeneration, "generation advances even in the same millisecond");
+
+  const send = async (proof: string) => handleCloudflareApi(
+    new Request("https://licenx.test/api/v2/license/logout", {
+      method: "POST", headers: { Authorization: "Bearer " + proof }, body: "{}",
+    }), undefined,
+  );
+  assert.equal((await send(firstProof)).status, 403);
+  const parts = refreshedProof.split(".");
+  const expiredClaim = JSON.parse(Buffer.from(parts[1], "base64url").toString());
+  expiredClaim.expires = Date.now() - 1000;
+  const encoded = Buffer.from(JSON.stringify(expiredClaim)).toString("base64url");
+  const crypto = await import("node:crypto");
+  const mac = crypto.createHmac("sha256", privateKeyPem)
+    .update("licenx-cf-logout-v2:").update(encoded).digest("base64url");
+  assert.equal((await send("lx2." + encoded + "." + mac)).status, 403);
+  assert.equal((await send(refreshedProof)).status, 200);
+  assert.equal((await send(refreshedProof)).status, 403);
+});

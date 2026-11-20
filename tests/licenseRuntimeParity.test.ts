@@ -376,7 +376,7 @@ test("Node and Cloudflare reject malformed validation payloads consistently", as
   assert.equal(Number(validationLogs.rows[0]?.count), 0);
 });
 
-test("Node validation frees a stale slot for a new device in both runtimes", async () => {
+test("Node and Cloudflare validation free stale capacity without revoking the old identity", async () => {
   await db.execute({
     sql: `INSERT INTO devices
           (id, license_id, hwid, device_name, os_info, ip_address,
@@ -400,7 +400,7 @@ test("Node validation frees a stale slot for a new device in both runtimes", asy
   assert.deepEqual(
     rows.rows.map((row) => [row.hwid, row.status]),
     [
-      ["HWID-OLD-DEVICE", "logged_out"],
+      ["HWID-OLD-DEVICE", "active"],
       [requestHwid, "active"],
     ],
   );
@@ -556,4 +556,49 @@ test("Node and Cloudflare both reject proofless v1 logout/deactivation without u
     args: [licenseId, requestHwid],
   });
   assert.equal(activeBinding.rows[0]?.status, "active");
+});
+
+test("F08 Node and Cloudflare expose equivalent signed v2 logout behavior", async () => {
+  const scenarios = [
+    {
+      validate: () => validateWithNode({
+        nonce: "NODE_V2_PARITY_NONCE_12345678", logout_proof_version: 2,
+      }),
+      logout: async (proof: string) => {
+        const r = await fetch(baseUrl + "/api/v2/license/logout", {
+          method: "POST", headers: { Authorization: "Bearer " + proof },
+        });
+        return { status: r.status, body: await r.json() as Record<string, any> };
+      },
+    },
+    {
+      validate: () => validateWithCloudflare({
+        nonce: "CLOUDFLARE_V2_PARITY_NONCE_1234", logout_proof_version: 2,
+      }),
+      logout: async (proof: string) => {
+        const r = await handleCloudflareApi(
+          new Request("https://licenx.test/api/v2/license/logout", {
+            method: "POST", headers: { Authorization: "Bearer " + proof }, body: "{}",
+          }), undefined,
+        );
+        return { status: r.status, body: await r.json() as Record<string, any> };
+      },
+    },
+  ];
+  for (const scenario of scenarios) {
+    const validated = await scenario.validate();
+    assert.equal(validated.status, 200);
+    assert.equal(typeof validated.body.device_logout_proof, "string");
+    const proof = validated.body.device_logout_proof as string;
+    const success = await scenario.logout(proof);
+    assert.equal(success.status, 200);
+    assert.equal(success.body.success, true);
+    const replay = await scenario.logout(proof);
+    assert.equal(replay.status, 403);
+    const binding = await db.execute({
+      sql: "SELECT status FROM devices WHERE license_id = ? AND hwid = ?",
+      args: [licenseId, requestHwid],
+    });
+    assert.equal(binding.rows[0]?.status, "logged_out");
+  }
 });

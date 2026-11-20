@@ -177,7 +177,7 @@ test("heartbeat denial remains fail-closed when the device is unbound", async ()
   assert.equal(cloudflareResult.body.code, "DEVICE_UNBOUND");
 });
 
-test("Node renews the same stale active binding; Cloudflare retains legacy lease policy", async () => {
+test("Node and Cloudflare recover the same stale-active binding without false logout", async () => {
   const appId = "app-heartbeat-lease-test";
   const appSlug = "heartbeat-lease-test";
   const appNow = Date.now();
@@ -205,20 +205,22 @@ test("Node renews the same stale active binding; Cloudflare retains legacy lease
   const renewed = await db.execute("SELECT status,last_ping_at FROM devices WHERE id = ?", [deviceId]);
   assert.equal(renewed.rows[0]?.status, "active");
   assert.ok(Number(renewed.rows[0]?.last_ping_at) >= appNow);
-  // Cloudflare is separately scoped and must retain its old stale-lease denial.
+  // Cloudflare must now match Node, preserving an explicitly active identity.
   await db.execute(
     "UPDATE devices SET status = 'active', last_ping_at = ? WHERE id = ?",
     [stalePing, deviceId],
   );
-  const cloudflareResult = await pingCloudflare("expired-cloudflare-lease");
-  assert.equal(cloudflareResult.status, 403);
-  assert.equal(cloudflareResult.body.code, "DEVICE_LEASE_EXPIRED");
+  const cloudflareResult = await pingCloudflare("stale-cloudflare-recovery");
+  assert.equal(cloudflareResult.status, 200);
+  assert.equal(cloudflareResult.body.valid, true);
 
   const row = await db.execute("SELECT status FROM devices WHERE id = ?", [
     deviceId,
   ]);
-  assert.equal(row.rows[0]?.status, "logged_out");
+  assert.equal(row.rows[0]?.status, "active");
 
+  // Explicit owner logout must still be terminal; staleness alone never is.
+  await db.execute("UPDATE devices SET status = 'logged_out' WHERE id = ?", [deviceId]);
   const afterReset = await pingNode("logged-out-must-stay-logged-out");
   assert.equal(afterReset.status, 403);
   assert.equal(afterReset.body.code, "DEVICE_UNBOUND");
@@ -312,4 +314,62 @@ test("F05 missing signing key never forges permission or negative proof", async 
   assert.equal(body.valid, false);
   assert.equal(body.code, "DEVICE_UNBOUND");
   assert.equal("signature" in body, false);
+});
+
+test("F08 Cloudflare signs nonce- and device-bound terminal denial", async () => {
+  const pair = generateEd25519KeyPair();
+  await installSigningKey(pair);
+  await db.execute("UPDATE devices SET status = 'logged_out' WHERE id = ?", [deviceId]);
+  const request = {
+    license_key: licenseKey, hwid, app_name: "signed-denial-test-app",
+    nonce: "CLOUDFLARE_DENIAL_NONCE_1234567890123456",
+  };
+  const response = await handleCloudflareApi(
+    new Request("https://licenx.test/api/v1/license/ping", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(request),
+    }), undefined,
+  );
+  assert.equal(response.status, 403);
+  const body = await response.json() as Record<string, any>;
+  assert.equal(body.code, "DEVICE_UNBOUND");
+  const crypto = await import("node:crypto");
+  const binding = crypto.createHash("sha256").update(canonicalJson({
+    license_key: licenseKey, hwid, app_name: request.app_name,
+  }), "utf8").digest("hex");
+  assert.equal(body.nonce, request.nonce);
+  assert.equal(body.request_binding, binding);
+  const signed = {
+    valid: false, code: "DEVICE_UNBOUND", nonce: body.nonce,
+    request_binding: body.request_binding, server_time: body.server_time,
+  };
+  assert.equal(verifySignature(canonicalJson(signed), body.signature, pair.publicKeyPem), true);
+  assert.equal(verifySignature(canonicalJson({
+    ...signed, request_binding: "0".repeat(64),
+  }), body.signature, pair.publicKeyPem), false);
+  assert.equal("license_key" in body, false);
+});
+
+test("F03 both providers reject stale reentry when the fresh device slot is occupied", async () => {
+  await db.execute({
+    sql: "UPDATE devices SET last_ping_at = ? WHERE id = ?",
+    args: [Date.now() - 7_300_000, deviceId],
+  });
+  await db.execute({
+    sql: "INSERT INTO devices (id, license_id, hwid, first_bound_at, last_ping_at, status) VALUES (?, ?, ?, ?, ?, 'active')",
+    args: ["fresh-slot-holder", licenseId, "HWID-OTHER", Date.now(), Date.now()],
+  });
+  const results = [
+    await pingNode("stale-node-capacity-guard"),
+    await pingCloudflare("stale-cloudflare-capacity-guard"),
+  ];
+  for (const result of results) {
+    assert.equal(result.status, 409);
+    assert.equal(result.body.code, "DEVICE_LEASE_SLOT_BUSY");
+  }
+  const oldDevice = await db.execute({
+    sql: "SELECT status, last_ping_at FROM devices WHERE id = ?", args: [deviceId],
+  });
+  assert.equal(oldDevice.rows[0]?.status, "active");
+  assert.ok(Number(oldDevice.rows[0]?.last_ping_at) < Date.now() - 7_200_000);
 });

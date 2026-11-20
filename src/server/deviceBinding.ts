@@ -85,17 +85,15 @@ export async function bindDeviceWithinLimit({
     try {
       transaction = await db.transaction("write");
       await transaction.lockLicense?.(licenseId);
-      await transaction.execute({
-        sql: "UPDATE devices SET status = 'logged_out' WHERE license_id = ? AND status = 'active' AND last_ping_at <= ?",
-        args: [licenseId, staleBefore],
-      });
+      // A stale lease releases capacity, NOT a device's explicit login state.
+      // An unrelated bind must not turn a recoverable device into logged_out.
       const existingResult = await transaction.execute({
-        sql: "SELECT id, status FROM devices WHERE license_id = ? AND hwid = ? LIMIT 1",
+        sql: "SELECT id, status, last_ping_at FROM devices WHERE license_id = ? AND hwid = ? LIMIT 1",
         args: [licenseId, hwid],
       });
       const countResult = await transaction.execute({
-        sql: "SELECT COUNT(*) AS active_count FROM devices WHERE license_id = ? AND status = 'active'",
-        args: [licenseId],
+        sql: "SELECT COUNT(*) AS active_count FROM devices WHERE license_id = ? AND status = 'active' AND last_ping_at > ?",
+        args: [licenseId, staleBefore],
       });
 
       const existingDevice = existingResult.rows[0];
@@ -107,7 +105,9 @@ export async function bindDeviceWithinLimit({
         return { status: "blocked" };
       }
 
-      const wasActive = existingStatus === "active";
+      // Stale-active rows may rejoin only if a fresh slot is available.
+      const wasActive = existingStatus === "active" &&
+        Number(existingDevice?.last_ping_at) > staleBefore;
       const shouldCheckLimit = !wasActive;
 
       if (
@@ -126,9 +126,11 @@ export async function bindDeviceWithinLimit({
 
       if (existingDevice) {
         await transaction.execute({
-          sql: "UPDATE devices SET status = 'active', last_ping_at = ?, device_name = ?, os_info = ?, ip_address = ? WHERE id = ?",
+          // Advance the persistent generation on every rebind, including
+          // a same-millisecond logout/re-login (Cloudflare v2 replay guard).
+          sql: "UPDATE devices SET status = 'active', last_ping_at = CASE WHEN last_ping_at >= ? THEN last_ping_at + 1 ELSE ? END, device_name = ?, os_info = ?, ip_address = ? WHERE id = ?",
           args: [
-            now,
+            now, now,
             deviceName,
             osInfo,
             ipAddress,

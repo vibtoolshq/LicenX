@@ -2530,6 +2530,28 @@ export async function handleCloudflareApi(
         if (!dev.rows[0]?.id) return jsonResponse({ code: "STATS_DEVICE_UNAVAILABLE" }, 503);
         signedData.stats_capability = await issueDeviceStatsSession(db, String(dev.rows[0].id), now);
       }
+      // Issue only after a valid bind, and include it inside the signed SDK payload.
+      // last_ping_at is a durable one-use generation, advanced by every rebind.
+      if (requestNonce !== undefined && body.logout_proof_version === 2) {
+        const proofDevice = await db.execute({
+          sql: "SELECT id, last_ping_at FROM devices WHERE license_id = ? AND hwid = ? AND status = 'active' LIMIT 1",
+          args: [lic.id as string, cleanHwid],
+        });
+        const row = proofDevice.rows[0];
+        if (!row?.id || !Number.isSafeInteger(Number(row.last_ping_at))) {
+          return jsonResponse({ code: "LOGOUT_PROOF_UNAVAILABLE" }, 503);
+        }
+        const claims = {
+          v: 2, purpose: "cf-device-logout", device: String(row.id),
+          license: String(lic.id), hwid: cleanHwid,
+          generation: Number(row.last_ping_at), expires: now + 3_600_000,
+          nonce: crypto.randomBytes(16).toString("hex"),
+        };
+        const encoded = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
+        const mac = crypto.createHmac("sha256", privKey)
+          .update("licenx-cf-logout-v2:").update(encoded).digest("base64url");
+        signedData.device_logout_proof = `lx2.${encoded}.${mac}`;
+      }
       const canonicalPayload = canonicalJson(signedData);
       validationStage = "response_signing";
       const signature = await signPayloadForCloudflare(
@@ -2567,33 +2589,49 @@ export async function handleCloudflareApi(
       const cleanKey = license_key.trim().toUpperCase();
       const cleanHwid = hwid.trim();
       const now = Date.now();
+      // Terminal decisions are authoritative to the Python SDK only when
+      // signed with the exact request nonce and key/HWID/app binding.
+      const deny = async (
+        status: 403 | 404, code: string, legacy: Record<string, unknown> = {},
+      ): Promise<Response> => {
+        const response = { valid: false, code, ...legacy };
+        if (typeof body.app_name !== "string" || typeof nonce !== "string" ||
+            !/^[A-Za-z0-9_-]{16,128}$/.test(nonce)) return jsonResponse(response, status);
+        const binding = crypto.createHash("sha256").update(canonicalJson({
+          license_key: cleanKey, hwid, app_name: body.app_name,
+        }), "utf8").digest("hex");
+        const proof = { valid: false, code, nonce, request_binding: binding, server_time: now };
+        try {
+          const signing = await db.execute("SELECT ed25519_private_key FROM admin_config LIMIT 1");
+          const key = signing.rows[0]?.ed25519_private_key;
+          if (typeof key === "string" && key) {
+            const signature = await signPayloadForCloudflare(canonicalJson(proof), key);
+            return jsonResponse({ ...response, ...proof, signature }, status);
+          }
+        } catch { /* Missing key cannot turn an error into trusted proof. */ }
+        return jsonResponse(response, status);
+      };
 
       const licRes = await db.execute({
-        sql: "SELECT id, status, expires_at, app_id FROM licenses WHERE key = ? LIMIT 1",
+        sql: "SELECT id, status, expires_at, app_id, device_limit FROM licenses WHERE key = ? LIMIT 1",
         args: [cleanKey],
       });
 
       if (licRes.rows.length === 0)
-        return errorResponse("License not found", 404);
+        return deny(404, "NOT_FOUND", { message: "License not found" });
 
       const lic = licRes.rows[0];
       if (lic.status !== "active")
-        return jsonResponse(
-          { valid: false, code: "LICENSE_INACTIVE", status: lic.status },
-          403,
-        );
+        return deny(403, "LICENSE_INACTIVE", { status: lic.status });
 
       if (lic.expires_at && now > Number(lic.expires_at)) {
-        return jsonResponse(
-          { valid: false, code: "LICENSE_EXPIRED", status: "expired" },
-          403,
-        );
+        return deny(403, "LICENSE_EXPIRED", { status: "expired" });
       }
 
       if (lic.app_id) {
         const appState = await db.execute({ sql: "SELECT status FROM apps WHERE id = ? LIMIT 1", args: [lic.app_id] });
         if (!appState.rows.length || appState.rows[0].status !== "active") {
-          return jsonResponse({ valid: false, code: !appState.rows.length ? "APP_NOT_FOUND" : "APP_INACTIVE" }, 403);
+          return deny(403, !appState.rows.length ? "APP_NOT_FOUND" : "APP_INACTIVE");
         }
       }
       const deviceLeaseSeconds = await getDeviceLeaseSeconds(db, lic.app_id);
@@ -2604,53 +2642,58 @@ export async function handleCloudflareApi(
       });
 
       if (devCheck.rows.length === 0 || devCheck.rows[0].status !== "active") {
-        return jsonResponse(
-          {
-            valid: false,
-            code: "DEVICE_UNBOUND",
-            message:
-              "Device binding was logged out or unlinked by administrator",
-          },
-          403,
-        );
-      }
-
-      if (Number(devCheck.rows[0].last_ping_at) <= staleBefore) {
-        await db.execute({
-          sql: "UPDATE devices SET status = 'logged_out' WHERE license_id = ? AND hwid = ? AND status = 'active' AND last_ping_at <= ?",
-          args: [lic.id as string, cleanHwid, staleBefore],
+        return deny(403, "DEVICE_UNBOUND", {
+          message: "Device binding was logged out or unlinked by administrator",
         });
-        return jsonResponse(
-          {
-            valid: false,
-            code: "DEVICE_LEASE_EXPIRED",
-            message:
-              "Device lease expired; log in again to revalidate this license",
-          },
-          403,
-        );
       }
 
       const configRes = await db.execute(
         "SELECT ed25519_private_key FROM admin_config LIMIT 1",
       );
-      if (configRes.rows.length === 0)
+      if (!configRes.rows[0]?.ed25519_private_key)
         return errorResponse(SAFE_SERVER_ERROR, 503);
 
-      const renewed = await db.execute({
-        sql: "UPDATE devices SET last_ping_at = ? WHERE license_id = ? AND hwid = ? AND status = 'active' AND last_ping_at > ?",
-        args: [now, lic.id as string, cleanHwid, staleBefore],
-      });
-      if (Number(renewed.rowsAffected) === 0) {
-        return jsonResponse(
-          {
-            valid: false,
-            code: "DEVICE_UNBOUND",
-            message: "Device binding is no longer active",
-          },
-          403,
-        );
-      }
+      // A stale active identity is recoverable, but may not steal a fresh slot.
+      // Serialize with bind/logout; do not turn an outage into logged_out.
+      let renewalTx: Awaited<ReturnType<typeof db.transaction>> | undefined;
+      let renewedDevice: { id: string; generation: number } | undefined;
+      try {
+        renewalTx = await db.transaction("write");
+        await renewalTx.lockLicense?.(String(lic.id));
+        if (Number(devCheck.rows[0].last_ping_at) <= staleBefore && Number(lic.device_limit) !== -1) {
+          const slots = await renewalTx.execute({
+            sql: "SELECT COUNT(*) AS active_count FROM devices WHERE license_id = ? AND status = 'active' AND last_ping_at > ?",
+            args: [lic.id as string, staleBefore],
+          });
+          if (Number(slots.rows[0]?.active_count || 0) >= Number(lic.device_limit)) {
+            await renewalTx.rollback();
+            return jsonResponse({ valid: false, code: "DEVICE_LEASE_SLOT_BUSY" }, 409);
+          }
+        }
+        const renewed = await renewalTx.execute({
+          sql: `UPDATE devices SET last_ping_at = CASE WHEN last_ping_at >= ? THEN last_ping_at + 1 ELSE ? END
+                WHERE license_id = ? AND hwid = ? AND status = 'active'
+                  AND EXISTS (
+                    SELECT 1 FROM licenses l WHERE l.id = ? AND l.status = 'active'
+                      AND (l.expires_at IS NULL OR l.expires_at > ?)
+                      AND (l.app_id IS NULL OR EXISTS (
+                        SELECT 1 FROM apps a WHERE a.id = l.app_id AND a.status = 'active'
+                      ))
+                  ) RETURNING id, last_ping_at`,
+          args: [now, now, lic.id as string, cleanHwid, lic.id as string, now],
+        });
+        if (renewed.rows.length !== 1 || String(renewed.rows[0].id) !== String(devCheck.rows[0].id)) {
+          await renewalTx.rollback();
+          return deny(403, "DEVICE_UNBOUND", { message: "Device binding is no longer active" });
+        }
+        renewedDevice = {
+          id: String(renewed.rows[0].id), generation: Number(renewed.rows[0].last_ping_at),
+        };
+        await renewalTx.commit();
+      } catch {
+        try { await renewalTx?.rollback(); } catch { /* do not hide original failure */ }
+        return errorResponse(SAFE_SERVER_ERROR, 503);
+      } finally { renewalTx?.close(); }
 
       const signedData: Record<string, unknown> = {
         valid: true,
@@ -2669,12 +2712,103 @@ export async function handleCloudflareApi(
           if (refreshed) signedData.stats_capability = refreshed;
         }
       }
+      if (body.logout_proof_version === 2 && typeof nonce === "string" &&
+          /^[A-Za-z0-9_-]{16,128}$/.test(nonce) && renewedDevice) {
+        const claims = {
+          v: 2, purpose: "cf-device-logout", device: renewedDevice.id,
+          license: String(lic.id), hwid: cleanHwid,
+          generation: renewedDevice.generation, expires: now + 3_600_000,
+          nonce: crypto.randomBytes(16).toString("hex"),
+        };
+        const encoded = Buffer.from(JSON.stringify(claims), "utf8").toString("base64url");
+        const mac = crypto.createHmac("sha256", configRes.rows[0].ed25519_private_key as string)
+          .update("licenx-cf-logout-v2:").update(encoded).digest("base64url");
+        signedData.device_logout_proof = `lx2.${encoded}.${mac}`;
+      }
       const signature = await signPayloadForCloudflare(
         canonicalJson(signedData),
         configRes.rows[0].ed25519_private_key as string,
       );
 
       return jsonResponse({ ...signedData, signature });
+    }
+
+    if (normalizedPath === "/v2/license/logout" && method === "POST") {
+      // Cross-worker proof verification uses the persisted device generation,
+      // not an in-memory token map. A second use cannot match the same row.
+      const authorization = request.headers.get("authorization");
+      const bearer = authorization?.startsWith("Bearer ") ? authorization.slice(7) : "";
+      const parts = bearer.split(".");
+      if (parts.length !== 3 || parts[0] !== "lx2" ||
+          !/^[A-Za-z0-9_-]{1,2048}$/.test(parts[1] || "") ||
+          !/^[A-Za-z0-9_-]{43}$/.test(parts[2] || "")) {
+        return jsonResponse({ code: "INVALID_LOGOUT_PROOF" }, 403);
+      }
+      const signing = await db.execute("SELECT ed25519_private_key FROM admin_config LIMIT 1");
+      const privateKey = signing.rows[0]?.ed25519_private_key;
+      if (typeof privateKey !== "string" || !privateKey)
+        return jsonResponse({ code: "INVALID_LOGOUT_PROOF" }, 403);
+      const expected = crypto.createHmac("sha256", privateKey)
+        .update("licenx-cf-logout-v2:").update(parts[1]).digest();
+      const supplied = Buffer.from(parts[2], "base64url");
+      if (supplied.length !== expected.length ||
+          !crypto.timingSafeEqual(supplied, expected) ||
+          parts[2] !== expected.toString("base64url"))
+        return jsonResponse({ code: "INVALID_LOGOUT_PROOF" }, 403);
+      let claim: Record<string, unknown>;
+      try {
+        const parsed: unknown = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+        if (!parsed || typeof parsed !== "object" || Array.isArray(parsed))
+          return jsonResponse({ code: "INVALID_LOGOUT_PROOF" }, 403);
+        claim = parsed as Record<string, unknown>;
+      } catch { return jsonResponse({ code: "INVALID_LOGOUT_PROOF" }, 403); }
+      const now = Date.now();
+      if (claim.v !== 2 || claim.purpose !== "cf-device-logout" ||
+          typeof claim.device !== "string" || !claim.device ||
+          typeof claim.license !== "string" || !claim.license ||
+          typeof claim.hwid !== "string" || !claim.hwid ||
+          typeof claim.nonce !== "string" || !/^[0-9a-f]{32}$/.test(claim.nonce) ||
+          typeof claim.generation !== "number" || !Number.isSafeInteger(claim.generation) ||
+          typeof claim.expires !== "number" || !Number.isSafeInteger(claim.expires) ||
+          Number(claim.expires) <= now || Number(claim.expires) > now + 3_600_000) {
+        return jsonResponse({ code: "INVALID_LOGOUT_PROOF" }, 403);
+      }
+      // Two simultaneous one-time bearer submissions may contend for the
+      // same write lock. Retry transient transaction failure within bounds.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        let tx: Awaited<ReturnType<typeof db.transaction>> | undefined;
+        try {
+          tx = await db.transaction("write");
+          await tx.lockLicense?.(claim.license);
+        const found = await tx.execute({
+          sql: "SELECT l.key FROM devices d JOIN licenses l ON l.id = d.license_id WHERE d.id = ? AND d.license_id = ? AND d.hwid = ? AND d.status = 'active' AND d.last_ping_at = ? LIMIT 1",
+          args: [claim.device, claim.license, claim.hwid, claim.generation],
+        });
+        if (!found.rows.length) {
+          await tx.rollback();
+          return jsonResponse({ code: "DEVICE_UNBOUND" }, 403);
+        }
+        const updated = await tx.execute({
+          sql: "UPDATE devices SET status = 'logged_out', last_ping_at = CASE WHEN last_ping_at >= ? THEN last_ping_at + 1 ELSE ? END WHERE id = ? AND license_id = ? AND hwid = ? AND status = 'active' AND last_ping_at = ? RETURNING id",
+          args: [now, now, claim.device, claim.license, claim.hwid, claim.generation],
+        });
+        if (updated.rows.length !== 1) {
+          await tx.rollback();
+          return jsonResponse({ code: "DEVICE_UNBOUND" }, 403);
+        }
+        await tx.execute({
+          sql: "INSERT INTO validation_logs (id, license_key, app_slug, hwid, ip_address, action, status_code, message, created_at) VALUES (?, ?, NULL, ?, NULL, 'logout', 200, 'Authenticated device logout completed', ?)",
+          args: ["log_" + crypto.randomBytes(6).toString("hex"), String(found.rows[0].key), claim.hwid, now],
+        });
+        await tx.commit();
+        return jsonResponse({ success: true });
+        } catch {
+          try { await tx?.rollback(); } catch { /* preserve failure */ }
+          if (attempt === 3) return jsonResponse({ error: SAFE_SERVER_ERROR }, 503);
+        } finally { tx?.close(); }
+        await new Promise((resolve) => setTimeout(resolve, (attempt + 1) * 15));
+      }
+      return jsonResponse({ error: SAFE_SERVER_ERROR }, 503);
     }
 
     if (

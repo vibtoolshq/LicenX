@@ -2752,7 +2752,7 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
     };
 
     const licRes = await db.execute({
-      sql: "SELECT id, status, expires_at, app_id FROM licenses WHERE key = ? LIMIT 1",
+      sql: "SELECT id, status, expires_at, app_id, device_limit FROM licenses WHERE key = ? LIMIT 1",
       args: [license_key.trim().toUpperCase()],
     });
 
@@ -2810,14 +2810,30 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
 
     // Serialize with other license binding changes. Never reactivate a row:
     // both the transaction and the conditional UPDATE require status='active'.
+    const leaseSeconds = await getDeviceLeaseSeconds(db, license.app_id);
     let renewalTx: Awaited<ReturnType<typeof db.transaction>> | undefined;
     let renewedDeviceId: string | undefined;
     let refreshedStatsToken: string | undefined;
     try {
       renewalTx = await db.transaction("write");
       await renewalTx.lockLicense?.(license.id as string);
+      // Stale devices retain their identity but cannot displace a new
+      // lease holder or exceed the finite fresh-slot limit.
+      const staleBefore = now - leaseSeconds * 1000;
+      if (Number(devCheck.rows[0].last_ping_at) <= staleBefore &&
+          Number(license.device_limit) !== -1) {
+        const slots = await renewalTx.execute({
+          sql: "SELECT COUNT(*) AS active_count FROM devices WHERE license_id = ? AND status = 'active' AND last_ping_at > ?",
+          args: [license.id as string, staleBefore],
+        });
+        if (Number(slots.rows[0]?.active_count || 0) >= Number(license.device_limit)) {
+          await renewalTx.rollback();
+          res.status(409).json({ valid: false, code: "DEVICE_LEASE_SLOT_BUSY" });
+          return;
+        }
+      }
       const renewed = await renewalTx.execute({
-        sql: `UPDATE devices SET last_ping_at = ?
+        sql: `UPDATE devices SET last_ping_at = CASE WHEN last_ping_at >= ? THEN last_ping_at + 1 ELSE ? END
               WHERE license_id = ? AND hwid = ? AND status = 'active'
                 AND EXISTS (
                   SELECT 1 FROM licenses l
@@ -2827,7 +2843,7 @@ apiRouter.post("/v1/license/ping", async (req: Request, res: Response) => {
                       SELECT 1 FROM apps a WHERE a.id = l.app_id AND a.status = 'active'
                     ))
                 ) RETURNING id`,
-        args: [now, license.id as string, hwid, license.id as string, now],
+        args: [now, now, license.id as string, hwid, license.id as string, now],
       });
       // libSQL can report rowsAffected=0 for UPDATE ... RETURNING even
       // when a row was updated. The returned row identity is authoritative.
