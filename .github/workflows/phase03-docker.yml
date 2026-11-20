@@ -17,6 +17,7 @@ on:
       - "src/server/**"
       - "src/**"
       - "scripts/buildPythonSdkArchive.mjs"
+      - "scripts/release-app-only.sh"
       - "SDK/client/python/**"
       - "vite.config.ts"
       - "index.html"
@@ -66,6 +67,8 @@ jobs:
 
       - name: Build and start PostgreSQL, production app and localhost HTTPS
         shell: bash
+        env:
+          LICENX_SOURCE_REVISION: ${{ github.sha }}
         run: |
           set -euo pipefail
           docker compose --profile standalone-https up --detach --build --wait --wait-timeout 180
@@ -133,6 +136,47 @@ jobs:
           after="$(docker compose exec -T postgres sh -ec 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Atc "SELECT count(*) FROM pg_catalog.pg_tables WHERE schemaname = '\''public'\'';"' | tr -d '\r')"
           test "$after" = "$before"
           echo "PASS non-root runtime, no tracked DB/notes, app and PostgreSQL volume recreation"
+
+      - name: RSG-01 source revision and app-only rollback guard (disposable CI)
+        shell: bash
+        run: |
+          set -euo pipefail
+          app_before="$(docker compose --profile standalone-https ps -q app)"
+          pg_before="$(docker compose --profile standalone-https ps -q postgres)"
+          caddy_before="$(docker compose --profile standalone-https ps -q caddy)"
+          test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$app_before")" = "$GITHUB_SHA"
+          # These are synthetic CI-only metadata fixtures, NOT actual recovery archives.
+          docker compose exec -T app node -e '
+            const fs=require("node:fs");
+            const path=require("node:path");
+            const root="/var/lib/licenx/storage/.backup-manager";
+            const file=path.join(root,"archives","ci-only-no-real-recovery.lxbackup");
+            fs.mkdirSync(path.dirname(file),{recursive:true});
+            fs.writeFileSync(file,"CI_DISPOSABLE_FIXTURE_NOT_A_BACKUP");
+            const state=JSON.parse(fs.readFileSync(path.join(root,"state.json"),"utf8"));
+            state.recoveryDownloaded=true;
+            state.jobs=[
+              {action:"backup",status:"completed",createdAt:Date.now(),destination:"local",file},
+              {action:"backup",status:"completed",createdAt:Date.now(),destination:"r2:ci-only",r2Key:"licenx-full-backups/ci-only.lxbackup"}
+            ];
+            fs.writeFileSync(path.join(root,"state.json"),JSON.stringify(state));
+            console.log("CI_ONLY_FAKE_BACKUP_METADATA_SEEDED");
+          '
+          bash scripts/release-app-only.sh --check --sha "$GITHUB_SHA" | grep -F 'READ_ONLY_CHECK=PASS'
+          test "$(docker compose --profile standalone-https ps -q app)" = "$app_before"
+          test "$(docker compose --profile standalone-https ps -q postgres)" = "$pg_before"
+          test "$(docker compose --profile standalone-https ps -q caddy)" = "$caddy_before"
+          if bash scripts/release-app-only.sh --apply --sha "${GITHUB_SHA:0:39}" --owner-approved --owner-recovery-confirmed >/dev/null 2>&1; then
+            echo "ERROR: invalid SHA bypassed guard"; exit 1
+          fi
+          bash scripts/release-app-only.sh --apply --sha "$GITHUB_SHA" --owner-approved --owner-recovery-confirmed
+          app_after="$(docker compose --profile standalone-https ps -q app)"
+          test "$app_after" != "$app_before"
+          test "$(docker inspect --format '{{index .Config.Labels "org.opencontainers.image.revision"}}' "$app_after")" = "$GITHUB_SHA"
+          test "$(docker compose --profile standalone-https ps -q postgres)" = "$pg_before"
+          test "$(docker compose --profile standalone-https ps -q caddy)" = "$caddy_before"
+          docker compose exec -T app sh -ec 'test "$(cat /var/lib/licenx/storage/.ci-persistence-marker)" = "ci-only-fixture"'
+          echo "RSG01_DISPOSABLE_APP_ONLY=PASS"
 
       - name: Report redacted service state on failure
         if: failure()

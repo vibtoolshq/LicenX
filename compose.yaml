@@ -15,7 +15,10 @@ services:
       timeout: 5s
       retries: 10
   app:
-    build: .
+    build:
+      context: .
+      args:
+        LICENX_SOURCE_REVISION: ${LICENX_SOURCE_REVISION:-unverified}
     restart: unless-stopped
     environment:
       NODE_ENV: production

@@ -6,6 +6,8 @@ COPY . .
 RUN npm run build
 
 FROM node:24.12.0-bookworm-slim AS runtime
+ARG LICENX_SOURCE_REVISION=unverified
+LABEL org.opencontainers.image.revision="${LICENX_SOURCE_REVISION}"
 RUN apt-get update && apt-get install -y --no-install-recommends tar && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production PORT=3000
 WORKDIR /app
