@@ -632,7 +632,8 @@ class RealtimeSdkTests(unittest.TestCase):
         client.config = self.config
         client.storage = self.storage
         client._authenticated = True
-        with patch("licenx.storage.time.monotonic", return_value=first_disconnection + 20):
+        # Use an unambiguous post-deadline instant across Python/OS float clocks.
+        with patch("licenx.storage.time.monotonic", return_value=first_disconnection + 21):
             self.assertEqual(self.storage.get_realtime_state(), "OFFLINE_GRACE")
             self.assertEqual(client.get_connection_state(), "PAUSED_UNVERIFIED")
             self.assertFalse(client.is_authenticated())

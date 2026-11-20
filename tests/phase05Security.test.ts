@@ -17,7 +17,10 @@ test("Node proof-bound logout denies legacy mutation; Cloudflare blocked-device 
   assert.match(node, /takeDeviceLogoutProof\(token\)/);
   assert.match(node, /WHERE id = \? AND license_id = \? AND hwid = \? AND status = 'active'/);
   const cloudflare = source("src/server/cloudflareHandler.ts");
-  assert.match(cloudflare, /last_ping_at = \? WHERE license_id = \? AND hwid = \? AND status = 'active'/);
+  assert.match(cloudflare, /WHERE d\.id = \? AND d\.license_id = \? AND d\.hwid = \? AND d\.status = 'active' AND d\.last_ping_at = \? LIMIT 1/);
+  assert.match(cloudflare, /UPDATE devices SET status = 'logged_out', last_ping_at = CASE WHEN last_ping_at >= \? THEN last_ping_at \+ 1 ELSE \? END WHERE id = \? AND license_id = \? AND hwid = \? AND status = 'active' AND last_ping_at = \? RETURNING id/);
+  assert.match(cloudflare, /args: \[now, now, claim\.device, claim\.license, claim\.hwid, claim\.generation\]/);
+  assert.match(cloudflare, /crypto\.timingSafeEqual\(supplied, expected\)/);
   assert.match(cloudflare, /WHERE license_id = \? AND status = 'active'/);
   assert.match(cloudflare, /DELETE FROM devices WHERE license_id = \? AND status != 'blocked'/);
 });

@@ -144,6 +144,87 @@ class LogoutLifecycleTests(unittest.TestCase):
         self.assertEqual(send.call_count, 2)
         self.assertEqual(send.call_args.args[0].get_header("Authorization"), "Bearer " + "B" * 43)
 
+    def test_ed25519_signed_cloudflare_lx2_capture_and_v2_only_logout(self):
+        import base64
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import ed25519
+        from licenx.config import SDKConfig
+        from licenx.server import ServerCommunicator
+
+        signing_key = ed25519.Ed25519PrivateKey.generate()
+        trusted_pem = signing_key.public_key().public_bytes(
+            serialization.Encoding.PEM, serialization.PublicFormat.SubjectPublicKeyInfo
+        ).decode("ascii")
+        communicator = ServerCommunicator(SDKConfig(
+            server_url="https://licenx.test", app_name="test-app",
+            app_version="1.0.0", public_key_pem=trusted_pem,
+        ))
+        claims = base64.urlsafe_b64encode(
+            b'{"v":2,"purpose":"cf-device-logout"}'
+        ).decode("ascii").rstrip("=")
+        proof = "lx2." + claims + "." + "A" * 43
+        renewed = "lx2." + claims + "." + "B" * 43
+
+        def signed(payload):
+            signature = signing_key.sign(
+                communicator.canonical_json(payload).encode("utf-8")
+            )
+            return dict(payload, signature=base64.b64encode(signature).decode("ascii"))
+
+        login_data = signed({
+            "valid": True, "nonce": "N" * 32, "request_app": "test-app",
+            "license_key": "LIC-TEST", "hwid": "HWID-TEST",
+            "device_logout_proof": proof,
+        })
+        with patch("licenx.server.secrets.token_urlsafe", return_value="N" * 32), \
+             patch.object(communicator, "_http_post", return_value=(200, login_data)):
+            accepted, status, public_result = communicator.validate_license(
+                "LIC-TEST", "HWID-TEST", {},
+            )
+        self.assertTrue(accepted)
+        self.assertEqual(status, 200)
+        self.assertNotIn("device_logout_proof", public_result)
+        self.assertEqual(communicator._logout_proof, proof)
+        self.assertEqual(communicator._logout_proof_session, ("LIC-TEST", "HWID-TEST"))
+
+        ping_data = signed({
+            "valid": True, "status": "active", "nonce": "N" * 32,
+            "device_logout_proof": renewed,
+        })
+        with patch("licenx.server.secrets.token_urlsafe", return_value="N" * 32), \
+             patch.object(communicator, "_http_post", return_value=(200, ping_data)):
+            active, public_ping = communicator.ping_heartbeat(
+                "LIC-TEST", "HWID-TEST",
+            )
+        self.assertTrue(active)
+        self.assertNotIn("device_logout_proof", public_ping)
+        self.assertEqual(communicator._logout_proof, renewed)
+
+        response = MagicMock()
+        response.getcode.return_value = 200
+        response.__enter__.return_value = response
+        with patch("licenx.server.urllib.request.urlopen", return_value=response) as send:
+            self.assertTrue(communicator.send_logout("LIC-TEST", "HWID-TEST"))
+        self.assertEqual(send.call_args.args[0].get_header("Authorization"),
+                         "Bearer " + renewed)
+        self.assertIsNone(communicator._logout_proof)
+
+        malformed = signed({
+            "valid": True, "nonce": "N" * 32, "request_app": "test-app",
+            "license_key": "LIC-TEST", "hwid": "HWID-TEST",
+            "device_logout_proof": "lx2.bad!.invalid",
+        })
+        with patch("licenx.server.secrets.token_urlsafe", return_value="N" * 32), \
+             patch.object(communicator, "_http_post", return_value=(200, malformed)):
+            self.assertTrue(communicator.validate_license(
+                "LIC-TEST", "HWID-TEST", {},
+            )[0])
+        self.assertIsNone(communicator._logout_proof)
+        with patch.object(communicator, "ping_heartbeat", return_value=(False, {})), \
+             patch("licenx.server.urllib.request.urlopen") as no_unsafe_fallback:
+            self.assertFalse(communicator.send_logout("LIC-TEST", "HWID-TEST"))
+            no_unsafe_fallback.assert_not_called()
+
     def test_disabling_exit_hooks_does_not_change_host_signal_handlers(self):
         with patch("licenx.logout.signal.getsignal") as get_signal, patch(
             "licenx.logout.signal.signal"

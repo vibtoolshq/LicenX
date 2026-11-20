@@ -468,7 +468,10 @@ class ServerCommunicator:
             # Extract AFTER signature and challenge verification, BEFORE
             # returning anything the host can display or persist.
             proof = data.pop("device_logout_proof", None)
-            if isinstance(proof, str) and re.fullmatch(r"[A-Za-z0-9_-]{43}", proof):
+            if (isinstance(proof, str) and re.fullmatch(
+                    r"(?:[A-Za-z0-9_-]{43}|lx2\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{43})",
+                    proof,
+            )):
                 self._logout_proof = proof
                 self._logout_proof_session = (body["license_key"], hwid)
             return True, 200, data
@@ -524,7 +527,10 @@ class ServerCommunicator:
             proof = data.pop("device_logout_proof", None)
             session = (body["license_key"], hwid)
             if (isinstance(proof, str)
-                    and re.fullmatch(r"[A-Za-z0-9_-]{43}", proof)
+                    and re.fullmatch(
+                        r"(?:[A-Za-z0-9_-]{43}|lx2\.[A-Za-z0-9_-]{1,2048}\.[A-Za-z0-9_-]{43})",
+                        proof,
+                    )
                     and (getattr(self, "_logout_proof_session", None) is None
                          or self._logout_proof_session == session)):
                 self._logout_proof = proof

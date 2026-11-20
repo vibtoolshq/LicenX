@@ -200,7 +200,9 @@ class HeartbeatRecoveryTests(unittest.TestCase):
         self.assertEqual(communicator.ping_heartbeat.call_count, 2)
         self.assertEqual(invalidations, [])
         self.assertTrue(worker._running)
-        self.assertEqual(worker._remaining_grace_seconds(), 0.0)
+        # The worker uses a virtual clock; never read the host OS clock here.
+        with patch("licenx.storage.time.monotonic", return_value=worker._offline_since + 45):
+            self.assertEqual(worker._remaining_grace_seconds(), 0.0)
 
     def test_unverified_signature_pauses_not_revokes(self):
         waits, invalidations, communicator, worker = self.run_worker(
