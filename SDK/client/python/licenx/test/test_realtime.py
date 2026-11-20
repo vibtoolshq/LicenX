@@ -602,5 +602,63 @@ class RealtimeSdkTests(unittest.TestCase):
             self.worker.stop()
 
 
+    def test_clean_wss_close_starts_bounded_grace_without_ui_logout(self):
+        self.storage.offline_grace_seconds = 20
+        invalidated = Mock()
+        self.storage.on_invalidated = invalidated
+        snap = signed({
+            "type": "license.snapshot", "app_id": "app-one",
+            "license_id": "lic-one", "device_id": "dev-one",
+            "valid": True, "version": 4,
+            "server_time": self.worker._server_now_ms(),
+        }, self.key)
+
+        class ClosingSocket(FakeWebSocket):
+            def recv_data(self, control_frame=False):
+                return FakeWebSocketModule.ABNF.OPCODE_CLOSE, b""
+
+        socket = ClosingSocket([snap])
+        with patch.object(self.worker, "_post_ticket", return_value=("A" * 43, 200)):
+            self.worker._run_connection(FakeWebSocketModule(socket))
+        self.assertTrue(socket.closed)
+        self.assertEqual(self.storage.get_realtime_state(), "OFFLINE_GRACE")
+        self.assertTrue(self.storage.is_authorized())
+        first_disconnection = self.storage._offline_since
+        self.assertIsNotNone(first_disconnection)
+        with patch("licenx.storage.time.monotonic", return_value=first_disconnection + 10):
+            self.storage.set_realtime_connected(False)
+            self.assertEqual(self.storage._offline_since, first_disconnection)
+        client = XLicenseClient.__new__(XLicenseClient)
+        client.config = self.config
+        client.storage = self.storage
+        client._authenticated = True
+        with patch("licenx.storage.time.monotonic", return_value=first_disconnection + 20):
+            self.assertEqual(self.storage.get_realtime_state(), "OFFLINE_GRACE")
+            self.assertEqual(client.get_connection_state(), "PAUSED_UNVERIFIED")
+            self.assertFalse(client.is_authenticated())
+            self.assertTrue(client.has_login_session())
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
+        invalidated.assert_not_called()
+        with patch.object(self.communicator, "ping_heartbeat", return_value=(
+            True, {"valid": True, "status": "active",
+                   "server_time": int(time.time() * 1000)},
+        )):
+            self.assertTrue(self.worker._signed_check())
+        self.assertTrue(self.storage.is_authorized())
+        self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
+        invalidated.assert_not_called()
+
+    def test_missing_websocket_dependency_preserves_http_permission_boundary(self):
+        with patch.dict(sys.modules, {"websocket": None}):
+            self.worker._run()
+        self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
+        self.assertTrue(self.storage.is_authorized())
+        self.storage.pause_for_signed_reverification()
+        with patch.dict(sys.modules, {"websocket": None}):
+            self.worker._run()
+        self.assertEqual(self.storage.get_realtime_state(), "PAUSED_UNVERIFIED")
+        self.assertFalse(self.storage.is_authorized())
+
+
 if __name__ == "__main__":
     unittest.main()

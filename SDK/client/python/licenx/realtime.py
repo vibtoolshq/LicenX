@@ -344,7 +344,12 @@ class RealtimeLicenseWorker:
                 if opcode == websocket.ABNF.OPCODE_PING:
                     continue  # Automatic pong processing is transport-only.
                 if opcode == websocket.ABNF.OPCODE_CLOSE:
-                    return  # _run will use signed HTTPS fallback and retry.
+                    # A clean socket close is a transport outage, not a
+                    # terminal revocation. Bound grace immediately; the
+                    # fallback HTTP worker wakes without blocking the UI.
+                    if not self._stop_event.is_set():
+                        self.storage.set_realtime_connected(False)
+                    return
                 if opcode != websocket.ABNF.OPCODE_TEXT:
                     raise _RealtimeSecurityError("REALTIME_FRAME_INVALID")
                 if isinstance(raw, bytes):
@@ -378,7 +383,11 @@ class RealtimeLicenseWorker:
         try:
             import websocket  # optional: pip install 'licenx[realtime]'
         except ImportError:
-            self.storage._set_realtime_state("HTTP_FALLBACK")
+            # No optional websocket-client dependency: preserve the signed
+            # HTTP path, but never display a healthy fallback while paused.
+            state = ("HTTP_FALLBACK" if self.storage.is_authorized()
+                     else "PAUSED_UNVERIFIED")
+            self.storage._set_realtime_state(state)
             return  # Signed HTTP worker remains active; no unsafe fallback.
         attempt = 0
         while not self._stop_event.is_set():

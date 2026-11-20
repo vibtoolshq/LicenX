@@ -61,7 +61,7 @@ class SignedHttpRecoveryTests(unittest.TestCase):
         self._run_failure(ssl.SSLCertVerificationError("SECRET EXCEPTION"), (
             True, {"valid":True, "status":"active", "server_time":1700000000000},
         ))
-        self.assertEqual(self.storage.get_realtime_state(), "RECONNECTING")
+        self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
         self.assertFalse(self.storage._realtime_connected, "stale WSS must not suppress HTTPS monitoring")
         self.assertTrue(self.storage._realtime_wake.is_set())
         self.assertTrue(self.storage._running)
@@ -136,7 +136,7 @@ class SignedHttpRecoveryTests(unittest.TestCase):
         ):
             self.worker._run()
         self.assertEqual(attempt.call_count, 2)
-        self.assertEqual(self.storage.get_realtime_state(), "RECONNECTING")
+        self.assertEqual(self.storage.get_realtime_state(), "HTTP_FALLBACK")
         self.assertNotIn("SECRET", str(self.communicator.get_diagnostics()))
 
     def test_hw_id_cache_is_stable_when_synthetic_components_unchanged(self):

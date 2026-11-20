@@ -245,9 +245,12 @@ class XLicenseClient:
 
     def get_connection_state(self) -> str:
         """HTTP_ONLY / CONNECTED / RECONNECTING / OFFLINE_GRACE / PAUSED_UNVERIFIED / INVALIDATED."""
-        return self.storage.get_realtime_state() if getattr(
-            getattr(self, "config", None), "useWebSocket", False
-        ) else "HTTP_ONLY"
+        if not getattr(getattr(self, "config", None), "useWebSocket", False):
+            return "HTTP_ONLY"
+        # UI-only state reads must observe the same monotonic grace deadline
+        # as protected operations; this check never extends authorization.
+        self.storage.is_authorized()
+        return self.storage.get_realtime_state()
 
     def is_valid(self) -> bool:
         """Alias for is_authenticated()"""

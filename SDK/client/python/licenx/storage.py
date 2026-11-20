@@ -310,9 +310,27 @@ class BackgroundLicenseWorker:
             self._realtime_wake.set()
             return True
         with self._state_lock:
+            was_connected = self._realtime_connected
+            prior_state = self._realtime_state
             self._realtime_connected = False
+            # A normal socket CLOSE has no signed terminal authority, but it
+            # must begin the bounded offline deadline just like a failed HTTP
+            # heartbeat. A fresh verified HTTP fallback is a distinct state.
+            if (was_connected or prior_state in ("CONNECTING", "RECONNECTING")) and self._offline_since is None:
+                self._offline_since = time.monotonic()
+            offline = self._offline_since is not None
+            if offline:
+                elapsed = time.monotonic() - self._offline_since
+                if (elapsed < 0 or self.offline_grace_seconds == 0
+                        or elapsed >= self.offline_grace_seconds):
+                    self._realtime_paused = True
             paused = self._realtime_paused
-        self._set_realtime_state("PAUSED_UNVERIFIED" if paused else "RECONNECTING")
+            verified_fallback = (prior_state == "HTTP_FALLBACK"
+                                 and not offline and not paused)
+        state = ("PAUSED_UNVERIFIED" if paused else
+                 "OFFLINE_GRACE" if offline else
+                 "HTTP_FALLBACK" if verified_fallback else "RECONNECTING")
+        self._set_realtime_state(state)
         self._realtime_wake.set()
         return True
 
@@ -364,7 +382,9 @@ class BackgroundLicenseWorker:
             first = False
             self._realtime_wake.wait(timeout=interval)
             self._realtime_wake.clear()
-            if not self._running or self._stop_event.is_set():
+            if (not self._running or self._stop_event.is_set()
+                    or (self._thread is not None
+                        and self._thread is not threading.current_thread())):
                 break
             with self._state_lock:
                 connected = self._realtime_connected
@@ -378,7 +398,11 @@ class BackgroundLicenseWorker:
                 )
             except Exception:
                 valid, data = False, {"code": "SERVER_UNREACHABLE"}
-            if not self._running or self._stop_event.is_set():
+            if (not self._running or self._stop_event.is_set()
+                    or (self._thread is not None
+                        and self._thread is not threading.current_thread())):
+                # A delayed HTTPS result from a replaced monitor must never
+                # grant or revoke permissions for a new login/session.
                 break
             self.realtime_signed_heartbeat(valid, data)
 

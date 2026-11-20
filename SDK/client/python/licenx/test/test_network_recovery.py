@@ -232,6 +232,90 @@ class HeartbeatRecoveryTests(unittest.TestCase):
             self.run_worker([(True, {"valid": True})], callback=callback)
         self.assertNotIn("SECRET", out.getvalue())
 
+    def test_opt_in_multi_hour_outage_retries_and_signed_recovery(self):
+        """Virtual four-hour outage: never end UI session or extend operation grace."""
+        from licenx.client import XLicenseClient
+        clock = [100.0]
+        waits = []
+        invalidated = Mock()
+        signed_http = Mock()
+        signed_http.ping_heartbeat.side_effect = [
+            (False, {"code": "SERVER_UNREACHABLE"}),
+            (False, {"code": "TIMEOUT"}),
+            (False, {"code": "SSL_ERROR"}),
+            (False, {"code": "SERVER_UNREACHABLE"}),
+            (False, {"code": "HEARTBEAT_SIGNATURE_FAILED"}),
+            (True, {"valid": True, "status": "active",
+                    "server_time": 1732000000000}),
+        ]
+        worker = BackgroundLicenseWorker(
+            "four-hour-outage", offline_grace_seconds=20,
+            on_invalidated=invalidated,
+        )
+        worker.enable_realtime()
+        worker._server_communicator = signed_http
+        worker._current_license_key = "SYNTHETIC-KEY"
+        worker._current_hwid = "SYNTHETIC-HWID"
+        worker._running = True
+        client = XLicenseClient.__new__(XLicenseClient)
+        client.config = SDKConfig(useWebSocket=True)
+        client.storage = worker
+        client._authenticated = True
+        client._current_key = "SYNTHETIC-KEY"
+
+        def wait(timeout):
+            waits.append(timeout)
+            clock[0] += timeout
+            if len(waits) == 3:
+                clock[0] += 4 * 3600
+            if len(waits) == 4:
+                self.assertTrue(client.has_login_session())
+                self.assertFalse(client.is_authenticated())
+                self.assertEqual(client.get_connection_state(), "PAUSED_UNVERIFIED")
+            if len(waits) > 6:
+                worker._stop_event.set()
+            return False
+
+        worker._realtime_wake.wait = wait
+        with patch("licenx.storage.time.monotonic", side_effect=lambda: clock[0]):
+            worker._realtime_worker_loop()
+            self.assertEqual(waits, [2.0, 30, 30, 30, 30, 30, 30])
+            self.assertTrue(client.has_login_session())
+            self.assertTrue(client.is_authenticated())
+            self.assertEqual(client.get_connection_state(), "HTTP_FALLBACK")
+        self.assertEqual(signed_http.ping_heartbeat.call_count, 6)
+        invalidated.assert_not_called()
+        worker.stop_monitoring()
+
+    def test_realtime_monitor_discards_old_session_late_signed_response(self):
+        import threading
+        on_success = Mock()
+        worker = BackgroundLicenseWorker(
+            "replaced-session", offline_grace_seconds=0,
+            on_heartbeat_success=on_success,
+        )
+        worker.enable_realtime()
+        worker._running = True
+        worker._current_license_key = "OLD-KEY"
+        worker._current_hwid = "OLD-HWID"
+        worker.realtime_signed_heartbeat(False, {"code": "TIMEOUT"})
+        communicator = Mock()
+
+        def stale_signed_reply(*_args):
+            worker._thread = threading.Thread()  # replacement monitor owns SDK
+            return True, {"valid": True, "status": "active",
+                          "server_time": 1732000000000}
+
+        communicator.ping_heartbeat.side_effect = stale_signed_reply
+        worker._server_communicator = communicator
+        worker._realtime_wake.wait = Mock(return_value=False)
+        worker._realtime_worker_loop()
+        communicator.ping_heartbeat.assert_called_once()
+        on_success.assert_not_called()
+        self.assertFalse(worker.is_authorized())
+        self.assertEqual(worker.get_realtime_state(), "PAUSED_UNVERIFIED")
+        worker.stop_monitoring()
+
 
 class BoundedTransportTests(unittest.TestCase):
     def setUp(self):
