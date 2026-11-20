@@ -141,6 +141,8 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # The previous disposable step recreates PostgreSQL/app; wait for healthy before auditing.
+          docker compose --profile standalone-https up --detach --no-deps --no-build --wait --wait-timeout 120 app
           app_before="$(docker compose --profile standalone-https ps -q app)"
           pg_before="$(docker compose --profile standalone-https ps -q postgres)"
           caddy_before="$(docker compose --profile standalone-https ps -q caddy)"
