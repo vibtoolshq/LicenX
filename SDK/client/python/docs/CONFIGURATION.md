@@ -53,7 +53,7 @@ Signed revoked/expired/reset/unbound denials, invalid RSA/Ed25519 signature, TLS
 
 **Security / production limits:** SDK WS-03 uses the existing WS-02 server ticket contract and does not change it. WS-02 global/per-App switches default OFF, tickets are Node-process-local, and Cloudflare is HTTP-only. Live WSS proxy, rolling deployment and capacity verification are WS-05 gates. The server-side `keep_login_on_network_error` Boolean exists in the app/API and signed WSS snapshot, but the current Edit Application modal does not expose that separate flag. The SDK stores signed metadata, while host GUI continuity is implemented by the opted-in worker and must not be mistaken for authorization. UI-continuity changes are opt-in through this new SDK only.
 
-## Signed legacy Keep Login metadata (current source v1.2.6)
+## Signed legacy Keep Login metadata (current source v1.2.7)
 
 With `useWebSocket=True`, the server's `keep_login_on_network_error` Boolean is present in the signed, device-bound `license.snapshot`; missing policy defaults OFF, invalid type or tampering fails verification. **Current behavior is important:** `BackgroundLicenseWorker.apply_signed_realtime_policy()` stores the Boolean, but UI-continuity after a transient outage **does not branch on that stored Boolean** in this source. Tests explicitly confirm ON and OFF both retain an in-memory UI hint while protected operations are paused when proof/grace is insufficient (`test_realtime.py:test_signed_legacy_policy_flag_does_not_change_ui_continuity`). A signed App change can trigger HTTPS revalidation and reconnect.
 
@@ -66,7 +66,7 @@ Actual GUI persistence and background send queue pausing remain the host applica
 
 See `deploy/WS05_RELEASE_GATE.md` for explicit rollout/rollback safety requirements.
 
-## Complete `SDKConfig` field/default matrix — current source 1.2.6
+## Complete `SDKConfig` field/default matrix — current source 1.2.7
 
 The table is the dataclass definition in `SDK/client/python/licenx/config.py:SDKConfig`. `min_version` is *server/application minimum-version metadata*, **not** the actual running client `app_version` required for signed validation.
 

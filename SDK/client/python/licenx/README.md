@@ -1,6 +1,6 @@
 # LicenX Python SDK — `licenx`
 
-**Primary Python client SDK for LicenX applications.** Version **1.2.6** (current source version; requires a compatible hardened Node/VPS server); Python **3.8+**. Package/install/import name: `licenx`. Repository overview: the root `README.md` in the trusted LicenX source checkout (not a file automatically installed next to this wheel metadata).
+**Primary Python client SDK for LicenX applications.** Version **1.2.7** (current source version; requires a compatible hardened Node/VPS server); Python **3.8+**. Package/install/import name: `licenx`. Repository overview: the root `README.md` in the trusted LicenX source checkout (not a file automatically installed next to this wheel metadata).
 
 > **Single supported SDK:** `licenx` (installable from a verified wheel or the Admin's primary `licenx-python-sdk.zip` source kit). The reference SDK is retired. PyPI publication is not automatic.
 

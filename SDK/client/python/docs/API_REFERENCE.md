@@ -29,7 +29,7 @@ if result.success:
 
 Full integration docs: [English](../licenx/docs/GUIDE_EN.md) · [বাংলা](../licenx/docs/GUIDE_BN.md).
 
-## Complete package-root export inventory (source v1.2.6)
+## Complete package-root export inventory (source v1.2.7)
 
 `licenx/__init__.py` lists **12** public names in `__all__`. The following aliases are the same underlying classes, not independent implementations.
 
