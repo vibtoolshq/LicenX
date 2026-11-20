@@ -22,6 +22,18 @@ _MAX_BACKOFF = 60.0
 _SNAPSHOT_WAIT = 10.0
 
 
+def _verified_wss_context():
+    """Strict server TLS: keep OS roots and add the realtime extra's CA bundle."""
+    context = ssl.create_default_context(purpose=ssl.Purpose.SERVER_AUTH)
+    try:
+        import certifi  # Only needed when the optional WSS transport is used.
+        context.load_verify_locations(cafile=certifi.where())
+    except (ImportError, OSError, ValueError, TypeError):
+        # Never connect with reduced verification if bundled roots are missing.
+        raise ssl.SSLError("REALTIME_CA_BUNDLE_UNAVAILABLE") from None
+    return context
+
+
 class _RealtimeSecurityError(Exception):
     """Internal constant-code denial; never expose remote exception text."""
 
@@ -257,10 +269,19 @@ class RealtimeLicenseWorker:
             if self._signed_check() and self.storage.enter_signed_http_fallback():
                 return "HTTP_FALLBACK"
             return None
+        socket_url = self._socket_url()
+        tls_options = (
+            {"sslopt": {
+                "context": _verified_wss_context(),
+                "cert_reqs": ssl.CERT_REQUIRED,
+                "check_hostname": True,
+            }} if socket_url.startswith("wss://") else {}
+        )
         socket = websocket.create_connection(
-            self._socket_url(), timeout=8,
+            socket_url, timeout=8,
             header=["Authorization: Bearer " + ticket],
             suppress_origin=True, enable_multithread=True,
+            **tls_options,
         )
         with self._socket_lock:
             if self._stop_event.is_set():

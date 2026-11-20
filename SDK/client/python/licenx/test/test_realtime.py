@@ -2,6 +2,7 @@
 import base64
 import json
 import os
+import ssl
 import sys
 import tempfile
 import threading
@@ -277,10 +278,29 @@ class RealtimeSdkTests(unittest.TestCase):
         self.assertEqual(mod.calls[0][0], "wss://licensing.example.test/api/realtime")
         self.assertEqual(mod.calls[0][1]["header"], ["Authorization: Bearer " + "A"*43])
         self.assertTrue(mod.calls[0][1]["suppress_origin"])
+        tls = mod.calls[0][1]["sslopt"]
+        self.assertEqual(tls["cert_reqs"], ssl.CERT_REQUIRED)
+        self.assertTrue(tls["check_hostname"])
+        self.assertIsInstance(tls["context"], ssl.SSLContext)
+        self.assertEqual(tls["context"].verify_mode, ssl.CERT_REQUIRED)
+        self.assertTrue(tls["context"].check_hostname)
         self.assertEqual(sock.sent, [{"type": "license.hello"}])
         signed_http.assert_called_once_with("TEST-LICENSE", "HWID-TEST")
         self.assertTrue(sock.closed)
         self.assertEqual(self.storage.get_realtime_state(), "CONNECTED")
+
+    def test_loopback_ws_does_not_require_certifi_or_tls_options(self):
+        sock = FakeWebSocket([{"type": "error", "code": "REALTIME_RESTORE_IN_PROGRESS"}])
+        mod = FakeWebSocketModule(sock)
+        with patch.object(self.worker, "_post_ticket", return_value=("A" * 43, 200)), patch.object(
+            self.worker, "_socket_url", return_value="ws://localhost:3000/api/realtime"
+        ), patch.object(
+            self.worker, "_signed_check", return_value=False
+        ), patch("licenx.realtime._verified_wss_context", side_effect=AssertionError("no CA on ws")):
+            self.worker._run_connection(mod)
+        self.assertEqual(mod.calls[0][0], "ws://localhost:3000/api/realtime")
+        self.assertNotIn("sslopt", mod.calls[0][1])
+        self.assertTrue(sock.closed)
 
     def test_known_wss_control_errors_recheck_https_not_fake_snapshot(self):
         for code in ("REALTIME_RESTORE_IN_PROGRESS",

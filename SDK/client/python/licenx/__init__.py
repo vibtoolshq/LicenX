@@ -9,7 +9,7 @@ from .login import LoginManager, LoginResult
 from .logout import LogoutManager
 from .client import XLicenseClient
 
-__version__ = "1.2.7"
+__version__ = "1.2.8"
 __all__ = [
     "XLicenseClient",
     "SDKConfig",

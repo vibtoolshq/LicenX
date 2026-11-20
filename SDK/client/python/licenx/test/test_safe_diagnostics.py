@@ -75,6 +75,40 @@ class SafeDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("RAW-HWID", str(events))
         self.assertNotIn("private credential", str(events))
 
+    def test_ca_bundle_unavailable_is_redacted_and_never_opens_wss(self):
+        communicator = ServerCommunicator(SDKConfig(server_url="https://example.test"))
+        storage = SimpleNamespace(
+            _running=True,
+            pause_for_signed_reverification=Mock(return_value=True),
+            realtime_signed_heartbeat=Mock(return_value=False),
+            enter_signed_http_fallback=Mock(return_value=False),
+            set_realtime_connected=Mock(),
+            _invalidate=Mock(),
+        )
+        communicator.ping_heartbeat = Mock(return_value=(False, {"code": "HEARTBEAT_SIGNATURE_FAILED"}))
+        worker = RealtimeLicenseWorker(
+            communicator, storage, "SECRET-LICENSE", "RAW-HWID", {"app_id": "app-one"}
+        )
+        fake_socket = SimpleNamespace(create_connection=Mock())
+        with patch.dict(sys.modules, {"websocket": fake_socket}), patch.object(
+            worker, "_post_ticket", return_value=("A" * 43, 200)
+        ), patch(
+            "licenx.realtime._verified_wss_context",
+            side_effect=ssl.SSLError("REALTIME_CA_BUNDLE_UNAVAILABLE")
+        ), patch.object(
+            worker, "_retry_wait", side_effect=lambda _: worker._stop_event.set()
+        ):
+            worker._run()
+        fake_socket.create_connection.assert_not_called()
+        storage.pause_for_signed_reverification.assert_called_once()
+        communicator.ping_heartbeat.assert_called_once()
+        storage._invalidate.assert_not_called()
+        record = communicator.get_diagnostics()[-1]
+        self.assertEqual(record["stage"], "tls_handshake")
+        self.assertEqual(record["code"], "REALTIME_TLS_ERROR")
+        self.assertNotIn("SECRET-LICENSE", str(record))
+        self.assertNotIn("RAW-HWID", str(record))
+
     def test_ticket_denial_classified_by_safe_server_code(self):
         communicator = ServerCommunicator(SDKConfig(server_url="https://example.test"))
         communicator._http_post = Mock(return_value=(404, {"code": "REALTIME_DISABLED"}))
