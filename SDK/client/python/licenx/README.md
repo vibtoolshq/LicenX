@@ -1,6 +1,6 @@
 # LicenX Python SDK — `licenx`
 
-**Primary Python client SDK for LicenX applications.** Version **1.2.8** (current source version; requires a compatible hardened Node/VPS server); Python **3.8+**. Package/install/import name: `licenx`. Repository overview: the root `README.md` in the trusted LicenX source checkout (not a file automatically installed next to this wheel metadata).
+**Primary Python client SDK for LicenX applications.** Version **1.2.9** (current source version; requires a compatible hardened Node/VPS server); Python **3.8+**. Package/install/import name: `licenx`. Repository overview: the root `README.md` in the trusted LicenX source checkout (not a file automatically installed next to this wheel metadata).
 
 > **Single supported SDK:** `licenx` (installable from a verified wheel or the Admin's primary `licenx-python-sdk.zip` source kit). The reference SDK is retired. PyPI publication is not automatic.
 
@@ -12,7 +12,7 @@ From the LicenX repository root:
 python -m pip install ./SDK/client/python/licenx
 ```
 
-Or run `python -m pip install .` within this package directory. The package depends on `cryptography>=41.0.0` for trusted RSA/Ed25519 response verification; optional `requests` transport has a standard-library `urllib` fallback. For opt-in secure WebSocket use `pip install 'licenx[realtime]==1.2.8'`; this extra installs `websocket-client` and `certifi`. WSS uses strict hostname/certificate verification with system roots plus certifi roots, and falls back only to freshly signed HTTPS validation if the trusted CA bundle is missing or unreadable. The release workflow can attach wheel and source distribution files to GitHub Releases; **PyPI publication requires an explicitly authorized release request and passing release workflow**.
+Or run `python -m pip install .` within this package directory. The package depends on `cryptography>=41.0.0` for trusted RSA/Ed25519 response verification; optional `requests` transport has a standard-library `urllib` fallback. For opt-in secure WebSocket use `pip install 'licenx[realtime]==1.2.9'`; this extra installs `websocket-client` and `certifi`. WSS uses strict hostname/certificate verification with system roots plus certifi roots, and falls back only to freshly signed HTTPS validation if the trusted CA bundle is missing or unreadable. The release workflow can attach wheel and source distribution files to GitHub Releases; **PyPI publication requires an explicitly authorized release request and passing release workflow**.
 
 ## Configuration
 
